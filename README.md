@@ -5,6 +5,10 @@
 
 A simple and efficient bridge to forward messages between a Meshtastic mesh network and a Telegram group. This allows seamless communication between users on both platforms.
 
+## Demo
+
+![example](https://github.com/user-attachments/assets/d4002852-596d-4027-b2ff-7d4f72bc3457)
+
 ## Key Features
 
 -   **Bidirectional Forwarding:** Messages are relayed from Meshtastic to Telegram and vice versa.
