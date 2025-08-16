@@ -97,9 +97,16 @@ def on_meshtastic_receive(packet, interface):
     if packet.get("to") == MESHTASTIC_BROADCAST_ID:
         return
 
+    decoded_packet = packet.get("decoded", {})
+    packet_type = decoded_packet.get("portnum", {})
+
+    # Ignore if not a text message
+    if packet_type != "TEXT_MESSAGE_APP":
+        return
 
     # Extract message text
-    text = packet.get("decoded", {}).get("payload", b"").decode(errors="ignore").strip()
+    text = decoded_packet.get("payload", b"").decode(errors="ignore").strip()
+
     if not text:
         return
 
