@@ -1,0 +1,24 @@
+[Unit]
+Description=Meshgram Telegram<->Meshtastic bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshgram
+Group=meshgram
+WorkingDirectory=/opt/meshgram
+EnvironmentFile=/opt/meshgram/.env
+ExecStart=/opt/meshgram/.venv/bin/python /opt/meshgram/main.py
+Restart=on-failure
+RestartSec=5
+
+# Hardening (optional but recommended)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/meshgram
+
+[Install]
+WantedBy=multi-user.target

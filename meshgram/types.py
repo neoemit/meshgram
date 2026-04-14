@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
+
+if TYPE_CHECKING:
+    from .reply_links import ReplyLinkRegistry
+
+
+@dataclass(slots=True)
+class TelegramMessageEvent:
+    chat_id: int
+    message_id: int
+    reply_to_message_id: Optional[int]
+    text: Optional[str]
+    text_source: Optional[str]
+    is_from_bot: bool
+    sender_display_name: str
+    has_media: bool
+    raw_message: Any = None
+
+
+@dataclass(slots=True)
+class MeshtasticTextEvent:
+    from_id: Optional[str]
+    to_id: Optional[str]
+    packet_id: Optional[int]
+    reply_id: Optional[int]
+    channel_index: int
+    text: str
+    sender_label: str
+    raw_packet: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SendTelegramAction:
+    chat_id: int
+    text: str
+    reply_to_message_id: Optional[int] = None
+    bridge_source_meshtastic_packet_id: Optional[int] = None
+
+
+@dataclass(slots=True)
+class SendMeshtasticAction:
+    text: str
+    destination_id: Optional[Union[int, str]] = None
+    channel_index: int = 0
+    reply_id: Optional[int] = None
+    want_ack: bool = False
+    delay_ms: int = 0
+    bridge_source_telegram_chat_id: Optional[int] = None
+    bridge_source_telegram_message_id: Optional[int] = None
+    bridge_canonical_for_telegram_message: bool = False
+
+
+PluginAction = Union[SendTelegramAction, SendMeshtasticAction]
+
+
+@dataclass(slots=True)
+class PluginContext:
+    settings: "MeshgramSettings"
+    telegram_group_id: int
+    meshtastic_payload_limit: int
+    local_node_id: Optional[str]
+    reply_links: Optional["ReplyLinkRegistry"] = None
+
+
+class Plugin(Protocol):
+    name: str
+
+    async def on_startup(self, context: PluginContext) -> list[PluginAction]:
+        ...
+
+    async def on_telegram_message(
+        self,
+        event: TelegramMessageEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        ...
+
+    async def on_meshtastic_message(
+        self,
+        event: MeshtasticTextEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        ...

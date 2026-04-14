@@ -1,0 +1,6 @@
+services:
+  meshgram:
+    devices:
+      - "${MESH_DEVICE:?Set MESH_DEVICE in .env}:${MESH_DEVICE:?Set MESH_DEVICE in .env}"
+    group_add:
+      - dialout

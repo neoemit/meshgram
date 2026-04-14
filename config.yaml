@@ -1,0 +1,56 @@
+runtime:
+  log_level: INFO
+
+meshtastic:
+  bridge_channel: 1
+  node_name_overrides: {}
+  # Example:
+  # node_name_overrides:
+  #   "!1234abcd": "RTR-A"
+  connection:
+    mode: tcp
+    no_nodes: true
+    # serial_device: null
+    tcp_host: host.docker.internal
+    tcp_port: 4403
+
+telegram:
+  include_captions: true
+  sender_prefix_template: "[TG:{display_name}] {message}"
+
+chunking:
+  enabled: true
+  prefix_template: "({index}/{total}) "
+  inter_chunk_delay_ms: 150
+
+plugins:
+  - name: bridge
+    enabled: true
+    settings:
+      channel: 1
+      reply_link_ttl_hours: 24
+
+  - name: ping_pong
+    enabled: true
+    settings:
+      keyword_responses:
+        Ping: "Pong"
+        Ack: "Ack"
+      channels: [0, 1]
+
+  - name: dm_http_command
+    enabled: false
+    settings:
+      timeout_seconds: 8
+      error_message: "Unable to fetch {command}"
+      commands:
+        BATTERY:
+          url: "http://${SOLAR_HOST}/battery/"
+          type: "json"
+          value: "data.inv1.soc"
+          msg: "{value}%"
+          auth:
+            type: bearer
+            token_env: SOLAR_TOKEN
+          headers:
+            X-Api-Key: "${SOLAR_API_KEY}"

@@ -1,0 +1,7 @@
+services:
+  meshgram:
+    environment:
+      MESH_MODE: "${MESH_MODE:-tcp}"
+      MESH_HOST: "${MESH_HOST:-host.docker.internal}"
+      MESH_PORT: "${MESH_PORT:-4403}"
+      MESH_NO_NODES: "${MESH_NO_NODES:-true}"
