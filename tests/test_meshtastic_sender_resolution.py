@@ -37,6 +37,23 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
         self.assertEqual(event.from_id, "!1234abcd")
         self.assertEqual(event.sender_label, "!1234abcd:305441741")
 
+    def test_build_event_parses_string_packet_id(self):
+        app = MeshgramApp(self._settings())
+        packet = {
+            "fromId": "!1234abcd",
+            "channel": 1,
+            "id": "123456",
+            "decoded": {
+                "portnum": "TEXT_MESSAGE_APP",
+                "payload": b"hello",
+            },
+        }
+
+        event = app._build_meshtastic_event(packet)
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.packet_id, 123456)
+
     def test_sender_label_uses_override_without_node_db(self):
         settings = self._settings()
         settings.meshtastic.node_name_overrides = {"!1234abcd": "FieldNode"}

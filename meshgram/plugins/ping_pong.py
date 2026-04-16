@@ -60,6 +60,9 @@ class PingPongPlugin(BasePlugin):
         event: MeshtasticTextEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
+        if event.packet_id is None:
+            return []
+
         allowed_channels = self._allowed_channels()
         if allowed_channels is not None and event.channel_index not in allowed_channels:
             return []

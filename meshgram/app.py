@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Any, Optional
 
 from meshtastic import BROADCAST_ADDR
@@ -26,6 +27,7 @@ from .types import (
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_MESHTASTIC_PAYLOAD_LIMIT = 233
+MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 
 try:
     from meshtastic.protobuf import mesh_pb2
@@ -277,6 +279,7 @@ class MeshgramApp:
             ttl_hours=_get_bridge_reply_ttl_hours(settings),
         )
         self._mesh_connect_task: Optional[asyncio.Task[None]] = None
+        self._seen_meshtastic_packet_ids: dict[int, float] = {}
 
     async def _post_init(self, app: Application) -> None:
         self.loop = asyncio.get_running_loop()
@@ -388,11 +391,32 @@ class MeshgramApp:
         if event is None or self.loop is None:
             return
 
+        if event.packet_id is not None and self._is_duplicate_meshtastic_packet_id(event.packet_id):
+            return
+
         future = asyncio.run_coroutine_threadsafe(
             self._dispatch_meshtastic_message(event),
             self.loop,
         )
         future.add_done_callback(_log_future_exception)
+
+    def _is_duplicate_meshtastic_packet_id(self, packet_id: int) -> bool:
+        now = time.monotonic()
+        expiry_cutoff = now - MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS
+
+        stale_packet_ids = [
+            seen_packet_id
+            for seen_packet_id, seen_time in self._seen_meshtastic_packet_ids.items()
+            if seen_time < expiry_cutoff
+        ]
+        for stale_packet_id in stale_packet_ids:
+            self._seen_meshtastic_packet_ids.pop(stale_packet_id, None)
+
+        if packet_id in self._seen_meshtastic_packet_ids:
+            return True
+
+        self._seen_meshtastic_packet_ids[packet_id] = now
+        return False
 
     def _build_meshtastic_event(self, packet: dict[str, Any]) -> Optional[MeshtasticTextEvent]:
         decoded = packet.get("decoded", {})
@@ -425,9 +449,7 @@ class MeshgramApp:
         except (TypeError, ValueError):
             channel_index = 0
 
-        packet_id = packet.get("id")
-        if not isinstance(packet_id, int):
-            packet_id = None
+        packet_id = _extract_optional_int(packet.get("id"))
 
         reply_id = _extract_optional_int(decoded.get("replyId"))
         if reply_id is None:

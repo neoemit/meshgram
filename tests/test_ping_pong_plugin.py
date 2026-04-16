@@ -102,6 +102,26 @@ class PingPongPluginTests(unittest.TestCase):
         actions = asyncio.run(self.plugin.on_meshtastic_message(event, context))
         self.assertEqual(actions, [])
 
+    def test_requires_packet_id_for_reply_behavior(self):
+        event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=None,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="node",
+        )
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id=None,
+        )
+
+        actions = asyncio.run(self.plugin.on_meshtastic_message(event, context))
+        self.assertEqual(actions, [])
+
     def test_channel_allowlist(self):
         plugin = PingPongPlugin({"response_text": "Pong", "channels": [0, 1]})
         context = PluginContext(
