@@ -47,6 +47,8 @@ class BridgePluginTests(unittest.TestCase):
         settings.chunking.prefix_template = "({index}/{total}) "
         settings.chunking.inter_chunk_delay_ms = 150
         settings.chunking.max_chunk_bytes = 160
+        settings.chunking.broadcast_max_chunk_bytes = 120
+        settings.chunking.broadcast_min_inter_chunk_delay_ms = 2500
         settings.chunking.payload_safety_margin_bytes = 16
         settings.chunking.wait_for_ack = True
         settings.chunking.ack_timeout_ms = 20000
@@ -218,7 +220,7 @@ class BridgePluginTests(unittest.TestCase):
         )
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=28)))
         self.assertGreater(len(actions), 1)
-        self.assertEqual(actions[1].delay_ms, 900)
+        self.assertEqual(actions[1].delay_ms, 2500)
         self.assertEqual(actions[0].retry_max_attempts, 3)
         self.assertEqual(actions[0].retry_initial_delay_ms, 500)
         self.assertEqual(actions[0].retry_backoff_factor, 2.0)
@@ -252,7 +254,7 @@ class BridgePluginTests(unittest.TestCase):
 
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=40)))
         self.assertGreater(len(actions), 1)
-        self.assertEqual(actions[1].delay_ms, 900)
+        self.assertEqual(actions[1].delay_ms, 2500)
 
     def test_non_chunked_message_does_not_enable_ack_wait_gate(self):
         event = TelegramMessageEvent(
@@ -351,6 +353,26 @@ class BridgePluginTests(unittest.TestCase):
         self.assertGreater(len(actions), 1)
         for action in actions:
             self.assertLessEqual(utf8_len(action.text), self.plugin.DEFAULT_SAFE_MAX_CHUNK_BYTES)
+
+    def test_broadcast_profile_caps_chunk_size_with_broadcast_limit(self):
+        self.settings.chunking.max_chunk_bytes = 180
+        self.settings.chunking.broadcast_max_chunk_bytes = 90
+        self.settings.chunking.payload_safety_margin_bytes = 0
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=105,
+            reply_to_message_id=None,
+            text="x" * 260,
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=300)))
+        self.assertGreater(len(actions), 1)
+        for action in actions:
+            self.assertLessEqual(utf8_len(action.text), 90)
 
     def test_bridge_plugin_channel_setting_overrides_global_bridge_channel(self):
         plugin = BridgePlugin({"channel": 1})

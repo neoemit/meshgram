@@ -37,6 +37,8 @@ class ChunkingConfig:
     prefix_template: str = "({index}/{total}) "
     inter_chunk_delay_ms: int = 150
     max_chunk_bytes: int = 160
+    broadcast_max_chunk_bytes: int = 120
+    broadcast_min_inter_chunk_delay_ms: int = 2500
     retry_max_attempts: int = 3
     retry_initial_delay_ms: int = 500
     retry_backoff_factor: float = 2.0
@@ -226,6 +228,11 @@ def load_settings() -> MeshgramSettings:
             prefix_template=str(chunking_data.get("prefix_template", "({index}/{total}) ")),
             inter_chunk_delay_ms=max(0, _as_int(chunking_data.get("inter_chunk_delay_ms"), 150)),
             max_chunk_bytes=max(0, _as_int(chunking_data.get("max_chunk_bytes"), 160)),
+            broadcast_max_chunk_bytes=max(0, _as_int(chunking_data.get("broadcast_max_chunk_bytes"), 120)),
+            broadcast_min_inter_chunk_delay_ms=max(
+                0,
+                _as_int(chunking_data.get("broadcast_min_inter_chunk_delay_ms"), 2500),
+            ),
             retry_max_attempts=max(1, _as_int(chunking_data.get("retry_max_attempts"), 3)),
             retry_initial_delay_ms=max(0, _as_int(chunking_data.get("retry_initial_delay_ms"), 500)),
             retry_backoff_factor=max(1.0, _as_float(chunking_data.get("retry_backoff_factor"), 2.0)),

@@ -33,6 +33,8 @@ class ConfigTests(unittest.TestCase):
                       prefix_template: "({index}/{total}) "
                       inter_chunk_delay_ms: 200
                       max_chunk_bytes: 140
+                      broadcast_max_chunk_bytes: 100
+                      broadcast_min_inter_chunk_delay_ms: 3000
                       payload_safety_margin_bytes: 12
                       retry_max_attempts: 5
                       retry_initial_delay_ms: 250
@@ -90,6 +92,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.chunking.ack_timeout_ms, 9000)
             self.assertFalse(settings.chunking.abort_on_chunk_failure)
             self.assertEqual(settings.chunking.max_chunk_bytes, 140)
+            self.assertEqual(settings.chunking.broadcast_max_chunk_bytes, 100)
+            self.assertEqual(settings.chunking.broadcast_min_inter_chunk_delay_ms, 3000)
             self.assertEqual(settings.chunking.payload_safety_margin_bytes, 12)
             self.assertEqual(settings.plugins[0].settings["reactions_enabled"], True)
             self.assertEqual(settings.plugins[0].settings["missing_target_policy"], "fallback_message")

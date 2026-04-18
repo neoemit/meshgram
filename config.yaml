@@ -23,6 +23,8 @@ chunking:
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
   max_chunk_bytes: 160
+  broadcast_max_chunk_bytes: 120
+  broadcast_min_inter_chunk_delay_ms: 2500
   payload_safety_margin_bytes: 12
   retry_max_attempts: 3
   retry_initial_delay_ms: 500

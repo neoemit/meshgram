@@ -128,6 +128,8 @@ chunking:
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
   max_chunk_bytes: 160
+  broadcast_max_chunk_bytes: 120
+  broadcast_min_inter_chunk_delay_ms: 2500
   payload_safety_margin_bytes: 12
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
@@ -197,6 +199,8 @@ plugins:
 - chunked bridge sends enforce a minimum `900ms` inter-chunk delay for reliability
 - `max_chunk_bytes`: hard cap for chunk payload bytes before SDK/radio limits (default `160`)
 - if `max_chunk_bytes <= 0`, Meshgram uses safe default cap `160`
+- `broadcast_max_chunk_bytes`: additional cap for broadcast chunk payloads (default `120`)
+- `broadcast_min_inter_chunk_delay_ms`: minimum delay between broadcast chunks (default `2500`)
 - `payload_safety_margin_bytes`: reserves bytes below reported SDK payload max to reduce edge-size drops (default `12`)
 - `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
 - `retry_initial_delay_ms`: delay before first retry (default `500`)
@@ -232,6 +236,7 @@ plugins:
 - compacts Telegram sender names to first token (`Name Surname` → `Name`) before applying `sender_prefix_template`
 - chunks oversized messages by UTF-8 bytes
 - byte-aware splitting is prefix-aware and converges on final chunk count (important for emoji/multibyte content)
+- chunked broadcast sends use a stricter safety profile (smaller chunks + longer spacing)
 - retries failed chunk sends with exponential backoff using `chunking` retry settings
 - requires a packet ID confirmation from Meshtastic SDK responses for bridge sends (retries if missing)
 - logs sequence/chunk packet IDs for every chunked send attempt
@@ -554,6 +559,8 @@ Current test coverage includes:
 - ensure chunking is enabled (`chunking.enabled: true`)
 - increase `chunking.inter_chunk_delay_ms` (for busy links)
 - lower `chunking.max_chunk_bytes` (for example `160` or `140`) if packets are still missed
+- lower `chunking.broadcast_max_chunk_bytes` (for example `100` or `90`) on very noisy broadcast channels
+- increase `chunking.broadcast_min_inter_chunk_delay_ms` (for example `3000-5000`) if later chunks are missed
 - increase `chunking.payload_safety_margin_bytes` if you still see first-chunk drops
 - keep `bridge.settings.meshtastic_want_ack: true`
 - watch logs for `Meshtastic send exhausted retries` to identify failing chunk indexes

@@ -118,6 +118,7 @@ class BridgePlugin(BasePlugin):
             meshtastic_text = f"[{compact_display_name}] {text}"
 
         chunking = context.settings.chunking
+        is_broadcast_destination = True
         payload_limit = context.meshtastic_payload_limit - max(0, chunking.payload_safety_margin_bytes)
         if meshtastic_reply_id is not None:
             # reply_id adds protobuf bytes; reserve extra headroom to avoid edge-size drops.
@@ -128,6 +129,13 @@ class BridgePlugin(BasePlugin):
             if configured_max_chunk_bytes > 0
             else self.DEFAULT_SAFE_MAX_CHUNK_BYTES
         )
+        if is_broadcast_destination:
+            broadcast_cap = (
+                chunking.broadcast_max_chunk_bytes
+                if chunking.broadcast_max_chunk_bytes > 0
+                else effective_max_chunk_bytes
+            )
+            effective_max_chunk_bytes = min(effective_max_chunk_bytes, broadcast_cap)
         payload_limit = min(payload_limit, effective_max_chunk_bytes)
         min_split_payload_limit = utf8_len(chunking.prefix_template.format(index=1, total=1)) + 1
         payload_limit = max(min_split_payload_limit, payload_limit)
@@ -165,10 +173,21 @@ class BridgePlugin(BasePlugin):
             if is_chunked
             else configured_delay_ms
         )
+        if is_chunked and is_broadcast_destination:
+            effective_chunk_delay_ms = max(
+                effective_chunk_delay_ms,
+                max(0, chunking.broadcast_min_inter_chunk_delay_ms),
+            )
         if is_chunked and configured_delay_ms < self.MIN_CHUNK_DELAY_MS:
             LOGGER.info(
                 "Enforcing minimum inter-chunk delay for reliability: configured=%sms effective=%sms",
                 configured_delay_ms,
+                effective_chunk_delay_ms,
+            )
+        if is_chunked and is_broadcast_destination:
+            LOGGER.info(
+                "Applying broadcast chunk safety profile: max_chunk_bytes=%s delay_ms=%s",
+                effective_max_chunk_bytes,
                 effective_chunk_delay_ms,
             )
         if is_chunked:
