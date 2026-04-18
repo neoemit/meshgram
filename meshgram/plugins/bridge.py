@@ -27,7 +27,7 @@ class BridgePlugin(BasePlugin):
     DEFAULT_REACTION_MISSING_NOTICE = "(reaction target not found)"
     DEFAULT_MESHTASTIC_WANT_ACK = True
     REPLY_ID_EXTRA_MARGIN_BYTES = 8
-    MIN_CHUNK_DELAY_MS = 400
+    MIN_CHUNK_DELAY_MS = 900
 
     def _bridge_channel(self, context: PluginContext) -> int:
         configured_channel = self.settings.get("channel")
@@ -121,6 +121,8 @@ class BridgePlugin(BasePlugin):
         if meshtastic_reply_id is not None:
             # reply_id adds protobuf bytes; reserve extra headroom to avoid edge-size drops.
             payload_limit -= self.REPLY_ID_EXTRA_MARGIN_BYTES
+        if chunking.max_chunk_bytes > 0:
+            payload_limit = min(payload_limit, chunking.max_chunk_bytes)
         min_split_payload_limit = utf8_len(chunking.prefix_template.format(index=1, total=1)) + 1
         payload_limit = max(min_split_payload_limit, payload_limit)
         try:

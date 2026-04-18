@@ -46,6 +46,7 @@ class BridgePluginTests(unittest.TestCase):
         settings.chunking.enabled = True
         settings.chunking.prefix_template = "({index}/{total}) "
         settings.chunking.inter_chunk_delay_ms = 150
+        settings.chunking.max_chunk_bytes = 180
         settings.chunking.payload_safety_margin_bytes = 16
         self.settings = settings
 
@@ -215,7 +216,7 @@ class BridgePluginTests(unittest.TestCase):
         )
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=28)))
         self.assertGreater(len(actions), 1)
-        self.assertEqual(actions[1].delay_ms, 400)
+        self.assertEqual(actions[1].delay_ms, 900)
         self.assertEqual(actions[0].retry_max_attempts, 3)
         self.assertEqual(actions[0].retry_initial_delay_ms, 500)
         self.assertEqual(actions[0].retry_backoff_factor, 2.0)
@@ -247,10 +248,11 @@ class BridgePluginTests(unittest.TestCase):
 
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=40)))
         self.assertGreater(len(actions), 1)
-        self.assertEqual(actions[1].delay_ms, 400)
+        self.assertEqual(actions[1].delay_ms, 900)
 
     def test_chunking_reserves_payload_safety_margin(self):
         self.settings.chunking.payload_safety_margin_bytes = 10
+        self.settings.chunking.max_chunk_bytes = 0
         event = TelegramMessageEvent(
             chat_id=-999,
             message_id=101,
@@ -271,6 +273,7 @@ class BridgePluginTests(unittest.TestCase):
 
     def test_chunking_reserves_extra_margin_for_reply_id(self):
         self.settings.chunking.payload_safety_margin_bytes = 10
+        self.settings.chunking.max_chunk_bytes = 0
         self.reply_links.telegram_to_mesh[(-999, 55)] = 777
         event = TelegramMessageEvent(
             chat_id=-999,
@@ -289,6 +292,25 @@ class BridgePluginTests(unittest.TestCase):
         reserved_limit = payload_limit - self.settings.chunking.payload_safety_margin_bytes - self.plugin.REPLY_ID_EXTRA_MARGIN_BYTES
         for action in actions:
             self.assertLessEqual(utf8_len(action.text), reserved_limit)
+
+    def test_chunking_caps_payload_to_safe_max_chunk_bytes(self):
+        self.settings.chunking.payload_safety_margin_bytes = 0
+        self.settings.chunking.max_chunk_bytes = 30
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=103,
+            reply_to_message_id=None,
+            text="x" * 180,
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=200)))
+        self.assertGreater(len(actions), 1)
+        for action in actions:
+            self.assertLessEqual(utf8_len(action.text), 30)
 
     def test_bridge_plugin_channel_setting_overrides_global_bridge_channel(self):
         plugin = BridgePlugin({"channel": 1})

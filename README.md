@@ -127,6 +127,7 @@ chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
+  max_chunk_bytes: 180
   payload_safety_margin_bytes: 12
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
@@ -191,7 +192,8 @@ plugins:
 - Uses UTF-8 byte length (safe for emoji/multibyte text)
 - `prefix_template` supports `{index}` and `{total}`
 - `inter_chunk_delay_ms`: requested delay between chunk sends (default `150`)
-- chunked bridge sends enforce a minimum `400ms` inter-chunk delay for reliability
+- chunked bridge sends enforce a minimum `900ms` inter-chunk delay for reliability
+- `max_chunk_bytes`: hard cap for chunk payload bytes before SDK/radio limits (default `180`, set `0` to disable cap)
 - `payload_safety_margin_bytes`: reserves bytes below reported SDK payload max to reduce edge-size drops (default `12`)
 - `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
 - `retry_initial_delay_ms`: delay before first retry (default `500`)
@@ -543,6 +545,7 @@ Current test coverage includes:
 
 - ensure chunking is enabled (`chunking.enabled: true`)
 - increase `chunking.inter_chunk_delay_ms` (for busy links)
+- lower `chunking.max_chunk_bytes` (for example `160` or `140`) if packets are still missed
 - increase `chunking.payload_safety_margin_bytes` if you still see first-chunk drops
 - keep `bridge.settings.meshtastic_want_ack: true`
 - watch logs for `Meshtastic send exhausted retries` to identify failing chunk indexes
