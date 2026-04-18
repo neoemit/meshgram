@@ -2,11 +2,45 @@ import unittest
 
 from meshgram.app import MeshgramApp, MeshtasticClient
 from meshgram.config import MeshgramSettings
+from meshgram.types import SendMeshtasticAction
 
 
 class _FakeInterface:
     def __init__(self, nodes):
         self.nodes = nodes
+
+
+class _SendTextWithReplyId:
+    def __init__(self):
+        self.calls = []
+
+    def sendText(self, text, destinationId=None, channelIndex=0, replyId=None, wantAck=False):
+        self.calls.append(
+            {
+                "text": text,
+                "destinationId": destinationId,
+                "channelIndex": channelIndex,
+                "replyId": replyId,
+                "wantAck": wantAck,
+            }
+        )
+        return {"id": 123}
+
+
+class _SendTextWithoutReplyId:
+    def __init__(self):
+        self.calls = []
+
+    def sendText(self, text, destinationId=None, channelIndex=0, wantAck=False):
+        self.calls.append(
+            {
+                "text": text,
+                "destinationId": destinationId,
+                "channelIndex": channelIndex,
+                "wantAck": wantAck,
+            }
+        )
+        return {"id": 321}
 
 
 class MeshtasticSenderResolutionTests(unittest.TestCase):
@@ -82,6 +116,51 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
     def test_sender_label_falls_back_to_normalized_node_id(self):
         client = MeshtasticClient(self._settings())
         self.assertEqual(client.resolve_sender_label(None, from_num=0x42), "!00000042")
+
+    def test_send_text_uses_reply_id_when_interface_supports_it(self):
+        client = MeshtasticClient(self._settings())
+        iface = _SendTextWithReplyId()
+        client.iface = iface
+
+        result = client.send_text(
+            SendMeshtasticAction(
+                text="pong",
+                channel_index=2,
+                reply_id=999,
+                want_ack=True,
+            )
+        )
+
+        self.assertEqual(result["id"], 123)
+        self.assertEqual(len(iface.calls), 1)
+        self.assertEqual(iface.calls[0]["replyId"], 999)
+
+    def test_send_text_falls_back_when_reply_id_is_unsupported(self):
+        client = MeshtasticClient(self._settings())
+        iface = _SendTextWithoutReplyId()
+        client.iface = iface
+
+        first_result = client.send_text(
+            SendMeshtasticAction(
+                text="first",
+                channel_index=1,
+                reply_id=111,
+            )
+        )
+        second_result = client.send_text(
+            SendMeshtasticAction(
+                text="second",
+                channel_index=1,
+                reply_id=222,
+            )
+        )
+
+        self.assertEqual(first_result["id"], 321)
+        self.assertEqual(second_result["id"], 321)
+        self.assertEqual(client._supports_sendtext_reply_id, False)
+        self.assertEqual(len(iface.calls), 2)
+        self.assertEqual(iface.calls[0]["text"], "first")
+        self.assertEqual(iface.calls[1]["text"], "second")
 
 
 if __name__ == "__main__":

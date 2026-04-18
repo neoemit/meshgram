@@ -44,6 +44,7 @@ class MeshtasticClient:
         self.iface: Any = None
         self.local_node_id: Optional[str] = None
         self._packet_callback = None
+        self._supports_sendtext_reply_id: Optional[bool] = None
 
     @property
     def payload_limit(self) -> int:
@@ -251,13 +252,30 @@ class MeshtasticClient:
             raise RuntimeError("Meshtastic interface is not connected")
 
         destination_id = action.destination_id if action.destination_id is not None else BROADCAST_ADDR
-        return self.iface.sendText(
-            action.text,
-            destinationId=destination_id,
-            channelIndex=action.channel_index,
-            replyId=action.reply_id,
-            wantAck=action.want_ack,
+        kwargs = {
+            "destinationId": destination_id,
+            "channelIndex": action.channel_index,
+            "wantAck": action.want_ack,
+        }
+
+        should_try_reply_id = (
+            action.reply_id is not None
+            and self._supports_sendtext_reply_id is not False
         )
+        if should_try_reply_id:
+            kwargs["replyId"] = action.reply_id
+
+        try:
+            return self.iface.sendText(action.text, **kwargs)
+        except TypeError as exc:
+            if should_try_reply_id and "replyId" in str(exc):
+                self._supports_sendtext_reply_id = False
+                LOGGER.info(
+                    "Meshtastic sendText does not support replyId; retrying without reply threading"
+                )
+                kwargs.pop("replyId", None)
+                return self.iface.sendText(action.text, **kwargs)
+            raise
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
