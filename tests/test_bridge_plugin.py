@@ -215,7 +215,7 @@ class BridgePluginTests(unittest.TestCase):
         )
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=28)))
         self.assertGreater(len(actions), 1)
-        self.assertEqual(actions[1].delay_ms, 150)
+        self.assertEqual(actions[1].delay_ms, 400)
         self.assertEqual(actions[0].retry_max_attempts, 3)
         self.assertEqual(actions[0].retry_initial_delay_ms, 500)
         self.assertEqual(actions[0].retry_backoff_factor, 2.0)
@@ -231,6 +231,23 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(actions[0].bridge_source_telegram_chat_id, -999)
         self.assertEqual(actions[0].bridge_source_telegram_message_id, 10)
         self.assertEqual(actions[0].channel_index, 2)
+
+    def test_telegram_chunked_send_enforces_minimum_inter_chunk_delay(self):
+        self.settings.chunking.inter_chunk_delay_ms = 10
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=111,
+            reply_to_message_id=None,
+            text="x" * 220,
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=40)))
+        self.assertGreater(len(actions), 1)
+        self.assertEqual(actions[1].delay_ms, 400)
 
     def test_chunking_reserves_payload_safety_margin(self):
         self.settings.chunking.payload_safety_margin_bytes = 10

@@ -40,7 +40,7 @@ class ChunkingConfig:
     retry_initial_delay_ms: int = 500
     retry_backoff_factor: float = 2.0
     abort_on_chunk_failure: bool = True
-    payload_safety_margin_bytes: int = 24
+    payload_safety_margin_bytes: int = 12
 
 
 @dataclass(slots=True)
@@ -226,7 +226,7 @@ def load_settings() -> MeshgramSettings:
             retry_initial_delay_ms=max(0, _as_int(chunking_data.get("retry_initial_delay_ms"), 500)),
             retry_backoff_factor=max(1.0, _as_float(chunking_data.get("retry_backoff_factor"), 2.0)),
             abort_on_chunk_failure=_as_bool(chunking_data.get("abort_on_chunk_failure"), True),
-            payload_safety_margin_bytes=max(0, _as_int(chunking_data.get("payload_safety_margin_bytes"), 24)),
+            payload_safety_margin_bytes=max(0, _as_int(chunking_data.get("payload_safety_margin_bytes"), 12)),
         ),
         plugins=plugins,
     )

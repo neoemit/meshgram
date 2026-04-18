@@ -27,6 +27,7 @@ class BridgePlugin(BasePlugin):
     DEFAULT_REACTION_MISSING_NOTICE = "(reaction target not found)"
     DEFAULT_MESHTASTIC_WANT_ACK = True
     REPLY_ID_EXTRA_MARGIN_BYTES = 8
+    MIN_CHUNK_DELAY_MS = 400
 
     def _bridge_channel(self, context: PluginContext) -> int:
         configured_channel = self.settings.get("channel")
@@ -149,8 +150,30 @@ class BridgePlugin(BasePlugin):
         is_chunked = len(chunks) > 1
         sequence_id = _chunk_sequence_id(event) if is_chunked else None
         want_ack = self._meshtastic_want_ack()
+        configured_delay_ms = max(0, chunking.inter_chunk_delay_ms)
+        effective_chunk_delay_ms = (
+            max(configured_delay_ms, self.MIN_CHUNK_DELAY_MS)
+            if is_chunked
+            else configured_delay_ms
+        )
+        if is_chunked and configured_delay_ms < self.MIN_CHUNK_DELAY_MS:
+            LOGGER.info(
+                "Enforcing minimum inter-chunk delay for reliability: configured=%sms effective=%sms",
+                configured_delay_ms,
+                effective_chunk_delay_ms,
+            )
+        if is_chunked:
+            LOGGER.info(
+                "Chunked Telegram message prepared: chat_id=%s message_id=%s sequence=%s chunks=%s payload_limit=%s delay_ms=%s",
+                event.chat_id,
+                event.message_id,
+                sequence_id,
+                len(chunks),
+                payload_limit,
+                effective_chunk_delay_ms,
+            )
         for index, chunk in enumerate(chunks):
-            delay_ms = chunking.inter_chunk_delay_ms if index > 0 else 0
+            delay_ms = effective_chunk_delay_ms if index > 0 else 0
             actions.append(
                 SendMeshtasticAction(
                     text=chunk,

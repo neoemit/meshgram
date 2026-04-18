@@ -956,8 +956,18 @@ class MeshgramApp:
                         raise RuntimeError("Meshtastic is not connected yet")
 
                     sent_packet = self.meshtastic.send_text(action)
-                    if action.require_packet_id and _extract_meshtastic_packet_id(sent_packet) is None:
+                    packet_id = _extract_meshtastic_packet_id(sent_packet)
+                    if action.require_packet_id and packet_id is None:
                         raise RuntimeError("Meshtastic send returned no packet id")
+                    if action.sequence_id is not None:
+                        LOGGER.info(
+                            "Meshtastic chunk sent: sequence=%s chunk=%s/%s packet_id=%s bytes=%s",
+                            action.sequence_id,
+                            action.sequence_index,
+                            action.sequence_total,
+                            packet_id,
+                            len(action.text.encode("utf-8")),
+                        )
                     return sent_packet
                 except Exception as exc:
                     if _is_connection_error(exc):

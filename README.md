@@ -127,7 +127,7 @@ chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
-  payload_safety_margin_bytes: 24
+  payload_safety_margin_bytes: 12
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
   retry_backoff_factor: 2.0
@@ -190,8 +190,9 @@ plugins:
 
 - Uses UTF-8 byte length (safe for emoji/multibyte text)
 - `prefix_template` supports `{index}` and `{total}`
-- `inter_chunk_delay_ms`: delay between chunk sends (default `150`)
-- `payload_safety_margin_bytes`: reserves bytes below reported SDK payload max to reduce edge-size drops (default `24`)
+- `inter_chunk_delay_ms`: requested delay between chunk sends (default `150`)
+- chunked bridge sends enforce a minimum `400ms` inter-chunk delay for reliability
+- `payload_safety_margin_bytes`: reserves bytes below reported SDK payload max to reduce edge-size drops (default `12`)
 - `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
 - `retry_initial_delay_ms`: delay before first retry (default `500`)
 - `retry_backoff_factor`: exponential retry multiplier (default `2.0`)
@@ -224,6 +225,7 @@ plugins:
 - chunks oversized messages by UTF-8 bytes
 - retries failed chunk sends with exponential backoff using `chunking` retry settings
 - requires a packet ID confirmation from Meshtastic SDK responses for bridge sends (retries if missing)
+- logs sequence/chunk packet IDs for every chunked send attempt
 - on terminal chunk failure, aborts later chunks in the same sequence when `abort_on_chunk_failure=true`
 - chunk delivery failures are log-only (no Telegram failure notification)
 - if mapping exists, Telegram replies are sent with Meshtastic `replyId`
