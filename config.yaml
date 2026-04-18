@@ -39,7 +39,6 @@ meshcore:
 telegram:
   include_captions: true
   sender_prefix_template: "[{display_name}] {message}"
-
 chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
