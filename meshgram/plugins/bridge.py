@@ -25,6 +25,7 @@ class BridgePlugin(BasePlugin):
     name = "bridge"
     DEFAULT_REPLY_MISSING_SUFFIX = "(reply target not found)"
     DEFAULT_REACTION_MISSING_NOTICE = "(reaction target not found)"
+    DEFAULT_MESHTASTIC_WANT_ACK = True
 
     def _bridge_channel(self, context: PluginContext) -> int:
         configured_channel = self.settings.get("channel")
@@ -125,6 +126,7 @@ class BridgePlugin(BasePlugin):
         bridge_channel = self._bridge_channel(context)
         is_chunked = len(chunks) > 1
         sequence_id = _chunk_sequence_id(event) if is_chunked else None
+        want_ack = self._meshtastic_want_ack()
         for index, chunk in enumerate(chunks):
             delay_ms = chunking.inter_chunk_delay_ms if index > 0 else 0
             actions.append(
@@ -132,14 +134,16 @@ class BridgePlugin(BasePlugin):
                     text=chunk,
                     channel_index=bridge_channel,
                     reply_id=meshtastic_reply_id if index == 0 else None,
+                    want_ack=want_ack,
                     delay_ms=delay_ms,
-                    retry_max_attempts=chunking.retry_max_attempts if is_chunked else 1,
-                    retry_initial_delay_ms=chunking.retry_initial_delay_ms if is_chunked else 0,
-                    retry_backoff_factor=chunking.retry_backoff_factor if is_chunked else 1.0,
+                    retry_max_attempts=chunking.retry_max_attempts,
+                    retry_initial_delay_ms=chunking.retry_initial_delay_ms,
+                    retry_backoff_factor=chunking.retry_backoff_factor,
                     sequence_id=sequence_id,
                     sequence_index=(index + 1) if is_chunked else None,
                     sequence_total=len(chunks) if is_chunked else None,
                     abort_on_failure=chunking.abort_on_chunk_failure if is_chunked else False,
+                    require_packet_id=True,
                     bridge_source_telegram_chat_id=event.chat_id,
                     bridge_source_telegram_message_id=event.message_id,
                     bridge_canonical_for_telegram_message=index == 0,
@@ -161,6 +165,7 @@ class BridgePlugin(BasePlugin):
             return []
 
         bridge_channel = self._bridge_channel(context)
+        want_ack = self._meshtastic_want_ack()
         target_packet_id = None
         if context.reply_links is not None:
             target_packet_id = context.reply_links.get_meshtastic_for_telegram(
@@ -170,19 +175,30 @@ class BridgePlugin(BasePlugin):
 
         if target_packet_id is None:
             if self._should_emit_missing_target_fallback():
+                chunking = context.settings.chunking
                 return [
                     SendMeshtasticAction(
                         text=self._reaction_missing_notice(),
                         channel_index=bridge_channel,
+                        want_ack=want_ack,
+                        retry_max_attempts=chunking.retry_max_attempts,
+                        retry_initial_delay_ms=chunking.retry_initial_delay_ms,
+                        retry_backoff_factor=chunking.retry_backoff_factor,
+                        require_packet_id=True,
                     )
                 ]
             return []
 
+        chunking = context.settings.chunking
         return [
             SendMeshtasticReactionAction(
                 emoji=event.emoji,
                 target_packet_id=target_packet_id,
                 channel_index=bridge_channel,
+                want_ack=want_ack,
+                retry_max_attempts=chunking.retry_max_attempts,
+                retry_initial_delay_ms=chunking.retry_initial_delay_ms,
+                retry_backoff_factor=chunking.retry_backoff_factor,
             )
         ]
 
@@ -227,6 +243,12 @@ class BridgePlugin(BasePlugin):
 
     def _reactions_enabled(self) -> bool:
         value = self.settings.get("reactions_enabled", True)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _meshtastic_want_ack(self) -> bool:
+        value = self.settings.get("meshtastic_want_ack", self.DEFAULT_MESHTASTIC_WANT_ACK)
         if isinstance(value, bool):
             return value
         return str(value).strip().lower() in {"1", "true", "yes", "on"}

@@ -4,13 +4,20 @@ import asyncio
 import contextlib
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from meshtastic import BROADCAST_ADDR
 import meshtastic.serial_interface
 import meshtastic.tcp_interface
 from pubsub import pub
-from telegram import Message, MessageReactionUpdated, ReactionTypeEmoji, Update
+from telegram import (
+    Message,
+    MessageReactionCountUpdated,
+    MessageReactionUpdated,
+    ReactionCount,
+    ReactionTypeEmoji,
+    Update,
+)
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -39,6 +46,7 @@ from .types import (
 LOGGER = logging.getLogger(__name__)
 DEFAULT_MESHTASTIC_PAYLOAD_LIMIT = 233
 MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
+TELEGRAM_REACTION_WRITE_DEDUPE_TTL_SECONDS = 12.0
 
 try:
     from meshtastic.protobuf import mesh_pb2
@@ -132,6 +140,16 @@ class MeshtasticClient:
     @property
     def is_connected(self) -> bool:
         return self.iface is not None
+
+    def invalidate_connection(self) -> None:
+        if self.iface is not None:
+            with contextlib.suppress(Exception):
+                self.iface.close()
+        self.iface = None
+        self.local_node_id = None
+        self._supports_sendtext_reply_id = None
+        self._supports_senddata_reply_id = None
+        self._supports_lowlevel_packet = None
 
     def refresh_local_node_id(self) -> None:
         if self.iface is None:
@@ -338,7 +356,7 @@ class MeshtasticClient:
         destination_id = action.destination_id if action.destination_id is not None else BROADCAST_ADDR
         if self._can_use_lowlevel_packet():
             return self._send_text_packet_lowlevel(
-                text=action.emoji,
+                text="",
                 destination_id=destination_id,
                 channel_index=action.channel_index,
                 want_ack=action.want_ack,
@@ -349,11 +367,14 @@ class MeshtasticClient:
         LOGGER.warning(
             "Low-level Meshtastic packet API unavailable; sending reaction as plain reply text"
         )
-        return self.iface.sendText(
-            action.emoji,
-            destinationId=destination_id,
-            channelIndex=action.channel_index,
-            wantAck=action.want_ack,
+        return self.send_text(
+            SendMeshtasticAction(
+                text=action.emoji,
+                destination_id=destination_id,
+                channel_index=action.channel_index,
+                reply_id=action.target_packet_id,
+                want_ack=action.want_ack,
+            )
         )
 
     def _can_use_lowlevel_packet(self) -> bool:
@@ -397,10 +418,7 @@ class MeshtasticClient:
     def close(self) -> None:
         with contextlib.suppress(Exception):
             pub.unsubscribe(self._on_receive, "meshtastic.receive")
-
-        if self.iface is not None:
-            with contextlib.suppress(Exception):
-                self.iface.close()
+        self.invalidate_connection()
 
 
 class MeshgramApp:
@@ -415,6 +433,9 @@ class MeshgramApp:
         )
         self._mesh_connect_task: Optional[asyncio.Task[None]] = None
         self._seen_meshtastic_packet_ids: dict[int, float] = {}
+        self._meshtastic_send_lock = asyncio.Lock()
+        self._telegram_reaction_counts: dict[tuple[int, int], dict[str, int]] = {}
+        self._recent_telegram_reaction_writes: dict[tuple[int, int, str], float] = {}
 
     async def _post_init(self, app: Application) -> None:
         self.loop = asyncio.get_running_loop()
@@ -425,16 +446,18 @@ class MeshgramApp:
 
     async def _ensure_meshtastic_connected(self) -> None:
         retry_delay_seconds = 5
+        healthy_poll_seconds = 2
 
         while True:
             if self.meshtastic.is_connected:
-                return
+                await asyncio.sleep(healthy_poll_seconds)
+                continue
 
             try:
                 self.meshtastic.connect(self._on_meshtastic_packet)
                 LOGGER.info("Meshtastic connection established")
-                return
             except Exception as exc:
+                self.meshtastic.invalidate_connection()
                 LOGGER.warning(
                     "Meshtastic connection failed (%s). Retrying in %ss.",
                     exc,
@@ -514,22 +537,39 @@ class MeshgramApp:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        reaction_update = update.message_reaction
-        if reaction_update is None:
+        event = self._build_telegram_reaction_event(update)
+        if event is None:
             return
 
+        await self._dispatch_telegram_reaction(event)
+
+    def _build_telegram_reaction_event(self, update: Update) -> Optional[TelegramReactionEvent]:
+        reaction_update = update.message_reaction
+        if reaction_update is not None:
+            return self._build_telegram_reaction_event_from_update(reaction_update)
+
+        reaction_count_update = update.message_reaction_count
+        if reaction_count_update is not None:
+            return self._build_telegram_reaction_event_from_count_update(reaction_count_update)
+
+        return None
+
+    def _build_telegram_reaction_event_from_update(
+        self,
+        reaction_update: MessageReactionUpdated,
+    ) -> Optional[TelegramReactionEvent]:
         chat = reaction_update.chat
         if chat is None:
-            return
+            return None
 
         emoji = _extract_first_unicode_reaction_emoji(reaction_update)
         if emoji is None:
-            return
+            return None
 
         user = reaction_update.user
         is_from_bot = bool(user and user.is_bot)
 
-        event = TelegramReactionEvent(
+        return TelegramReactionEvent(
             chat_id=chat.id,
             message_id=reaction_update.message_id,
             emoji=emoji,
@@ -537,7 +577,82 @@ class MeshgramApp:
             raw_reaction=reaction_update,
         )
 
-        await self._dispatch_telegram_reaction(event)
+    def _build_telegram_reaction_event_from_count_update(
+        self,
+        reaction_count_update: MessageReactionCountUpdated,
+    ) -> Optional[TelegramReactionEvent]:
+        chat = reaction_count_update.chat
+        if chat is None:
+            return None
+
+        emoji = self._extract_incremented_unicode_emoji_from_count_update(reaction_count_update)
+        if emoji is None:
+            return None
+
+        if self._was_recent_telegram_reaction_write(chat.id, reaction_count_update.message_id, emoji):
+            LOGGER.debug(
+                "Ignoring Telegram reaction count echo from recent bot write: chat=%s message=%s emoji=%s",
+                chat.id,
+                reaction_count_update.message_id,
+                emoji,
+            )
+            return None
+
+        return TelegramReactionEvent(
+            chat_id=chat.id,
+            message_id=reaction_count_update.message_id,
+            emoji=emoji,
+            is_from_bot=False,
+            raw_reaction=reaction_count_update,
+        )
+
+    def _extract_incremented_unicode_emoji_from_count_update(
+        self,
+        reaction_count_update: MessageReactionCountUpdated,
+    ) -> Optional[str]:
+        chat_id = reaction_count_update.chat.id
+        message_id = reaction_count_update.message_id
+        key = (chat_id, message_id)
+
+        current_counts = _extract_unicode_emoji_counts(reaction_count_update.reactions)
+        previous_counts = self._telegram_reaction_counts.get(key)
+        self._telegram_reaction_counts[key] = current_counts
+
+        if previous_counts is None:
+            if not current_counts:
+                return None
+            best_emoji, _ = max(current_counts.items(), key=lambda item: item[1])
+            return best_emoji
+
+        positive_deltas: list[tuple[int, str]] = []
+        for emoji, count in current_counts.items():
+            delta = count - previous_counts.get(emoji, 0)
+            if delta > 0:
+                positive_deltas.append((delta, emoji))
+
+        if not positive_deltas:
+            return None
+
+        positive_deltas.sort(reverse=True)
+        return positive_deltas[0][1]
+
+    def _record_telegram_reaction_write(self, chat_id: int, message_id: int, emoji: str) -> None:
+        now = time.monotonic()
+        self._prune_recent_telegram_reaction_writes(now)
+        self._recent_telegram_reaction_writes[(chat_id, message_id, emoji)] = now
+
+    def _was_recent_telegram_reaction_write(self, chat_id: int, message_id: int, emoji: str) -> bool:
+        now = time.monotonic()
+        self._prune_recent_telegram_reaction_writes(now)
+        return (chat_id, message_id, emoji) in self._recent_telegram_reaction_writes
+
+    def _prune_recent_telegram_reaction_writes(self, now: float) -> None:
+        cutoff = now - TELEGRAM_REACTION_WRITE_DEDUPE_TTL_SECONDS
+        stale_keys = [
+            key for key, written_at in self._recent_telegram_reaction_writes.items() if written_at < cutoff
+        ]
+        for key in stale_keys:
+            self._recent_telegram_reaction_writes.pop(key, None)
 
     async def _dispatch_telegram_message(self, event: TelegramMessageEvent) -> None:
         context = self._plugin_context()
@@ -613,9 +728,9 @@ class MeshgramApp:
         if not isinstance(decoded, dict):
             return None
 
-        if decoded.get("portnum") != "TEXT_MESSAGE_APP":
+        if not _is_text_message_portnum(decoded.get("portnum")):
             return None
-        if _extract_optional_int(decoded.get("emoji")) is not None:
+        if _extract_reaction_emoji(decoded) is not None:
             return None
 
         payload = decoded.get("payload", b"")
@@ -664,24 +779,21 @@ class MeshgramApp:
         decoded = packet.get("decoded", {})
         if not isinstance(decoded, dict):
             return None
-        if decoded.get("portnum") != "TEXT_MESSAGE_APP":
+        if not _is_text_message_portnum(decoded.get("portnum")):
             return None
 
-        emoji_codepoint = _extract_optional_int(decoded.get("emoji"))
-        if emoji_codepoint is None:
-            return None
-        if emoji_codepoint <= 0:
+        emoji = _extract_reaction_emoji(decoded)
+        if emoji is None:
             return None
 
         target_packet_id = _extract_optional_int(decoded.get("replyId"))
         if target_packet_id is None:
             target_packet_id = _extract_optional_int(decoded.get("reply_id"))
         if target_packet_id is None:
-            return None
-
-        try:
-            emoji = chr(emoji_codepoint)
-        except ValueError:
+            target_packet_id = _extract_optional_int(packet.get("replyId"))
+        if target_packet_id is None:
+            target_packet_id = _extract_optional_int(packet.get("reply_id"))
+        if target_packet_id is None:
             return None
 
         from_num = _extract_optional_int(packet.get("from"))
@@ -794,59 +906,105 @@ class MeshgramApp:
             reaction=[ReactionTypeEmoji(action.emoji)],
             is_big=action.is_big,
         )
+        self._record_telegram_reaction_write(action.chat_id, action.message_id, action.emoji)
 
     async def _execute_send_meshtastic(self, action: SendMeshtasticAction):
-        if action.delay_ms > 0:
-            await asyncio.sleep(action.delay_ms / 1000)
+        async with self._meshtastic_send_lock:
+            if action.delay_ms > 0:
+                await asyncio.sleep(action.delay_ms / 1000)
 
-        max_attempts = max(1, action.retry_max_attempts)
-        retry_delay_seconds = max(0, action.retry_initial_delay_ms) / 1000
-        backoff_factor = max(1.0, action.retry_backoff_factor)
+            max_attempts = max(1, action.retry_max_attempts)
+            retry_delay_seconds = max(0, action.retry_initial_delay_ms) / 1000
+            backoff_factor = max(1.0, action.retry_backoff_factor)
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if not self.meshtastic.is_connected:
-                    if max_attempts == 1:
-                        LOGGER.warning("Meshtastic is not connected yet; dropping outbound message")
-                        return None
-                    raise RuntimeError("Meshtastic is not connected yet")
-                return self.meshtastic.send_text(action)
-            except Exception:
-                if attempt >= max_attempts:
-                    LOGGER.error(
-                        "Meshtastic send exhausted retries: sequence=%s chunk=%s/%s "
-                        "attempts=%s abort_on_failure=%s",
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    if not self.meshtastic.is_connected:
+                        if max_attempts == 1:
+                            LOGGER.warning("Meshtastic is not connected yet; dropping outbound message")
+                            return None
+                        raise RuntimeError("Meshtastic is not connected yet")
+
+                    sent_packet = self.meshtastic.send_text(action)
+                    if action.require_packet_id and _extract_meshtastic_packet_id(sent_packet) is None:
+                        raise RuntimeError("Meshtastic send returned no packet id")
+                    return sent_packet
+                except Exception as exc:
+                    if _is_connection_error(exc):
+                        self.meshtastic.invalidate_connection()
+
+                    if attempt >= max_attempts:
+                        LOGGER.error(
+                            "Meshtastic send exhausted retries: sequence=%s chunk=%s/%s "
+                            "attempts=%s abort_on_failure=%s",
+                            action.sequence_id,
+                            action.sequence_index,
+                            action.sequence_total,
+                            max_attempts,
+                            action.abort_on_failure,
+                            exc_info=True,
+                        )
+                        raise
+
+                    LOGGER.warning(
+                        "Meshtastic send failed; retrying in %.2fs "
+                        "(attempt %s/%s, sequence=%s, chunk=%s/%s)",
+                        retry_delay_seconds,
+                        attempt + 1,
+                        max_attempts,
                         action.sequence_id,
                         action.sequence_index,
                         action.sequence_total,
-                        max_attempts,
-                        action.abort_on_failure,
-                        exc_info=True,
                     )
-                    raise
+                    if retry_delay_seconds > 0:
+                        await asyncio.sleep(retry_delay_seconds)
+                    retry_delay_seconds *= backoff_factor
 
-                LOGGER.warning(
-                    "Meshtastic send failed; retrying in %.2fs "
-                    "(attempt %s/%s, sequence=%s, chunk=%s/%s)",
-                    retry_delay_seconds,
-                    attempt + 1,
-                    max_attempts,
-                    action.sequence_id,
-                    action.sequence_index,
-                    action.sequence_total,
-                )
-                if retry_delay_seconds > 0:
-                    await asyncio.sleep(retry_delay_seconds)
-                retry_delay_seconds *= backoff_factor
-
-        return None
-
-    async def _execute_send_meshtastic_reaction(self, action: SendMeshtasticReactionAction):
-        if not self.meshtastic.is_connected:
-            LOGGER.warning("Meshtastic is not connected yet; dropping outbound reaction")
             return None
 
-        return self.meshtastic.send_reaction(action)
+    async def _execute_send_meshtastic_reaction(self, action: SendMeshtasticReactionAction):
+        async with self._meshtastic_send_lock:
+            max_attempts = max(1, action.retry_max_attempts)
+            retry_delay_seconds = max(0, action.retry_initial_delay_ms) / 1000
+            backoff_factor = max(1.0, action.retry_backoff_factor)
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    if not self.meshtastic.is_connected:
+                        if max_attempts == 1:
+                            LOGGER.warning("Meshtastic is not connected yet; dropping outbound reaction")
+                            return None
+                        raise RuntimeError("Meshtastic is not connected yet")
+
+                    return self.meshtastic.send_reaction(action)
+                except Exception as exc:
+                    if _is_connection_error(exc):
+                        self.meshtastic.invalidate_connection()
+
+                    if attempt >= max_attempts:
+                        LOGGER.error(
+                            "Meshtastic reaction send exhausted retries: "
+                            "attempts=%s chat-target=%s packet-target=%s",
+                            max_attempts,
+                            action.destination_id,
+                            action.target_packet_id,
+                            exc_info=True,
+                        )
+                        raise
+
+                    LOGGER.warning(
+                        "Meshtastic reaction send failed; retrying in %.2fs "
+                        "(attempt %s/%s target_packet=%s)",
+                        retry_delay_seconds,
+                        attempt + 1,
+                        max_attempts,
+                        action.target_packet_id,
+                    )
+                    if retry_delay_seconds > 0:
+                        await asyncio.sleep(retry_delay_seconds)
+                    retry_delay_seconds *= backoff_factor
+
+            return None
 
     def _register_reply_link_after_telegram_send(
         self,
@@ -913,13 +1071,13 @@ class MeshgramApp:
         self.bot_app.add_handler(
             MessageReactionHandler(
                 self._handle_telegram_reaction,
-                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED,
+                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION,
             )
         )
 
         LOGGER.info("Starting Meshgram polling loop")
         try:
-            self.bot_app.run_polling()
+            self.bot_app.run_polling(allowed_updates=Update.ALL_TYPES)
         finally:
             if self._mesh_connect_task is not None:
                 self._mesh_connect_task.cancel()
@@ -971,7 +1129,82 @@ def _extract_first_unicode_reaction_emoji(
     return None
 
 
+def _extract_unicode_emoji_counts(reactions: Sequence[ReactionCount]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for reaction_count in reactions:
+        reaction = getattr(reaction_count, "type", None)
+        if not isinstance(reaction, ReactionTypeEmoji):
+            continue
+
+        emoji = getattr(reaction, "emoji", None)
+        if not isinstance(emoji, str) or not emoji:
+            continue
+
+        total_count = _extract_optional_int(getattr(reaction_count, "total_count", None))
+        if total_count is None:
+            continue
+
+        counts[emoji] = total_count
+    return counts
+
+
+def _extract_reaction_emoji(decoded: dict[str, Any]) -> Optional[str]:
+    raw_emoji = decoded.get("emoji")
+
+    emoji_codepoint = _extract_optional_int(raw_emoji)
+    if emoji_codepoint is not None:
+        if emoji_codepoint <= 0:
+            return None
+        with contextlib.suppress(ValueError):
+            return chr(emoji_codepoint)
+        return None
+
+    if isinstance(raw_emoji, str):
+        text = raw_emoji.strip()
+        if text:
+            return text[0]
+
+    if isinstance(raw_emoji, bytes):
+        decoded_emoji = raw_emoji.decode("utf-8", errors="ignore").strip()
+        if decoded_emoji:
+            return decoded_emoji[0]
+
+    return None
+
+
+def _is_text_message_portnum(portnum: Any) -> bool:
+    if portnum == "TEXT_MESSAGE_APP":
+        return True
+
+    text_portnum_value: Optional[int] = None
+    if portnums_pb2 is not None:
+        text_portnum_value = int(portnums_pb2.PortNum.TEXT_MESSAGE_APP)
+    else:
+        # Meshtastic TEXT_MESSAGE_APP is historically enum value 1.
+        text_portnum_value = 1
+
+    if isinstance(portnum, int):
+        return portnum == text_portnum_value
+
+    if isinstance(portnum, str):
+        normalized = portnum.strip()
+        if not normalized:
+            return False
+        if normalized == "TEXT_MESSAGE_APP":
+            return True
+        maybe_int = _extract_optional_int(normalized)
+        return maybe_int == text_portnum_value
+
+    return False
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    return isinstance(exc, (ConnectionError, TimeoutError, OSError, EOFError))
+
+
 def _extract_optional_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, int):
         return value
     if isinstance(value, str):

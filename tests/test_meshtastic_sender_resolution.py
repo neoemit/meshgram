@@ -176,6 +176,26 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
         self.assertEqual(reaction_event.target_packet_id, 456)
         self.assertEqual(reaction_event.emoji, "❤")
 
+    def test_build_reaction_event_parses_string_emoji_and_numeric_portnum(self):
+        app = MeshgramApp(self._settings())
+        packet = {
+            "fromId": "!1234abcd",
+            "channel": 1,
+            "id": 790,
+            "decoded": {
+                "portnum": 1,
+                "payload": b"",
+                "emoji": "🔥",
+                "reply_id": "456",
+            },
+        }
+
+        reaction_event = app._build_meshtastic_reaction_event(packet)
+        self.assertIsNotNone(reaction_event)
+        assert reaction_event is not None
+        self.assertEqual(reaction_event.target_packet_id, 456)
+        self.assertEqual(reaction_event.emoji, "🔥")
+
     def test_build_text_event_ignores_reaction_packets(self):
         app = MeshgramApp(self._settings())
         packet = {
@@ -320,7 +340,7 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
         packet = iface.send_packet_calls[0]["packet"]
         self.assertEqual(packet.decoded.reply_id, 88)
         self.assertEqual(packet.decoded.emoji, ord("❤"))
-        self.assertEqual(packet.decoded.payload.decode("utf-8"), "❤")
+        self.assertEqual(packet.decoded.payload.decode("utf-8"), "")
 
     def test_send_reaction_falls_back_to_plain_text_when_low_level_unavailable(self):
         client = MeshtasticClient(self._settings())

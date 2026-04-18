@@ -84,6 +84,7 @@ class SendMeshtasticAction:
     sequence_index: Optional[int] = None
     sequence_total: Optional[int] = None
     abort_on_failure: bool = False
+    require_packet_id: bool = False
     bridge_source_telegram_chat_id: Optional[int] = None
     bridge_source_telegram_message_id: Optional[int] = None
     bridge_canonical_for_telegram_message: bool = False
@@ -96,6 +97,9 @@ class SendMeshtasticReactionAction:
     destination_id: Optional[Union[int, str]] = None
     channel_index: int = 0
     want_ack: bool = False
+    retry_max_attempts: int = 3
+    retry_initial_delay_ms: int = 500
+    retry_backoff_factor: float = 2.0
 
 
 PluginAction = Union[

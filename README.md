@@ -139,6 +139,7 @@ plugins:
       channel: 1
       reply_link_ttl_hours: 24
       reactions_enabled: true
+      meshtastic_want_ack: true
       missing_target_policy: fallback_message
       reply_missing_suffix: "(reply target not found)"
       reaction_missing_notice_template: "(reaction target not found)"
@@ -188,6 +189,7 @@ plugins:
 
 - Uses UTF-8 byte length (safe for emoji/multibyte text)
 - `prefix_template` supports `{index}` and `{total}`
+- `inter_chunk_delay_ms`: delay between chunk sends (default `150`)
 - `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
 - `retry_initial_delay_ms`: delay before first retry (default `500`)
 - `retry_backoff_factor`: exponential retry multiplier (default `2.0`)
@@ -219,6 +221,7 @@ plugins:
 - compacts Telegram sender names to first token (`Name Surname` → `Name`) before applying `sender_prefix_template`
 - chunks oversized messages by UTF-8 bytes
 - retries failed chunk sends with exponential backoff using `chunking` retry settings
+- requires a packet ID confirmation from Meshtastic SDK responses for bridge sends (retries if missing)
 - on terminal chunk failure, aborts later chunks in the same sequence when `abort_on_chunk_failure=true`
 - chunk delivery failures are log-only (no Telegram failure notification)
 - if mapping exists, Telegram replies are sent with Meshtastic `replyId`
@@ -243,6 +246,7 @@ plugins:
   - only non-bot actors in configured group are considered
   - only first Unicode emoji reaction is mirrored
   - reaction removals and custom Telegram emoji are ignored
+  - if Telegram only emits anonymous reaction-count updates, Meshgram uses best-effort emoji inference from count deltas
 - Meshtastic → Telegram:
   - packets with `decoded.emoji` + `replyId/reply_id` are mapped as reactions
   - local-node packets are ignored for loop prevention
@@ -254,6 +258,7 @@ plugins:
 Bridge reaction/reply settings:
 
 - `reactions_enabled`: enable/disable bidirectional reaction sync (`true` default)
+- `meshtastic_want_ack`: request Meshtastic reliable delivery for bridge-originated outbound packets (`true` default)
 - `missing_target_policy`: currently `fallback_message` (emit notice when mapping is missing)
 - `reply_missing_suffix`: inline suffix appended when reply target mapping is missing
 - `reaction_missing_notice_template`: notice sent when reaction target mapping is missing
@@ -499,6 +504,8 @@ Current test coverage includes:
 - config/env loading and override precedence
 - chunking behavior (ASCII, emoji, long-token fallback)
 - bridge filtering/loop prevention/reply mapping
+- Telegram reaction parsing (`message_reaction` + anonymous count update fallback)
+- Meshtastic reaction parsing compatibility (portnum/emoji format variants)
 - ping keyword-response behavior and channel filtering
 - DM HTTP command plugin behavior
 - sender name resolution fallback/override behavior
@@ -525,6 +532,20 @@ Current test coverage includes:
 - verify bridge channel (`bridge.settings.channel`)
 - ensure source message has textual content (`text` or enabled `caption`)
 - ensure Telegram sender is not a bot
+
+### Telegram long message arrives partially on Meshtastic
+
+- ensure chunking is enabled (`chunking.enabled: true`)
+- increase `chunking.inter_chunk_delay_ms` (for busy links)
+- keep `bridge.settings.meshtastic_want_ack: true`
+- watch logs for `Meshtastic send exhausted retries` to identify failing chunk indexes
+
+### Reactions are not syncing
+
+- confirm `bridge.settings.reactions_enabled: true`
+- test on recently bridged/linked messages (reaction sync requires mapping)
+- for Telegram → Meshtastic, ensure bot can receive reaction updates in that group
+- if you see only anonymous reaction counts from Telegram, keep the bot running long enough to establish per-message baseline deltas
 
 ### Sender label shows node ID
 

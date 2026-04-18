@@ -218,6 +218,8 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(actions[0].retry_initial_delay_ms, 500)
         self.assertEqual(actions[0].retry_backoff_factor, 2.0)
         self.assertTrue(actions[0].abort_on_failure)
+        self.assertTrue(actions[0].want_ack)
+        self.assertTrue(actions[0].require_packet_id)
         self.assertIsNotNone(actions[0].sequence_id)
         self.assertEqual(actions[0].sequence_index, 1)
         self.assertEqual(actions[0].sequence_total, len(actions))
@@ -303,6 +305,8 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(actions[0].target_packet_id, 9001)
         self.assertEqual(actions[0].emoji, "❤")
         self.assertEqual(actions[0].channel_index, 2)
+        self.assertTrue(actions[0].want_ack)
+        self.assertEqual(actions[0].retry_max_attempts, 3)
 
     def test_telegram_reaction_missing_mapping_emits_notice_message(self):
         event = TelegramReactionEvent(
@@ -316,6 +320,8 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].text, "(reaction target not found)")
         self.assertEqual(actions[0].channel_index, 2)
+        self.assertTrue(actions[0].want_ack)
+        self.assertTrue(actions[0].require_packet_id)
 
     def test_meshtastic_reaction_mapped_emits_telegram_reaction_action(self):
         self.reply_links.mesh_to_telegram[1001] = (-999, 201)

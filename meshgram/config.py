@@ -35,7 +35,7 @@ class TelegramConfig:
 class ChunkingConfig:
     enabled: bool = True
     prefix_template: str = "({index}/{total}) "
-    inter_chunk_delay_ms: int = 0
+    inter_chunk_delay_ms: int = 150
     retry_max_attempts: int = 3
     retry_initial_delay_ms: int = 500
     retry_backoff_factor: float = 2.0
@@ -220,7 +220,7 @@ def load_settings() -> MeshgramSettings:
         chunking=ChunkingConfig(
             enabled=_as_bool(chunking_data.get("enabled"), True),
             prefix_template=str(chunking_data.get("prefix_template", "({index}/{total}) ")),
-            inter_chunk_delay_ms=_as_int(chunking_data.get("inter_chunk_delay_ms"), 0),
+            inter_chunk_delay_ms=max(0, _as_int(chunking_data.get("inter_chunk_delay_ms"), 150)),
             retry_max_attempts=max(1, _as_int(chunking_data.get("retry_max_attempts"), 3)),
             retry_initial_delay_ms=max(0, _as_int(chunking_data.get("retry_initial_delay_ms"), 500)),
             retry_backoff_factor=max(1.0, _as_float(chunking_data.get("retry_backoff_factor"), 2.0)),

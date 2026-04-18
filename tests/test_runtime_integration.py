@@ -6,6 +6,7 @@ from meshgram.config import MeshgramSettings, PluginConfig
 from meshgram.types import (
     MeshtasticReactionEvent,
     MeshtasticTextEvent,
+    SendMeshtasticReactionAction,
     SendMeshtasticAction,
     TelegramMessageEvent,
     TelegramReactionEvent,
@@ -361,6 +362,52 @@ class RuntimeIntegrationTests(unittest.TestCase):
             any("Meshtastic send exhausted retries" in line for line in log_context.output),
             msg=f"Expected retry exhaustion log, got: {log_context.output}",
         )
+
+    def test_send_requires_packet_id_when_enabled(self):
+        attempt_counter = {"count": 0}
+
+        def _send_missing_id_once(action):
+            attempt_counter["count"] += 1
+            if attempt_counter["count"] == 1:
+                return {}
+            self.sent_mesh.append(action)
+            return {"id": 4444}
+
+        self.app.meshtastic.send_text = _send_missing_id_once
+        action = SendMeshtasticAction(
+            text="needs id",
+            require_packet_id=True,
+            retry_max_attempts=2,
+            retry_initial_delay_ms=0,
+            retry_backoff_factor=2.0,
+        )
+
+        result = asyncio.run(self.app._execute_send_meshtastic(action))
+        self.assertEqual(result["id"], 4444)
+        self.assertEqual(attempt_counter["count"], 2)
+
+    def test_meshtastic_reaction_send_retries_on_transient_failure(self):
+        attempt_counter = {"count": 0}
+
+        def _send_reaction_with_one_failure(action):
+            attempt_counter["count"] += 1
+            if attempt_counter["count"] == 1:
+                raise RuntimeError("temporary reaction failure")
+            self.sent_mesh_reactions.append(action)
+            return {"id": 5555}
+
+        self.app.meshtastic.send_reaction = _send_reaction_with_one_failure
+        action = SendMeshtasticReactionAction(
+            emoji="❤",
+            target_packet_id=9001,
+            retry_max_attempts=2,
+            retry_initial_delay_ms=0,
+            retry_backoff_factor=2.0,
+        )
+
+        result = asyncio.run(self.app._execute_send_meshtastic_reaction(action))
+        self.assertEqual(result["id"], 5555)
+        self.assertEqual(attempt_counter["count"], 2)
 
 
 if __name__ == "__main__":
