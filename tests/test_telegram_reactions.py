@@ -106,6 +106,10 @@ class TelegramReactionParsingTests(unittest.TestCase):
         self.assertIn("❤️", candidates)
         self.assertIn("👍", candidates)
 
+    def test_build_telegram_reaction_candidates_rejects_modifier_only_input(self):
+        candidates = _build_telegram_reaction_candidates("\ufe0f")
+        self.assertEqual(candidates, ["👍"])
+
 
 if __name__ == "__main__":
     unittest.main()

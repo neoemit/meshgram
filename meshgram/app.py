@@ -50,6 +50,11 @@ MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 TELEGRAM_REACTION_WRITE_DEDUPE_TTL_SECONDS = 12.0
 DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI = "👍"
 TELEGRAM_REACTION_INVALID_ERROR_TOKEN = "reaction_invalid"
+_EMOJI_MODIFIER_CODEPOINTS = {
+    0x20E3,  # COMBINING ENCLOSING KEYCAP
+    0xFE0E,  # VARIATION SELECTOR-15
+    0xFE0F,  # VARIATION SELECTOR-16
+}
 
 try:
     from meshtastic.protobuf import mesh_pb2
@@ -367,18 +372,19 @@ class MeshtasticClient:
     def send_reaction(self, action: SendMeshtasticReactionAction):
         if self.iface is None:
             raise RuntimeError("Meshtastic interface is not connected")
-        if not action.emoji:
+        normalized_emoji = _sanitize_reaction_emoji_text(action.emoji)
+        if not normalized_emoji:
             raise ValueError("Reaction emoji cannot be empty")
 
         destination_id = action.destination_id if action.destination_id is not None else BROADCAST_ADDR
         if self._can_use_lowlevel_packet():
             return self._send_text_packet_lowlevel(
-                text="",
+                text=normalized_emoji,
                 destination_id=destination_id,
                 channel_index=action.channel_index,
                 want_ack=action.want_ack,
                 reply_id=action.target_packet_id,
-                emoji_codepoint=ord(action.emoji[0]),
+                emoji_codepoint=ord(normalized_emoji[0]),
             )
 
         LOGGER.warning(
@@ -386,7 +392,7 @@ class MeshtasticClient:
         )
         return self.send_text(
             SendMeshtasticAction(
-                text=action.emoji,
+                text=normalized_emoji,
                 destination_id=destination_id,
                 channel_index=action.channel_index,
                 reply_id=action.target_packet_id,
@@ -1150,7 +1156,7 @@ class MeshgramApp:
         self.bot_app.add_handler(
             MessageReactionHandler(
                 self._handle_telegram_reaction,
-                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION,
+                message_reaction_types=_message_reaction_handler_types(),
             )
         )
 
@@ -1209,7 +1215,7 @@ def _extract_first_unicode_reaction_emoji(
 
 
 def _build_telegram_reaction_candidates(emoji: str) -> list[str]:
-    text = emoji.strip()
+    text = _sanitize_reaction_emoji_text(emoji)
     if not text:
         return [DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI]
 
@@ -1260,27 +1266,17 @@ def _extract_unicode_emoji_counts(reactions: Sequence[ReactionCount]) -> dict[st
 
 
 def _extract_reaction_emoji(decoded: dict[str, Any]) -> Optional[str]:
-    raw_emoji = decoded.get("emoji")
-
-    emoji_codepoint = _extract_optional_int(raw_emoji)
-    if emoji_codepoint is not None:
-        if emoji_codepoint <= 0:
-            return None
-        with contextlib.suppress(ValueError):
-            return chr(emoji_codepoint)
+    if "emoji" not in decoded:
         return None
 
-    if isinstance(raw_emoji, str):
-        text = raw_emoji.strip()
-        if text:
-            return text[0]
+    raw_emoji = decoded.get("emoji")
+    normalized = _extract_reaction_emoji_from_value(raw_emoji)
+    if normalized:
+        return normalized
 
-    if isinstance(raw_emoji, bytes):
-        decoded_emoji = raw_emoji.decode("utf-8", errors="ignore").strip()
-        if decoded_emoji:
-            return decoded_emoji[0]
-
-    return None
+    # Some firmware/library paths expose only emoji modifiers in `decoded.emoji`
+    # while carrying the visible glyph in payload. Use payload as best-effort fallback.
+    return _extract_reaction_emoji_from_payload(decoded.get("payload"))
 
 
 def _is_text_message_portnum(portnum: Any) -> bool:
@@ -1311,6 +1307,115 @@ def _is_text_message_portnum(portnum: Any) -> bool:
 
 def _is_connection_error(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionError, TimeoutError, OSError, EOFError))
+
+
+def _message_reaction_handler_types() -> int:
+    types = getattr(MessageReactionHandler, "MESSAGE_REACTION", 0)
+    for attribute in (
+        "MESSAGE_REACTION_UPDATED",
+        "MESSAGE_REACTION_COUNT",
+        "MESSAGE_REACTION_COUNT_UPDATED",
+    ):
+        value = getattr(MessageReactionHandler, attribute, None)
+        if isinstance(value, int):
+            types |= value
+    if not isinstance(types, int) or types == 0:
+        return MessageReactionHandler.MESSAGE_REACTION
+    return types
+
+
+def _extract_reaction_emoji_from_value(raw_emoji: Any) -> Optional[str]:
+    emoji_codepoint = _extract_optional_int(raw_emoji)
+    if emoji_codepoint is not None:
+        return _extract_reaction_emoji_from_codepoint(emoji_codepoint)
+
+    if isinstance(raw_emoji, str):
+        return _sanitize_reaction_emoji_text(raw_emoji)
+
+    if isinstance(raw_emoji, bytes):
+        decoded_emoji = raw_emoji.decode("utf-8", errors="ignore")
+        return _sanitize_reaction_emoji_text(decoded_emoji)
+
+    return None
+
+
+def _extract_reaction_emoji_from_payload(raw_payload: Any) -> Optional[str]:
+    payload_text: Optional[str] = None
+    if isinstance(raw_payload, bytes):
+        payload_text = raw_payload.decode("utf-8", errors="ignore")
+    elif isinstance(raw_payload, str):
+        payload_text = raw_payload
+
+    if not payload_text:
+        return None
+
+    return _sanitize_reaction_emoji_text(payload_text)
+
+
+def _extract_reaction_emoji_from_codepoint(codepoint: int) -> Optional[str]:
+    if codepoint <= 0:
+        return None
+    if _is_emoji_modifier_codepoint(codepoint):
+        return None
+    with contextlib.suppress(ValueError):
+        return chr(codepoint)
+    return None
+
+
+def _sanitize_reaction_emoji_text(raw_text: str) -> Optional[str]:
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    chars = list(text)
+    start_index = 0
+    while start_index < len(chars) and _is_emoji_modifier(chars[start_index]):
+        start_index += 1
+
+    if start_index >= len(chars):
+        return None
+
+    first_visible = chars[start_index]
+    emoji_chars: list[str] = [first_visible]
+    index = start_index + 1
+    while index < len(chars):
+        char = chars[index]
+        codepoint = ord(char)
+        if _is_emoji_modifier_codepoint(codepoint):
+            emoji_chars.append(char)
+            index += 1
+            continue
+
+        if char == "\u200d":
+            emoji_chars.append(char)
+            index += 1
+            if index < len(chars):
+                emoji_chars.append(chars[index])
+                index += 1
+            continue
+
+        break
+
+    normalized = "".join(emoji_chars).strip()
+    if not normalized:
+        return None
+
+    if all(_is_emoji_modifier(char) for char in normalized):
+        return None
+
+    return normalized
+
+
+def _is_emoji_modifier(char: str) -> bool:
+    return _is_emoji_modifier_codepoint(ord(char))
+
+
+def _is_emoji_modifier_codepoint(codepoint: int) -> bool:
+    if codepoint in _EMOJI_MODIFIER_CODEPOINTS:
+        return True
+    if 0x1F3FB <= codepoint <= 0x1F3FF:
+        return True
+    return False
 
 
 def _is_broadcast_destination(destination_id: Any) -> bool:

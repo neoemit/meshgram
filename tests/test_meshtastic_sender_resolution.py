@@ -213,6 +213,43 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
         event = app._build_meshtastic_event(packet)
         self.assertIsNone(event)
 
+    def test_build_reaction_event_falls_back_to_payload_when_emoji_is_modifier_only(self):
+        app = MeshgramApp(self._settings())
+        packet = {
+            "fromId": "!1234abcd",
+            "channel": 1,
+            "id": 791,
+            "decoded": {
+                "portnum": "TEXT_MESSAGE_APP",
+                "payload": "❤️".encode("utf-8"),
+                "emoji": 0xFE0F,
+                "replyId": 456,
+            },
+        }
+
+        reaction_event = app._build_meshtastic_reaction_event(packet)
+        self.assertIsNotNone(reaction_event)
+        assert reaction_event is not None
+        self.assertEqual(reaction_event.target_packet_id, 456)
+        self.assertEqual(reaction_event.emoji, "❤️")
+
+    def test_build_reaction_event_ignores_modifier_only_emoji_without_payload_fallback(self):
+        app = MeshgramApp(self._settings())
+        packet = {
+            "fromId": "!1234abcd",
+            "channel": 1,
+            "id": 792,
+            "decoded": {
+                "portnum": "TEXT_MESSAGE_APP",
+                "payload": b"",
+                "emoji": 0xFE0F,
+                "replyId": 456,
+            },
+        }
+
+        reaction_event = app._build_meshtastic_reaction_event(packet)
+        self.assertIsNone(reaction_event)
+
     def test_sender_label_uses_override_without_node_db(self):
         settings = self._settings()
         settings.meshtastic.node_name_overrides = {"!1234abcd": "FieldNode"}
@@ -359,7 +396,7 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
         packet = iface.send_packet_calls[0]["packet"]
         self.assertEqual(packet.decoded.reply_id, 88)
         self.assertEqual(packet.decoded.emoji, ord("❤"))
-        self.assertEqual(packet.decoded.payload.decode("utf-8"), "")
+        self.assertEqual(packet.decoded.payload.decode("utf-8"), "❤")
 
     def test_send_reaction_falls_back_to_plain_text_when_low_level_unavailable(self):
         client = MeshtasticClient(self._settings())
