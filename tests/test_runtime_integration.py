@@ -1,6 +1,8 @@
 import asyncio
 import unittest
 
+from telegram.error import BadRequest
+
 from meshgram.app import MeshgramApp
 from meshgram.config import MeshgramSettings, PluginConfig
 from meshgram.types import (
@@ -8,6 +10,7 @@ from meshgram.types import (
     MeshtasticTextEvent,
     SendMeshtasticReactionAction,
     SendMeshtasticAction,
+    SendTelegramReactionAction,
     TelegramMessageEvent,
     TelegramReactionEvent,
 )
@@ -32,6 +35,20 @@ class _FakeBot:
     async def set_message_reaction(self, **kwargs):
         self.reactions.append(kwargs)
         return True
+
+
+class _FakeBotReactionInvalid(_FakeBot):
+    async def set_message_reaction(self, **kwargs):
+        reaction = kwargs.get("reaction") or []
+        emoji = getattr(reaction[0], "emoji", None) if reaction else None
+        if emoji in {"❤", "❤️"}:
+            raise BadRequest("Reaction_invalid")
+        return await super().set_message_reaction(**kwargs)
+
+
+class _FakeBotReactionAlwaysInvalid(_FakeBot):
+    async def set_message_reaction(self, **kwargs):
+        raise BadRequest("Reaction_invalid")
 
 
 class _FakeTelegramApp:
@@ -253,6 +270,32 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.app.bot_app.bot.reactions), 0)
         self.assertEqual(len(self.app.bot_app.bot.messages), 1)
         self.assertEqual(self.app.bot_app.bot.messages[0]["text"], "(reaction target not found)")
+
+    def test_telegram_reaction_send_falls_back_when_emoji_is_invalid(self):
+        self.app.bot_app.bot = _FakeBotReactionInvalid()
+        action = SendTelegramReactionAction(
+            chat_id=-555,
+            message_id=123,
+            emoji="❤",
+        )
+
+        asyncio.run(self.app._execute_send_telegram_reaction(action))
+
+        self.assertEqual(len(self.app.bot_app.bot.reactions), 1)
+        reaction = self.app.bot_app.bot.reactions[0]["reaction"][0]
+        self.assertEqual(getattr(reaction, "emoji", None), "👍")
+
+    def test_telegram_reaction_send_drops_when_all_candidates_invalid(self):
+        self.app.bot_app.bot = _FakeBotReactionAlwaysInvalid()
+        action = SendTelegramReactionAction(
+            chat_id=-555,
+            message_id=123,
+            emoji="❤",
+        )
+
+        # Should not raise; all candidates are dropped gracefully.
+        asyncio.run(self.app._execute_send_telegram_reaction(action))
+        self.assertEqual(len(self.app.bot_app.bot.reactions), 0)
 
     def test_chunk_sequence_retries_and_completes_after_transient_failure(self):
         attempt_chunk_indexes: list[int] = []

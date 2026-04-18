@@ -10,7 +10,11 @@ from telegram import (
     ReactionTypeEmoji,
 )
 
-from meshgram.app import MeshgramApp, _extract_first_unicode_reaction_emoji
+from meshgram.app import (
+    MeshgramApp,
+    _build_telegram_reaction_candidates,
+    _extract_first_unicode_reaction_emoji,
+)
 from meshgram.config import MeshgramSettings
 
 
@@ -95,6 +99,12 @@ class TelegramReactionParsingTests(unittest.TestCase):
         incremented = self._build_count_update([ReactionCount(type=ReactionTypeEmoji("❤"), total_count=2)])
         event = app._build_telegram_reaction_event_from_count_update(incremented)
         self.assertIsNone(event)
+
+    def test_build_telegram_reaction_candidates_includes_safe_fallbacks(self):
+        candidates = _build_telegram_reaction_candidates("❤")
+        self.assertIn("❤", candidates)
+        self.assertIn("❤️", candidates)
+        self.assertIn("👍", candidates)
 
 
 if __name__ == "__main__":

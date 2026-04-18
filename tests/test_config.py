@@ -32,6 +32,7 @@ class ConfigTests(unittest.TestCase):
                       enabled: true
                       prefix_template: "({index}/{total}) "
                       inter_chunk_delay_ms: 200
+                      payload_safety_margin_bytes: 24
                       retry_max_attempts: 5
                       retry_initial_delay_ms: 250
                       retry_backoff_factor: 1.5
@@ -83,6 +84,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.chunking.retry_initial_delay_ms, 250)
             self.assertEqual(settings.chunking.retry_backoff_factor, 1.5)
             self.assertFalse(settings.chunking.abort_on_chunk_failure)
+            self.assertEqual(settings.chunking.payload_safety_margin_bytes, 24)
             self.assertEqual(settings.plugins[0].settings["reactions_enabled"], True)
             self.assertEqual(settings.plugins[0].settings["missing_target_policy"], "fallback_message")
 

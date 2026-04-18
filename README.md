@@ -127,6 +127,7 @@ chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
+  payload_safety_margin_bytes: 24
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
   retry_backoff_factor: 2.0
@@ -190,6 +191,7 @@ plugins:
 - Uses UTF-8 byte length (safe for emoji/multibyte text)
 - `prefix_template` supports `{index}` and `{total}`
 - `inter_chunk_delay_ms`: delay between chunk sends (default `150`)
+- `payload_safety_margin_bytes`: reserves bytes below reported SDK payload max to reduce edge-size drops (default `24`)
 - `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
 - `retry_initial_delay_ms`: delay before first retry (default `500`)
 - `retry_backoff_factor`: exponential retry multiplier (default `2.0`)
@@ -250,6 +252,8 @@ plugins:
 - Meshtastic → Telegram:
   - packets with `decoded.emoji` + `replyId/reply_id` are mapped as reactions
   - local-node packets are ignored for loop prevention
+  - if Telegram rejects an emoji as `Reaction_invalid`, Meshgram retries with normalized variants, then safe fallback `👍`
+  - if all candidates are rejected by Telegram, reaction sync is skipped (logged) without crashing plugin flow
 - if reaction target mapping is missing and `missing_target_policy: fallback_message`, bridge emits `reaction_missing_notice_template`
 - actor identity is platform-limited:
   - Telegram reaction appears from bot
@@ -537,6 +541,7 @@ Current test coverage includes:
 
 - ensure chunking is enabled (`chunking.enabled: true`)
 - increase `chunking.inter_chunk_delay_ms` (for busy links)
+- increase `chunking.payload_safety_margin_bytes` if you still see first-chunk drops
 - keep `bridge.settings.meshtastic_want_ack: true`
 - watch logs for `Meshtastic send exhausted retries` to identify failing chunk indexes
 

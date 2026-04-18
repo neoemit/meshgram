@@ -22,6 +22,7 @@ chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
+  payload_safety_margin_bytes: 24
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
   retry_backoff_factor: 2.0

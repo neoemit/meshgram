@@ -4,7 +4,7 @@ import logging
 import uuid
 
 from meshgram.plugin import BasePlugin
-from meshgram.text_utils import split_for_meshtastic
+from meshgram.text_utils import split_for_meshtastic, utf8_len
 from meshgram.types import (
     MeshtasticReactionEvent,
     MeshtasticTextEvent,
@@ -26,6 +26,7 @@ class BridgePlugin(BasePlugin):
     DEFAULT_REPLY_MISSING_SUFFIX = "(reply target not found)"
     DEFAULT_REACTION_MISSING_NOTICE = "(reaction target not found)"
     DEFAULT_MESHTASTIC_WANT_ACK = True
+    REPLY_ID_EXTRA_MARGIN_BYTES = 8
 
     def _bridge_channel(self, context: PluginContext) -> int:
         configured_channel = self.settings.get("channel")
@@ -115,12 +116,33 @@ class BridgePlugin(BasePlugin):
             meshtastic_text = f"[{compact_display_name}] {text}"
 
         chunking = context.settings.chunking
-        chunks = split_for_meshtastic(
-            text=meshtastic_text,
-            payload_limit=context.meshtastic_payload_limit,
-            prefix_template=chunking.prefix_template,
-            chunking_enabled=chunking.enabled,
-        )
+        payload_limit = context.meshtastic_payload_limit - max(0, chunking.payload_safety_margin_bytes)
+        if meshtastic_reply_id is not None:
+            # reply_id adds protobuf bytes; reserve extra headroom to avoid edge-size drops.
+            payload_limit -= self.REPLY_ID_EXTRA_MARGIN_BYTES
+        min_split_payload_limit = utf8_len(chunking.prefix_template.format(index=1, total=1)) + 1
+        payload_limit = max(min_split_payload_limit, payload_limit)
+        try:
+            chunks = split_for_meshtastic(
+                text=meshtastic_text,
+                payload_limit=payload_limit,
+                prefix_template=chunking.prefix_template,
+                chunking_enabled=chunking.enabled,
+            )
+        except ValueError as exc:
+            if "Chunk prefix leaves no space for payload" not in str(exc):
+                raise
+
+            LOGGER.warning(
+                "Chunk payload safety margin is too aggressive for this message; "
+                "falling back to full Meshtastic payload limit"
+            )
+            chunks = split_for_meshtastic(
+                text=meshtastic_text,
+                payload_limit=context.meshtastic_payload_limit,
+                prefix_template=chunking.prefix_template,
+                chunking_enabled=chunking.enabled,
+            )
 
         actions: list[PluginAction] = []
         bridge_channel = self._bridge_channel(context)

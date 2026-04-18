@@ -18,6 +18,7 @@ from telegram import (
     ReactionTypeEmoji,
     Update,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -47,6 +48,8 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_MESHTASTIC_PAYLOAD_LIMIT = 233
 MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 TELEGRAM_REACTION_WRITE_DEDUPE_TTL_SECONDS = 12.0
+DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI = "👍"
+TELEGRAM_REACTION_INVALID_ERROR_TOKEN = "reaction_invalid"
 
 try:
     from meshtastic.protobuf import mesh_pb2
@@ -900,13 +903,40 @@ class MeshgramApp:
         if self.bot_app is None:
             raise RuntimeError("Telegram bot app is not initialized")
 
-        await self.bot_app.bot.set_message_reaction(
-            chat_id=action.chat_id,
-            message_id=action.message_id,
-            reaction=[ReactionTypeEmoji(action.emoji)],
-            is_big=action.is_big,
-        )
-        self._record_telegram_reaction_write(action.chat_id, action.message_id, action.emoji)
+        candidates = _build_telegram_reaction_candidates(action.emoji)
+        for index, emoji in enumerate(candidates):
+            try:
+                await self.bot_app.bot.set_message_reaction(
+                    chat_id=action.chat_id,
+                    message_id=action.message_id,
+                    reaction=[ReactionTypeEmoji(emoji)],
+                    is_big=action.is_big,
+                )
+                self._record_telegram_reaction_write(action.chat_id, action.message_id, emoji)
+                if emoji != action.emoji:
+                    LOGGER.info(
+                        "Applied Telegram reaction fallback emoji '%s' for Meshtastic emoji '%s'",
+                        emoji,
+                        action.emoji,
+                    )
+                return
+            except BadRequest as exc:
+                error_text = str(exc).strip()
+                if TELEGRAM_REACTION_INVALID_ERROR_TOKEN in error_text.casefold():
+                    if index + 1 < len(candidates):
+                        LOGGER.warning(
+                            "Telegram rejected reaction '%s' as invalid; trying fallback '%s'",
+                            emoji,
+                            candidates[index + 1],
+                        )
+                        continue
+
+                    LOGGER.warning(
+                        "Telegram rejected all reaction candidates for '%s'; dropping reaction sync",
+                        action.emoji,
+                    )
+                    return
+                raise
 
     async def _execute_send_meshtastic(self, action: SendMeshtasticAction):
         async with self._meshtastic_send_lock:
@@ -1127,6 +1157,38 @@ def _extract_first_unicode_reaction_emoji(
                 return emoji
 
     return None
+
+
+def _build_telegram_reaction_candidates(emoji: str) -> list[str]:
+    text = emoji.strip()
+    if not text:
+        return [DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI]
+
+    candidates: list[str] = []
+    for value in (
+        text,
+        _telegram_reaction_alias(text),
+        f"{text}\ufe0f",
+        text.replace("\ufe0f", ""),
+        DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI,
+    ):
+        normalized = value.strip()
+        if not normalized:
+            continue
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    return candidates
+
+
+def _telegram_reaction_alias(emoji: str) -> str:
+    aliases = {
+        "❤": "❤️",
+        "♥": "❤️",
+        "☻": "🙂",
+        "☺": "🙂",
+    }
+    return aliases.get(emoji, emoji)
 
 
 def _extract_unicode_emoji_counts(reactions: Sequence[ReactionCount]) -> dict[str, int]:

@@ -3,6 +3,7 @@ import unittest
 
 from meshgram.config import MeshgramSettings
 from meshgram.plugins.bridge import BridgePlugin
+from meshgram.text_utils import utf8_len
 from meshgram.types import (
     MeshtasticReactionEvent,
     MeshtasticTextEvent,
@@ -45,6 +46,7 @@ class BridgePluginTests(unittest.TestCase):
         settings.chunking.enabled = True
         settings.chunking.prefix_template = "({index}/{total}) "
         settings.chunking.inter_chunk_delay_ms = 150
+        settings.chunking.payload_safety_margin_bytes = 16
         self.settings = settings
 
         self.reply_links = _FakeReplyLinks()
@@ -229,6 +231,47 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(actions[0].bridge_source_telegram_chat_id, -999)
         self.assertEqual(actions[0].bridge_source_telegram_message_id, 10)
         self.assertEqual(actions[0].channel_index, 2)
+
+    def test_chunking_reserves_payload_safety_margin(self):
+        self.settings.chunking.payload_safety_margin_bytes = 10
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=101,
+            reply_to_message_id=None,
+            text="x" * 200,
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        payload_limit = 40
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=payload_limit)))
+        self.assertGreater(len(actions), 1)
+        reserved_limit = payload_limit - self.settings.chunking.payload_safety_margin_bytes
+        for action in actions:
+            self.assertLessEqual(utf8_len(action.text), reserved_limit)
+
+    def test_chunking_reserves_extra_margin_for_reply_id(self):
+        self.settings.chunking.payload_safety_margin_bytes = 10
+        self.reply_links.telegram_to_mesh[(-999, 55)] = 777
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=102,
+            reply_to_message_id=55,
+            text="x" * 200,
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        payload_limit = 40
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=payload_limit)))
+        self.assertGreater(len(actions), 1)
+        reserved_limit = payload_limit - self.settings.chunking.payload_safety_margin_bytes - self.plugin.REPLY_ID_EXTRA_MARGIN_BYTES
+        for action in actions:
+            self.assertLessEqual(utf8_len(action.text), reserved_limit)
 
     def test_bridge_plugin_channel_setting_overrides_global_bridge_channel(self):
         plugin = BridgePlugin({"channel": 1})
