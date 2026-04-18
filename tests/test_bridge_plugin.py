@@ -46,7 +46,7 @@ class BridgePluginTests(unittest.TestCase):
         settings.chunking.enabled = True
         settings.chunking.prefix_template = "({index}/{total}) "
         settings.chunking.inter_chunk_delay_ms = 150
-        settings.chunking.max_chunk_bytes = 180
+        settings.chunking.max_chunk_bytes = 160
         settings.chunking.payload_safety_margin_bytes = 16
         self.settings = settings
 
@@ -311,6 +311,25 @@ class BridgePluginTests(unittest.TestCase):
         self.assertGreater(len(actions), 1)
         for action in actions:
             self.assertLessEqual(utf8_len(action.text), 30)
+
+    def test_chunking_uses_safe_default_cap_when_configured_cap_is_zero(self):
+        self.settings.chunking.payload_safety_margin_bytes = 0
+        self.settings.chunking.max_chunk_bytes = 0
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=104,
+            reply_to_message_id=None,
+            text="x" * 260,
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=300)))
+        self.assertGreater(len(actions), 1)
+        for action in actions:
+            self.assertLessEqual(utf8_len(action.text), self.plugin.DEFAULT_SAFE_MAX_CHUNK_BYTES)
 
     def test_bridge_plugin_channel_setting_overrides_global_bridge_channel(self):
         plugin = BridgePlugin({"channel": 1})

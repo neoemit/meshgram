@@ -127,7 +127,7 @@ chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
-  max_chunk_bytes: 180
+  max_chunk_bytes: 160
   payload_safety_margin_bytes: 12
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
@@ -193,7 +193,8 @@ plugins:
 - `prefix_template` supports `{index}` and `{total}`
 - `inter_chunk_delay_ms`: requested delay between chunk sends (default `150`)
 - chunked bridge sends enforce a minimum `900ms` inter-chunk delay for reliability
-- `max_chunk_bytes`: hard cap for chunk payload bytes before SDK/radio limits (default `180`, set `0` to disable cap)
+- `max_chunk_bytes`: hard cap for chunk payload bytes before SDK/radio limits (default `160`)
+- if `max_chunk_bytes <= 0`, Meshgram uses safe default cap `160`
 - `payload_safety_margin_bytes`: reserves bytes below reported SDK payload max to reduce edge-size drops (default `12`)
 - `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
 - `retry_initial_delay_ms`: delay before first retry (default `500`)
