@@ -452,6 +452,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
         action = SendMeshtasticAction(
             text="chunk",
+            destination_id="!1234abcd",
             want_ack=True,
             wait_for_ack=True,
             ack_timeout_ms=2000,
@@ -468,6 +469,42 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(result["id"], 6668)
         self.assertEqual(send_attempt_counter["count"], 2)
         self.assertEqual(ack_wait_counter["count"], 2)
+
+    def test_broadcast_chunk_send_does_not_wait_for_ack(self):
+        send_attempt_counter = {"count": 0}
+        ack_wait_counter = {"count": 0}
+
+        def _send_with_broadcast_ack(action):
+            send_attempt_counter["count"] += 1
+            self.sent_mesh.append(action)
+            return {"id": 7770 + send_attempt_counter["count"]}
+
+        class _AckIface:
+            def waitForAckNak(self_nonlocal):
+                ack_wait_counter["count"] += 1
+                raise RuntimeError("should not be called for broadcast")
+
+        self.app.meshtastic.send_text = _send_with_broadcast_ack
+        self.app.meshtastic.iface = _AckIface()
+
+        action = SendMeshtasticAction(
+            text="chunk",
+            destination_id=None,
+            want_ack=True,
+            wait_for_ack=True,
+            ack_timeout_ms=2000,
+            retry_max_attempts=3,
+            retry_initial_delay_ms=0,
+            retry_backoff_factor=2.0,
+            sequence_id="seq-broadcast",
+            sequence_index=1,
+            sequence_total=3,
+        )
+
+        result = asyncio.run(self.app._execute_send_meshtastic(action))
+        self.assertEqual(result["id"], 7771)
+        self.assertEqual(send_attempt_counter["count"], 1)
+        self.assertEqual(ack_wait_counter["count"], 0)
 
     def test_meshtastic_reaction_send_retries_on_transient_failure(self):
         attempt_counter = {"count": 0}

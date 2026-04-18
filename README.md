@@ -203,6 +203,7 @@ plugins:
 - `retry_backoff_factor`: exponential retry multiplier (default `2.0`)
 - `wait_for_ack`: for chunked sends, wait for Meshtastic ACK before sending next chunk (default `true`)
 - `ack_timeout_ms`: timeout for ACK wait before retrying a chunk send (default `20000`)
+- ACK gating is automatically skipped for broadcast (`^all`) sends
 - `abort_on_chunk_failure`: if `true`, stops remaining chunks in the same sequence after terminal failure
 
 ---
@@ -234,7 +235,7 @@ plugins:
 - retries failed chunk sends with exponential backoff using `chunking` retry settings
 - requires a packet ID confirmation from Meshtastic SDK responses for bridge sends (retries if missing)
 - logs sequence/chunk packet IDs for every chunked send attempt
-- when enabled, waits for ACK per chunk before continuing sequence
+- when enabled, waits for ACK per chunk before continuing sequence (unicast destinations only)
 - on terminal chunk failure, aborts later chunks in the same sequence when `abort_on_chunk_failure=true`
 - chunk delivery failures are log-only (no Telegram failure notification)
 - if mapping exists, Telegram replies are sent with Meshtastic `replyId`

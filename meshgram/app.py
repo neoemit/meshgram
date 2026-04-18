@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Any, Optional, Sequence
 
-from meshtastic import BROADCAST_ADDR
+from meshtastic import BROADCAST_ADDR, BROADCAST_NUM
 import meshtastic.serial_interface
 import meshtastic.tcp_interface
 from pubsub import pub
@@ -303,10 +303,15 @@ class MeshtasticClient:
             raise RuntimeError("Meshtastic interface is not connected")
 
         destination_id = action.destination_id if action.destination_id is not None else BROADCAST_ADDR
+        effective_want_ack = action.want_ack and not _is_broadcast_destination(destination_id)
+        if action.want_ack and not effective_want_ack:
+            LOGGER.info(
+                "Disabling Meshtastic wantAck for broadcast destination to avoid false ACK waits/retries"
+            )
         kwargs = {
             "destinationId": destination_id,
             "channelIndex": action.channel_index,
-            "wantAck": action.want_ack,
+            "wantAck": effective_want_ack,
         }
 
         if action.reply_id is None:
@@ -333,7 +338,7 @@ class MeshtasticClient:
                         action.text.encode("utf-8"),
                         destinationId=destination_id,
                         portNum=portnums_pb2.PortNum.TEXT_MESSAGE_APP,
-                        wantAck=action.want_ack,
+                        wantAck=effective_want_ack,
                         channelIndex=action.channel_index,
                         replyId=action.reply_id,
                     )
@@ -350,7 +355,7 @@ class MeshtasticClient:
                 text=action.text,
                 destination_id=destination_id,
                 channel_index=action.channel_index,
-                want_ack=action.want_ack,
+                want_ack=effective_want_ack,
                 reply_id=action.reply_id,
             )
 
@@ -968,7 +973,12 @@ class MeshgramApp:
                     packet_id = _extract_meshtastic_packet_id(sent_packet)
                     if action.require_packet_id and packet_id is None:
                         raise RuntimeError("Meshtastic send returned no packet id")
-                    if action.wait_for_ack and action.want_ack:
+                    should_wait_for_ack = (
+                        action.wait_for_ack
+                        and action.want_ack
+                        and not _is_broadcast_destination(action.destination_id)
+                    )
+                    if should_wait_for_ack:
                         if self.meshtastic.supports_wait_for_ack:
                             ack_timeout_seconds = max(1.0, action.ack_timeout_ms / 1000)
                             await asyncio.wait_for(
@@ -1301,6 +1311,22 @@ def _is_text_message_portnum(portnum: Any) -> bool:
 
 def _is_connection_error(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionError, TimeoutError, OSError, EOFError))
+
+
+def _is_broadcast_destination(destination_id: Any) -> bool:
+    if destination_id is None:
+        return True
+
+    if isinstance(destination_id, int):
+        return destination_id == BROADCAST_NUM
+
+    if isinstance(destination_id, str):
+        normalized = destination_id.strip().lower()
+        if not normalized:
+            return False
+        return normalized in {"^all", "all", "broadcast", "broadcast_addr"}
+
+    return False
 
 
 def _extract_optional_int(value: Any) -> Optional[int]:

@@ -260,6 +260,24 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
         self.assertEqual(len(iface.calls), 1)
         self.assertEqual(iface.calls[0]["replyId"], 999)
 
+    def test_send_text_disables_want_ack_for_broadcast_destination(self):
+        client = MeshtasticClient(self._settings())
+        iface = _SendTextWithReplyId()
+        client.iface = iface
+
+        result = client.send_text(
+            SendMeshtasticAction(
+                text="broadcast",
+                destination_id=None,
+                channel_index=2,
+                want_ack=True,
+            )
+        )
+
+        self.assertEqual(result["id"], 123)
+        self.assertEqual(len(iface.calls), 1)
+        self.assertEqual(iface.calls[0]["wantAck"], False)
+
     def test_send_text_falls_back_when_reply_id_is_unsupported(self):
         client = MeshtasticClient(self._settings())
         iface = _SendTextWithoutReplyId()
@@ -306,6 +324,7 @@ class MeshtasticSenderResolutionTests(unittest.TestCase):
         result = client.send_text(
             SendMeshtasticAction(
                 text="hello",
+                destination_id="!1234abcd",
                 channel_index=4,
                 reply_id=444,
                 want_ack=True,
