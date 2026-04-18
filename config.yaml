@@ -33,6 +33,10 @@ plugins:
     settings:
       channel: 1
       reply_link_ttl_hours: 24
+      reactions_enabled: true
+      missing_target_policy: fallback_message
+      reply_missing_suffix: "(reply target not found)"
+      reaction_missing_notice_template: "(reaction target not found)"
 
   - name: ping_pong
     enabled: true

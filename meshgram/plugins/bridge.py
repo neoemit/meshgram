@@ -6,12 +6,16 @@ import uuid
 from meshgram.plugin import BasePlugin
 from meshgram.text_utils import split_for_meshtastic
 from meshgram.types import (
+    MeshtasticReactionEvent,
     MeshtasticTextEvent,
     PluginAction,
     PluginContext,
+    SendMeshtasticReactionAction,
     SendMeshtasticAction,
+    SendTelegramReactionAction,
     SendTelegramAction,
     TelegramMessageEvent,
+    TelegramReactionEvent,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -19,6 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 class BridgePlugin(BasePlugin):
     name = "bridge"
+    DEFAULT_REPLY_MISSING_SUFFIX = "(reply target not found)"
+    DEFAULT_REACTION_MISSING_NOTICE = "(reaction target not found)"
 
     def _bridge_channel(self, context: PluginContext) -> int:
         configured_channel = self.settings.get("channel")
@@ -55,6 +61,8 @@ class BridgePlugin(BasePlugin):
                 context.telegram_group_id,
                 event.reply_id,
             )
+            if telegram_reply_to_message_id is None and self._should_emit_missing_target_fallback():
+                text = f"{text} {self._reply_missing_suffix()}".strip()
 
         return [
             SendTelegramAction(
@@ -92,6 +100,8 @@ class BridgePlugin(BasePlugin):
                 event.chat_id,
                 event.reply_to_message_id,
             )
+            if meshtastic_reply_id is None and self._should_emit_missing_target_fallback():
+                text = f"{text} {self._reply_missing_suffix()}".strip()
 
         template = context.settings.telegram.sender_prefix_template
         compact_display_name = _compact_display_name(event.sender_display_name)
@@ -137,6 +147,115 @@ class BridgePlugin(BasePlugin):
             )
 
         return actions
+
+    async def on_telegram_reaction(
+        self,
+        event: TelegramReactionEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        if not self._reactions_enabled():
+            return []
+        if event.chat_id != context.telegram_group_id:
+            return []
+        if event.is_from_bot:
+            return []
+
+        bridge_channel = self._bridge_channel(context)
+        target_packet_id = None
+        if context.reply_links is not None:
+            target_packet_id = context.reply_links.get_meshtastic_for_telegram(
+                event.chat_id,
+                event.message_id,
+            )
+
+        if target_packet_id is None:
+            if self._should_emit_missing_target_fallback():
+                return [
+                    SendMeshtasticAction(
+                        text=self._reaction_missing_notice(),
+                        channel_index=bridge_channel,
+                    )
+                ]
+            return []
+
+        return [
+            SendMeshtasticReactionAction(
+                emoji=event.emoji,
+                target_packet_id=target_packet_id,
+                channel_index=bridge_channel,
+            )
+        ]
+
+    async def on_meshtastic_reaction(
+        self,
+        event: MeshtasticReactionEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        if not self._reactions_enabled():
+            return []
+
+        bridge_channel = self._bridge_channel(context)
+        if event.channel_index != bridge_channel:
+            return []
+        if context.local_node_id and event.from_id == context.local_node_id:
+            return []
+
+        telegram_message_id = None
+        if context.reply_links is not None:
+            telegram_message_id = context.reply_links.get_telegram_for_meshtastic(
+                context.telegram_group_id,
+                event.target_packet_id,
+            )
+
+        if telegram_message_id is None:
+            if self._should_emit_missing_target_fallback():
+                return [
+                    SendTelegramAction(
+                        chat_id=context.telegram_group_id,
+                        text=self._reaction_missing_notice(),
+                    )
+                ]
+            return []
+
+        return [
+            SendTelegramReactionAction(
+                chat_id=context.telegram_group_id,
+                message_id=telegram_message_id,
+                emoji=event.emoji,
+            )
+        ]
+
+    def _reactions_enabled(self) -> bool:
+        value = self.settings.get("reactions_enabled", True)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _missing_target_policy(self) -> str:
+        raw = str(self.settings.get("missing_target_policy", "fallback_message")).strip().lower()
+        if raw == "fallback_message":
+            return raw
+        return "fallback_message"
+
+    def _should_emit_missing_target_fallback(self) -> bool:
+        return self._missing_target_policy() == "fallback_message"
+
+    def _reply_missing_suffix(self) -> str:
+        raw = str(self.settings.get("reply_missing_suffix", self.DEFAULT_REPLY_MISSING_SUFFIX)).strip()
+        if raw:
+            return raw
+        return self.DEFAULT_REPLY_MISSING_SUFFIX
+
+    def _reaction_missing_notice(self) -> str:
+        raw = str(
+            self.settings.get(
+                "reaction_missing_notice_template",
+                self.DEFAULT_REACTION_MISSING_NOTICE,
+            )
+        ).strip()
+        if raw:
+            return raw
+        return self.DEFAULT_REACTION_MISSING_NOTICE
 
 
 def _compact_display_name(sender_display_name: str) -> str:

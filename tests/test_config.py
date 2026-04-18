@@ -39,7 +39,13 @@ class ConfigTests(unittest.TestCase):
                     plugins:
                       - name: bridge
                         enabled: true
-                        settings: {}
+                        settings:
+                          channel: 1
+                          reply_link_ttl_hours: 24
+                          reactions_enabled: true
+                          missing_target_policy: fallback_message
+                          reply_missing_suffix: "(reply target not found)"
+                          reaction_missing_notice_template: "(reaction target not found)"
                     """
                 ).strip(),
                 encoding="utf-8",
@@ -77,6 +83,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.chunking.retry_initial_delay_ms, 250)
             self.assertEqual(settings.chunking.retry_backoff_factor, 1.5)
             self.assertFalse(settings.chunking.abort_on_chunk_failure)
+            self.assertEqual(settings.plugins[0].settings["reactions_enabled"], True)
+            self.assertEqual(settings.plugins[0].settings["missing_target_policy"], "fallback_message")
 
     def test_default_plugins_when_config_missing(self):
         env = {

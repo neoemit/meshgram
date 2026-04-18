@@ -3,7 +3,15 @@ import unittest
 
 from meshgram.config import MeshgramSettings
 from meshgram.plugins.bridge import BridgePlugin
-from meshgram.types import MeshtasticTextEvent, PluginContext, TelegramMessageEvent
+from meshgram.types import (
+    MeshtasticReactionEvent,
+    MeshtasticTextEvent,
+    PluginContext,
+    SendMeshtasticReactionAction,
+    SendTelegramReactionAction,
+    TelegramMessageEvent,
+    TelegramReactionEvent,
+)
 
 
 class _FakeReplyLinks:
@@ -113,6 +121,22 @@ class BridgePluginTests(unittest.TestCase):
         actions = asyncio.run(self.plugin.on_meshtastic_message(event, self._context()))
         self.assertEqual(actions[0].reply_to_message_id, 88)
 
+    def test_meshtastic_reply_missing_mapping_appends_suffix(self):
+        event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=44,
+            reply_id=7777,
+            channel_index=2,
+            text="reply message",
+            sender_label="Alpha",
+        )
+
+        actions = asyncio.run(self.plugin.on_meshtastic_message(event, self._context()))
+        self.assertEqual(len(actions), 1)
+        self.assertIsNone(actions[0].reply_to_message_id)
+        self.assertEqual(actions[0].text, "[Alpha] reply message (reply target not found)")
+
     def test_telegram_to_meshtastic_ignores_bots(self):
         event = TelegramMessageEvent(
             chat_id=-999,
@@ -159,6 +183,22 @@ class BridgePluginTests(unittest.TestCase):
         self.assertGreater(len(actions), 1)
         self.assertEqual(actions[0].reply_id, 777)
         self.assertIsNone(actions[1].reply_id)
+
+    def test_telegram_reply_missing_mapping_appends_suffix(self):
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=10,
+            reply_to_message_id=55,
+            text="hello",
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=80)))
+        self.assertEqual(len(actions), 1)
+        self.assertIsNone(actions[0].reply_id)
+        self.assertEqual(actions[0].text, "[Alice] hello (reply target not found)")
 
     def test_telegram_to_meshtastic_chunks_when_needed_and_sets_link_metadata(self):
         event = TelegramMessageEvent(
@@ -247,6 +287,86 @@ class BridgePluginTests(unittest.TestCase):
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=80)))
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].text, "[Alice] hello")
+
+    def test_telegram_reaction_mapped_emits_meshtastic_reaction_action(self):
+        self.reply_links.telegram_to_mesh[(-999, 77)] = 9001
+        event = TelegramReactionEvent(
+            chat_id=-999,
+            message_id=77,
+            emoji="❤",
+            is_from_bot=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_reaction(event, self._context()))
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], SendMeshtasticReactionAction)
+        self.assertEqual(actions[0].target_packet_id, 9001)
+        self.assertEqual(actions[0].emoji, "❤")
+        self.assertEqual(actions[0].channel_index, 2)
+
+    def test_telegram_reaction_missing_mapping_emits_notice_message(self):
+        event = TelegramReactionEvent(
+            chat_id=-999,
+            message_id=77,
+            emoji="❤",
+            is_from_bot=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_reaction(event, self._context()))
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].text, "(reaction target not found)")
+        self.assertEqual(actions[0].channel_index, 2)
+
+    def test_meshtastic_reaction_mapped_emits_telegram_reaction_action(self):
+        self.reply_links.mesh_to_telegram[1001] = (-999, 201)
+        event = MeshtasticReactionEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=300,
+            target_packet_id=1001,
+            channel_index=2,
+            emoji="❤",
+            sender_label="Alpha",
+        )
+
+        actions = asyncio.run(self.plugin.on_meshtastic_reaction(event, self._context()))
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], SendTelegramReactionAction)
+        self.assertEqual(actions[0].chat_id, -999)
+        self.assertEqual(actions[0].message_id, 201)
+        self.assertEqual(actions[0].emoji, "❤")
+
+    def test_meshtastic_reaction_missing_mapping_emits_notice_message(self):
+        event = MeshtasticReactionEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=300,
+            target_packet_id=9999,
+            channel_index=2,
+            emoji="❤",
+            sender_label="Alpha",
+        )
+
+        actions = asyncio.run(self.plugin.on_meshtastic_reaction(event, self._context()))
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].chat_id, -999)
+        self.assertEqual(actions[0].text, "(reaction target not found)")
+
+    def test_meshtastic_reaction_ignores_local_node(self):
+        event = MeshtasticReactionEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=300,
+            target_packet_id=9999,
+            channel_index=2,
+            emoji="❤",
+            sender_label="Alpha",
+        )
+
+        actions = asyncio.run(
+            self.plugin.on_meshtastic_reaction(event, self._context(local_node_id="!aaaa1111"))
+        )
+        self.assertEqual(actions, [])
 
 
 if __name__ == "__main__":

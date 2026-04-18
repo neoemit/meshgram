@@ -10,19 +10,30 @@ from meshtastic import BROADCAST_ADDR
 import meshtastic.serial_interface
 import meshtastic.tcp_interface
 from pubsub import pub
-from telegram import Message, Update
-from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram import Message, MessageReactionUpdated, ReactionTypeEmoji, Update
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    MessageReactionHandler,
+    filters,
+)
 
 from .config import MeshgramSettings, load_settings
 from .plugin import LoadedPlugin, load_plugins
 from .reply_links import ReplyLinkRegistry
 from .types import (
+    MeshtasticReactionEvent,
     MeshtasticTextEvent,
     PluginAction,
     PluginContext,
+    SendMeshtasticReactionAction,
     SendMeshtasticAction,
+    SendTelegramReactionAction,
     SendTelegramAction,
     TelegramMessageEvent,
+    TelegramReactionEvent,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -37,6 +48,14 @@ except ModuleNotFoundError:
     except ModuleNotFoundError:
         mesh_pb2 = None  # type: ignore[assignment]
 
+try:
+    from meshtastic.protobuf import portnums_pb2
+except ModuleNotFoundError:
+    try:
+        import meshtastic.portnums_pb2 as portnums_pb2  # type: ignore[attr-defined]
+    except ModuleNotFoundError:
+        portnums_pb2 = None  # type: ignore[assignment]
+
 
 class MeshtasticClient:
     def __init__(self, settings: MeshgramSettings):
@@ -45,6 +64,8 @@ class MeshtasticClient:
         self.local_node_id: Optional[str] = None
         self._packet_callback = None
         self._supports_sendtext_reply_id: Optional[bool] = None
+        self._supports_senddata_reply_id: Optional[bool] = None
+        self._supports_lowlevel_packet: Optional[bool] = None
 
     @property
     def payload_limit(self) -> int:
@@ -258,24 +279,120 @@ class MeshtasticClient:
             "wantAck": action.want_ack,
         }
 
-        should_try_reply_id = (
-            action.reply_id is not None
-            and self._supports_sendtext_reply_id is not False
-        )
-        if should_try_reply_id:
-            kwargs["replyId"] = action.reply_id
-
-        try:
+        if action.reply_id is None:
             return self.iface.sendText(action.text, **kwargs)
-        except TypeError as exc:
-            if should_try_reply_id and "replyId" in str(exc):
+
+        if self._supports_sendtext_reply_id is not False:
+            try:
+                self._supports_sendtext_reply_id = True
+                return self.iface.sendText(action.text, replyId=action.reply_id, **kwargs)
+            except TypeError as exc:
+                if "replyId" not in str(exc):
+                    raise
                 self._supports_sendtext_reply_id = False
                 LOGGER.info(
-                    "Meshtastic sendText does not support replyId; retrying without reply threading"
+                    "Meshtastic sendText does not support replyId; trying compatibility fallback"
                 )
-                kwargs.pop("replyId", None)
-                return self.iface.sendText(action.text, **kwargs)
-            raise
+
+        if self._supports_senddata_reply_id is not False and portnums_pb2 is not None:
+            send_data = getattr(self.iface, "sendData", None)
+            if callable(send_data):
+                try:
+                    self._supports_senddata_reply_id = True
+                    return send_data(
+                        action.text.encode("utf-8"),
+                        destinationId=destination_id,
+                        portNum=portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                        wantAck=action.want_ack,
+                        channelIndex=action.channel_index,
+                        replyId=action.reply_id,
+                    )
+                except TypeError as exc:
+                    if "replyId" not in str(exc):
+                        raise
+                    self._supports_senddata_reply_id = False
+                    LOGGER.info(
+                        "Meshtastic sendData does not support replyId; trying low-level fallback"
+                    )
+
+        if self._can_use_lowlevel_packet():
+            return self._send_text_packet_lowlevel(
+                text=action.text,
+                destination_id=destination_id,
+                channel_index=action.channel_index,
+                want_ack=action.want_ack,
+                reply_id=action.reply_id,
+            )
+
+        LOGGER.warning(
+            "Reply threading fallback unavailable; sending message without reply linkage"
+        )
+        return self.iface.sendText(action.text, **kwargs)
+
+    def send_reaction(self, action: SendMeshtasticReactionAction):
+        if self.iface is None:
+            raise RuntimeError("Meshtastic interface is not connected")
+        if not action.emoji:
+            raise ValueError("Reaction emoji cannot be empty")
+
+        destination_id = action.destination_id if action.destination_id is not None else BROADCAST_ADDR
+        if self._can_use_lowlevel_packet():
+            return self._send_text_packet_lowlevel(
+                text=action.emoji,
+                destination_id=destination_id,
+                channel_index=action.channel_index,
+                want_ack=action.want_ack,
+                reply_id=action.target_packet_id,
+                emoji_codepoint=ord(action.emoji[0]),
+            )
+
+        LOGGER.warning(
+            "Low-level Meshtastic packet API unavailable; sending reaction as plain reply text"
+        )
+        return self.iface.sendText(
+            action.emoji,
+            destinationId=destination_id,
+            channelIndex=action.channel_index,
+            wantAck=action.want_ack,
+        )
+
+    def _can_use_lowlevel_packet(self) -> bool:
+        if self._supports_lowlevel_packet is None:
+            self._supports_lowlevel_packet = (
+                mesh_pb2 is not None
+                and portnums_pb2 is not None
+                and callable(getattr(self.iface, "_sendPacket", None))
+            )
+        return self._supports_lowlevel_packet
+
+    def _send_text_packet_lowlevel(
+        self,
+        text: str,
+        destination_id: str | int,
+        channel_index: int,
+        want_ack: bool,
+        reply_id: Optional[int] = None,
+        emoji_codepoint: Optional[int] = None,
+    ):
+        if not self._can_use_lowlevel_packet():
+            raise RuntimeError("Low-level packet send is unavailable")
+        if mesh_pb2 is None or portnums_pb2 is None:
+            raise RuntimeError("Meshtastic protobuf modules are unavailable")
+
+        mesh_packet = mesh_pb2.MeshPacket()
+        mesh_packet.channel = channel_index
+        mesh_packet.decoded.payload = text.encode("utf-8")
+        mesh_packet.decoded.portnum = portnums_pb2.PortNum.TEXT_MESSAGE_APP
+        if reply_id is not None:
+            mesh_packet.decoded.reply_id = reply_id
+        if emoji_codepoint is not None:
+            mesh_packet.decoded.emoji = emoji_codepoint
+
+        return self.iface._sendPacket(
+            mesh_packet,
+            destinationId=destination_id,
+            wantAck=want_ack,
+        )
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
@@ -392,6 +509,36 @@ class MeshgramApp:
 
         await self._dispatch_telegram_message(event)
 
+    async def _handle_telegram_reaction(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        reaction_update = update.message_reaction
+        if reaction_update is None:
+            return
+
+        chat = reaction_update.chat
+        if chat is None:
+            return
+
+        emoji = _extract_first_unicode_reaction_emoji(reaction_update)
+        if emoji is None:
+            return
+
+        user = reaction_update.user
+        is_from_bot = bool(user and user.is_bot)
+
+        event = TelegramReactionEvent(
+            chat_id=chat.id,
+            message_id=reaction_update.message_id,
+            emoji=emoji,
+            is_from_bot=is_from_bot,
+            raw_reaction=reaction_update,
+        )
+
+        await self._dispatch_telegram_reaction(event)
+
     async def _dispatch_telegram_message(self, event: TelegramMessageEvent) -> None:
         context = self._plugin_context()
 
@@ -404,16 +551,41 @@ class MeshgramApp:
 
             await self._execute_actions(actions, loaded_plugin.name)
 
+    async def _dispatch_telegram_reaction(self, event: TelegramReactionEvent) -> None:
+        context = self._plugin_context()
+
+        for loaded_plugin in self.plugins:
+            try:
+                actions = await loaded_plugin.instance.on_telegram_reaction(event, context)
+            except Exception:
+                LOGGER.exception("Plugin %s failed handling telegram reaction", loaded_plugin.name)
+                continue
+
+            await self._execute_actions(actions, loaded_plugin.name)
+
     def _on_meshtastic_packet(self, packet: dict[str, Any]) -> None:
-        event = self._build_meshtastic_event(packet)
-        if event is None or self.loop is None:
+        if self.loop is None:
             return
 
-        if event.packet_id is not None and self._is_duplicate_meshtastic_packet_id(event.packet_id):
+        packet_id = _extract_optional_int(packet.get("id"))
+        if packet_id is not None and self._is_duplicate_meshtastic_packet_id(packet_id):
+            return
+
+        reaction_event = self._build_meshtastic_reaction_event(packet)
+        if reaction_event is not None:
+            future = asyncio.run_coroutine_threadsafe(
+                self._dispatch_meshtastic_reaction(reaction_event),
+                self.loop,
+            )
+            future.add_done_callback(_log_future_exception)
+            return
+
+        message_event = self._build_meshtastic_event(packet)
+        if message_event is None:
             return
 
         future = asyncio.run_coroutine_threadsafe(
-            self._dispatch_meshtastic_message(event),
+            self._dispatch_meshtastic_message(message_event),
             self.loop,
         )
         future.add_done_callback(_log_future_exception)
@@ -442,6 +614,8 @@ class MeshgramApp:
             return None
 
         if decoded.get("portnum") != "TEXT_MESSAGE_APP":
+            return None
+        if _extract_optional_int(decoded.get("emoji")) is not None:
             return None
 
         payload = decoded.get("payload", b"")
@@ -486,6 +660,54 @@ class MeshgramApp:
             raw_packet=packet,
         )
 
+    def _build_meshtastic_reaction_event(self, packet: dict[str, Any]) -> Optional[MeshtasticReactionEvent]:
+        decoded = packet.get("decoded", {})
+        if not isinstance(decoded, dict):
+            return None
+        if decoded.get("portnum") != "TEXT_MESSAGE_APP":
+            return None
+
+        emoji_codepoint = _extract_optional_int(decoded.get("emoji"))
+        if emoji_codepoint is None:
+            return None
+        if emoji_codepoint <= 0:
+            return None
+
+        target_packet_id = _extract_optional_int(decoded.get("replyId"))
+        if target_packet_id is None:
+            target_packet_id = _extract_optional_int(decoded.get("reply_id"))
+        if target_packet_id is None:
+            return None
+
+        try:
+            emoji = chr(emoji_codepoint)
+        except ValueError:
+            return None
+
+        from_num = _extract_optional_int(packet.get("from"))
+        to_num = _extract_optional_int(packet.get("to"))
+        from_id = _normalize_node_id(packet.get("fromId"), fallback_num=from_num)
+        to_id = _normalize_node_id(packet.get("toId"), fallback_num=to_num)
+
+        try:
+            channel_index = int(packet.get("channel", 0))
+        except (TypeError, ValueError):
+            channel_index = 0
+
+        packet_id = _extract_optional_int(packet.get("id"))
+        sender_label = self.meshtastic.resolve_sender_label(from_id, from_num=from_num)
+
+        return MeshtasticReactionEvent(
+            from_id=from_id,
+            to_id=to_id,
+            packet_id=packet_id,
+            target_packet_id=target_packet_id,
+            channel_index=channel_index,
+            emoji=emoji,
+            sender_label=sender_label,
+            raw_packet=packet,
+        )
+
     async def _dispatch_meshtastic_message(self, event: MeshtasticTextEvent) -> None:
         context = self._plugin_context()
 
@@ -494,6 +716,18 @@ class MeshgramApp:
                 actions = await loaded_plugin.instance.on_meshtastic_message(event, context)
             except Exception:
                 LOGGER.exception("Plugin %s failed handling meshtastic message", loaded_plugin.name)
+                continue
+
+            await self._execute_actions(actions, loaded_plugin.name)
+
+    async def _dispatch_meshtastic_reaction(self, event: MeshtasticReactionEvent) -> None:
+        context = self._plugin_context()
+
+        for loaded_plugin in self.plugins:
+            try:
+                actions = await loaded_plugin.instance.on_meshtastic_reaction(event, context)
+            except Exception:
+                LOGGER.exception("Plugin %s failed handling meshtastic reaction", loaded_plugin.name)
                 continue
 
             await self._execute_actions(actions, loaded_plugin.name)
@@ -522,9 +756,13 @@ class MeshgramApp:
                 if isinstance(action, SendTelegramAction):
                     sent_message = await self._execute_send_telegram(action)
                     self._register_reply_link_after_telegram_send(action, sent_message)
+                elif isinstance(action, SendTelegramReactionAction):
+                    await self._execute_send_telegram_reaction(action)
                 elif isinstance(action, SendMeshtasticAction):
                     sent_packet = await self._execute_send_meshtastic(action)
                     self._register_reply_link_after_meshtastic_send(action, sent_packet)
+                elif isinstance(action, SendMeshtasticReactionAction):
+                    await self._execute_send_meshtastic_reaction(action)
                 else:
                     LOGGER.warning("Plugin %s returned unknown action type: %s", plugin_name, type(action))
             except Exception:
@@ -544,6 +782,17 @@ class MeshgramApp:
             chat_id=action.chat_id,
             text=action.text,
             reply_to_message_id=action.reply_to_message_id,
+        )
+
+    async def _execute_send_telegram_reaction(self, action: SendTelegramReactionAction) -> None:
+        if self.bot_app is None:
+            raise RuntimeError("Telegram bot app is not initialized")
+
+        await self.bot_app.bot.set_message_reaction(
+            chat_id=action.chat_id,
+            message_id=action.message_id,
+            reaction=[ReactionTypeEmoji(action.emoji)],
+            is_big=action.is_big,
         )
 
     async def _execute_send_meshtastic(self, action: SendMeshtasticAction):
@@ -591,6 +840,13 @@ class MeshgramApp:
                 retry_delay_seconds *= backoff_factor
 
         return None
+
+    async def _execute_send_meshtastic_reaction(self, action: SendMeshtasticReactionAction):
+        if not self.meshtastic.is_connected:
+            LOGGER.warning("Meshtastic is not connected yet; dropping outbound reaction")
+            return None
+
+        return self.meshtastic.send_reaction(action)
 
     def _register_reply_link_after_telegram_send(
         self,
@@ -654,6 +910,12 @@ class MeshgramApp:
         self.bot_app.add_handler(
             MessageHandler(filters.ALL & ~filters.COMMAND, self._handle_telegram_message)
         )
+        self.bot_app.add_handler(
+            MessageReactionHandler(
+                self._handle_telegram_reaction,
+                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED,
+            )
+        )
 
         LOGGER.info("Starting Meshgram polling loop")
         try:
@@ -690,6 +952,22 @@ def _extract_telegram_reply_to_message_id(message: Message) -> Optional[int]:
     value = getattr(reply_to, "message_id", None)
     if isinstance(value, int):
         return value
+    return None
+
+
+def _extract_first_unicode_reaction_emoji(
+    reaction_update: MessageReactionUpdated,
+) -> Optional[str]:
+    new_reaction = getattr(reaction_update, "new_reaction", None)
+    if not new_reaction:
+        return None
+
+    for reaction in new_reaction:
+        if isinstance(reaction, ReactionTypeEmoji):
+            emoji = getattr(reaction, "emoji", None)
+            if isinstance(emoji, str) and emoji:
+                return emoji
+
     return None
 
 

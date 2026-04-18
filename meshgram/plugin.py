@@ -6,7 +6,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import PluginConfig
-from .types import MeshtasticTextEvent, Plugin, PluginAction, PluginContext, TelegramMessageEvent
+from .types import (
+    MeshtasticReactionEvent,
+    MeshtasticTextEvent,
+    Plugin,
+    PluginAction,
+    PluginContext,
+    TelegramMessageEvent,
+    TelegramReactionEvent,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,9 +41,23 @@ class BasePlugin:
     ) -> list[PluginAction]:
         return []
 
+    async def on_telegram_reaction(
+        self,
+        event: TelegramReactionEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        return []
+
     async def on_meshtastic_message(
         self,
         event: MeshtasticTextEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        return []
+
+    async def on_meshtastic_reaction(
+        self,
+        event: MeshtasticReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         return []

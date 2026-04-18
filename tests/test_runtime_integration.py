@@ -3,7 +3,13 @@ import unittest
 
 from meshgram.app import MeshgramApp
 from meshgram.config import MeshgramSettings, PluginConfig
-from meshgram.types import MeshtasticTextEvent, SendMeshtasticAction, TelegramMessageEvent
+from meshgram.types import (
+    MeshtasticReactionEvent,
+    MeshtasticTextEvent,
+    SendMeshtasticAction,
+    TelegramMessageEvent,
+    TelegramReactionEvent,
+)
 
 
 class _FakeTelegramMessage:
@@ -14,12 +20,17 @@ class _FakeTelegramMessage:
 class _FakeBot:
     def __init__(self):
         self.messages = []
+        self.reactions = []
         self._next_message_id = 100
 
     async def send_message(self, **kwargs):
         self.messages.append(kwargs)
         self._next_message_id += 1
         return _FakeTelegramMessage(self._next_message_id)
+
+    async def set_message_reaction(self, **kwargs):
+        self.reactions.append(kwargs)
+        return True
 
 
 class _FakeTelegramApp:
@@ -48,12 +59,18 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.app.meshtastic.iface = object()
 
         self.sent_mesh = []
+        self.sent_mesh_reactions = []
 
         def _fake_send_mesh(action):
             self.sent_mesh.append(action)
             return {"id": 1000 + len(self.sent_mesh)}
 
+        def _fake_send_mesh_reaction(action):
+            self.sent_mesh_reactions.append(action)
+            return {"id": 3000 + len(self.sent_mesh_reactions)}
+
         self.app.meshtastic.send_text = _fake_send_mesh
+        self.app.meshtastic.send_reaction = _fake_send_mesh_reaction
 
     def test_telegram_to_meshtastic_dispatch(self):
         event = TelegramMessageEvent(
@@ -171,6 +188,70 @@ class RuntimeIntegrationTests(unittest.TestCase):
         asyncio.run(self.app._dispatch_telegram_message(telegram_reply_event))
 
         self.assertEqual(self.sent_mesh[-1].reply_id, 222)
+
+    def test_telegram_reaction_dispatch_to_meshtastic_when_mapping_exists(self):
+        self.app.reply_links.link_telegram_to_meshtastic(-555, 77, 9001)
+        event = TelegramReactionEvent(
+            chat_id=-555,
+            message_id=77,
+            emoji="❤",
+            is_from_bot=False,
+        )
+
+        asyncio.run(self.app._dispatch_telegram_reaction(event))
+
+        self.assertEqual(len(self.sent_mesh_reactions), 1)
+        self.assertEqual(self.sent_mesh_reactions[0].target_packet_id, 9001)
+        self.assertEqual(self.sent_mesh_reactions[0].emoji, "❤")
+
+    def test_telegram_reaction_missing_mapping_emits_fallback_notice(self):
+        event = TelegramReactionEvent(
+            chat_id=-555,
+            message_id=77,
+            emoji="❤",
+            is_from_bot=False,
+        )
+
+        asyncio.run(self.app._dispatch_telegram_reaction(event))
+
+        self.assertEqual(len(self.sent_mesh_reactions), 0)
+        self.assertEqual(len(self.sent_mesh), 1)
+        self.assertEqual(self.sent_mesh[0].text, "(reaction target not found)")
+
+    def test_meshtastic_reaction_dispatch_to_telegram_when_mapping_exists(self):
+        self.app.reply_links.link_meshtastic_to_telegram(4567, -555, 345)
+        event = MeshtasticReactionEvent(
+            from_id="!bbbb2222",
+            to_id=None,
+            packet_id=222,
+            target_packet_id=4567,
+            channel_index=0,
+            emoji="❤",
+            sender_label="Remote",
+        )
+
+        asyncio.run(self.app._dispatch_meshtastic_reaction(event))
+
+        self.assertEqual(len(self.app.bot_app.bot.reactions), 1)
+        self.assertEqual(self.app.bot_app.bot.reactions[0]["chat_id"], -555)
+        self.assertEqual(self.app.bot_app.bot.reactions[0]["message_id"], 345)
+
+    def test_meshtastic_reaction_missing_mapping_emits_fallback_notice(self):
+        event = MeshtasticReactionEvent(
+            from_id="!bbbb2222",
+            to_id=None,
+            packet_id=222,
+            target_packet_id=1111,
+            channel_index=0,
+            emoji="❤",
+            sender_label="Remote",
+        )
+
+        asyncio.run(self.app._dispatch_meshtastic_reaction(event))
+
+        self.assertEqual(len(self.app.bot_app.bot.reactions), 0)
+        self.assertEqual(len(self.app.bot_app.bot.messages), 1)
+        self.assertEqual(self.app.bot_app.bot.messages[0]["text"], "(reaction target not found)")
 
     def test_chunk_sequence_retries_and_completes_after_transient_failure(self):
         attempt_chunk_indexes: list[int] = []

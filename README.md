@@ -8,6 +8,7 @@ It lets you relay messages between a Telegram group and a Meshtastic channel, ru
 
 - 🔁 Bidirectional bridge between Telegram and Meshtastic
 - 🧵 Cross-platform reply linking (Telegram replies ↔ Meshtastic replies)
+- ❤️ Bidirectional emoji reaction sync for linked messages
 - ✂️ UTF-8 byte-aware chunking for long Telegram messages
 - 🧩 Plugin architecture for feature extensions
 - 🐳 Docker support for Linux and macOS workflows
@@ -137,6 +138,10 @@ plugins:
     settings:
       channel: 1
       reply_link_ttl_hours: 24
+      reactions_enabled: true
+      missing_target_policy: fallback_message
+      reply_missing_suffix: "(reply target not found)"
+      reaction_missing_notice_template: "(reaction target not found)"
 
   - name: ping_pong
     enabled: true
@@ -217,6 +222,7 @@ plugins:
 - on terminal chunk failure, aborts later chunks in the same sequence when `abort_on_chunk_failure=true`
 - chunk delivery failures are log-only (no Telegram failure notification)
 - if mapping exists, Telegram replies are sent with Meshtastic `replyId`
+- if reply target mapping is missing, message is still forwarded with `reply_missing_suffix`
 
 #### Reply-link behavior
 
@@ -224,6 +230,33 @@ plugins:
 - for chunked Telegram → Meshtastic sends:
   - first chunk is canonical for Telegram-reply lookup
   - replies to any chunk still map back to source Telegram message
+- compatibility fallback for older Meshtastic SDKs:
+  - `sendText(..., replyId=...)`
+  - then `sendData(..., replyId=...)`
+  - then low-level packet send with `decoded.reply_id`
+
+#### Reaction behavior
+
+- reaction sync is enabled with `reactions_enabled: true`
+- scope is **linked messages only** (requires known cross-platform mapping)
+- Telegram → Meshtastic:
+  - only non-bot actors in configured group are considered
+  - only first Unicode emoji reaction is mirrored
+  - reaction removals and custom Telegram emoji are ignored
+- Meshtastic → Telegram:
+  - packets with `decoded.emoji` + `replyId/reply_id` are mapped as reactions
+  - local-node packets are ignored for loop prevention
+- if reaction target mapping is missing and `missing_target_policy: fallback_message`, bridge emits `reaction_missing_notice_template`
+- actor identity is platform-limited:
+  - Telegram reaction appears from bot
+  - Meshtastic reaction appears from bridge node
+
+Bridge reaction/reply settings:
+
+- `reactions_enabled`: enable/disable bidirectional reaction sync (`true` default)
+- `missing_target_policy`: currently `fallback_message` (emit notice when mapping is missing)
+- `reply_missing_suffix`: inline suffix appended when reply target mapping is missing
+- `reaction_missing_notice_template`: notice sent when reaction target mapping is missing
 
 ### `ping_pong`
 

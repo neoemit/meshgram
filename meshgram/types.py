@@ -21,6 +21,15 @@ class TelegramMessageEvent:
 
 
 @dataclass(slots=True)
+class TelegramReactionEvent:
+    chat_id: int
+    message_id: int
+    emoji: str
+    is_from_bot: bool
+    raw_reaction: Any = None
+
+
+@dataclass(slots=True)
 class MeshtasticTextEvent:
     from_id: Optional[str]
     to_id: Optional[str]
@@ -33,11 +42,31 @@ class MeshtasticTextEvent:
 
 
 @dataclass(slots=True)
+class MeshtasticReactionEvent:
+    from_id: Optional[str]
+    to_id: Optional[str]
+    packet_id: Optional[int]
+    target_packet_id: int
+    channel_index: int
+    emoji: str
+    sender_label: str
+    raw_packet: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class SendTelegramAction:
     chat_id: int
     text: str
     reply_to_message_id: Optional[int] = None
     bridge_source_meshtastic_packet_id: Optional[int] = None
+
+
+@dataclass(slots=True)
+class SendTelegramReactionAction:
+    chat_id: int
+    message_id: int
+    emoji: str
+    is_big: bool = False
 
 
 @dataclass(slots=True)
@@ -60,7 +89,21 @@ class SendMeshtasticAction:
     bridge_canonical_for_telegram_message: bool = False
 
 
-PluginAction = Union[SendTelegramAction, SendMeshtasticAction]
+@dataclass(slots=True)
+class SendMeshtasticReactionAction:
+    emoji: str
+    target_packet_id: int
+    destination_id: Optional[Union[int, str]] = None
+    channel_index: int = 0
+    want_ack: bool = False
+
+
+PluginAction = Union[
+    SendTelegramAction,
+    SendTelegramReactionAction,
+    SendMeshtasticAction,
+    SendMeshtasticReactionAction,
+]
 
 
 @dataclass(slots=True)
@@ -85,9 +128,23 @@ class Plugin(Protocol):
     ) -> list[PluginAction]:
         ...
 
+    async def on_telegram_reaction(
+        self,
+        event: TelegramReactionEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        ...
+
     async def on_meshtastic_message(
         self,
         event: MeshtasticTextEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        ...
+
+    async def on_meshtastic_reaction(
+        self,
+        event: MeshtasticReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         ...
