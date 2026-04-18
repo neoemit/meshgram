@@ -49,6 +49,21 @@ class TextUtilsTests(unittest.TestCase):
         for chunk in chunks:
             self.assertLessEqual(utf8_len(chunk), 12)
 
+    def test_prefix_indices_are_consistent_after_convergence(self):
+        message = " ".join(["😀emoji"] * 120)
+        chunks = split_for_meshtastic(
+            text=message,
+            payload_limit=32,
+            prefix_template="({index}/{total}) ",
+            chunking_enabled=True,
+        )
+
+        total = len(chunks)
+        self.assertGreater(total, 9)
+        for index, chunk in enumerate(chunks, start=1):
+            self.assertTrue(chunk.startswith(f"({index}/{total}) "))
+            self.assertLessEqual(utf8_len(chunk), 32)
+
     def test_normalized_exact_word_for_ping(self):
         self.assertEqual(normalized_exact_word("  !!!Ping???  "), "ping")
         self.assertNotEqual(normalized_exact_word("ping me"), "ping")

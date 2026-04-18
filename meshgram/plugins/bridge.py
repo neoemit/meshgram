@@ -157,7 +157,8 @@ class BridgePlugin(BasePlugin):
         bridge_channel = self._bridge_channel(context)
         is_chunked = len(chunks) > 1
         sequence_id = _chunk_sequence_id(event) if is_chunked else None
-        want_ack = self._meshtastic_want_ack()
+        chunk_wait_for_ack = is_chunked and chunking.wait_for_ack
+        want_ack = self._meshtastic_want_ack() or chunk_wait_for_ack
         configured_delay_ms = max(0, chunking.inter_chunk_delay_ms)
         effective_chunk_delay_ms = (
             max(configured_delay_ms, self.MIN_CHUNK_DELAY_MS)
@@ -192,6 +193,8 @@ class BridgePlugin(BasePlugin):
                     retry_max_attempts=chunking.retry_max_attempts,
                     retry_initial_delay_ms=chunking.retry_initial_delay_ms,
                     retry_backoff_factor=chunking.retry_backoff_factor,
+                    wait_for_ack=chunk_wait_for_ack,
+                    ack_timeout_ms=chunking.ack_timeout_ms if chunk_wait_for_ack else 0,
                     sequence_id=sequence_id,
                     sequence_index=(index + 1) if is_chunked else None,
                     sequence_total=len(chunks) if is_chunked else None,

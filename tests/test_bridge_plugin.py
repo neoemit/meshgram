@@ -48,6 +48,8 @@ class BridgePluginTests(unittest.TestCase):
         settings.chunking.inter_chunk_delay_ms = 150
         settings.chunking.max_chunk_bytes = 160
         settings.chunking.payload_safety_margin_bytes = 16
+        settings.chunking.wait_for_ack = True
+        settings.chunking.ack_timeout_ms = 20000
         self.settings = settings
 
         self.reply_links = _FakeReplyLinks()
@@ -220,6 +222,8 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(actions[0].retry_max_attempts, 3)
         self.assertEqual(actions[0].retry_initial_delay_ms, 500)
         self.assertEqual(actions[0].retry_backoff_factor, 2.0)
+        self.assertTrue(actions[0].wait_for_ack)
+        self.assertEqual(actions[0].ack_timeout_ms, 20000)
         self.assertTrue(actions[0].abort_on_failure)
         self.assertTrue(actions[0].want_ack)
         self.assertTrue(actions[0].require_packet_id)
@@ -249,6 +253,23 @@ class BridgePluginTests(unittest.TestCase):
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=40)))
         self.assertGreater(len(actions), 1)
         self.assertEqual(actions[1].delay_ms, 900)
+
+    def test_non_chunked_message_does_not_enable_ack_wait_gate(self):
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=112,
+            reply_to_message_id=None,
+            text="short",
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=240)))
+        self.assertEqual(len(actions), 1)
+        self.assertFalse(actions[0].wait_for_ack)
+        self.assertEqual(actions[0].ack_timeout_ms, 0)
 
     def test_chunking_reserves_payload_safety_margin(self):
         self.settings.chunking.payload_safety_margin_bytes = 10

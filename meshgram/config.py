@@ -40,6 +40,8 @@ class ChunkingConfig:
     retry_max_attempts: int = 3
     retry_initial_delay_ms: int = 500
     retry_backoff_factor: float = 2.0
+    wait_for_ack: bool = True
+    ack_timeout_ms: int = 20000
     abort_on_chunk_failure: bool = True
     payload_safety_margin_bytes: int = 12
 
@@ -227,6 +229,8 @@ def load_settings() -> MeshgramSettings:
             retry_max_attempts=max(1, _as_int(chunking_data.get("retry_max_attempts"), 3)),
             retry_initial_delay_ms=max(0, _as_int(chunking_data.get("retry_initial_delay_ms"), 500)),
             retry_backoff_factor=max(1.0, _as_float(chunking_data.get("retry_backoff_factor"), 2.0)),
+            wait_for_ack=_as_bool(chunking_data.get("wait_for_ack"), True),
+            ack_timeout_ms=max(1000, _as_int(chunking_data.get("ack_timeout_ms"), 20000)),
             abort_on_chunk_failure=_as_bool(chunking_data.get("abort_on_chunk_failure"), True),
             payload_safety_margin_bytes=max(0, _as_int(chunking_data.get("payload_safety_margin_bytes"), 12)),
         ),

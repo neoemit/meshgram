@@ -132,6 +132,8 @@ chunking:
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
   retry_backoff_factor: 2.0
+  wait_for_ack: true
+  ack_timeout_ms: 20000
   abort_on_chunk_failure: true
 
 plugins:
@@ -199,6 +201,8 @@ plugins:
 - `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
 - `retry_initial_delay_ms`: delay before first retry (default `500`)
 - `retry_backoff_factor`: exponential retry multiplier (default `2.0`)
+- `wait_for_ack`: for chunked sends, wait for Meshtastic ACK before sending next chunk (default `true`)
+- `ack_timeout_ms`: timeout for ACK wait before retrying a chunk send (default `20000`)
 - `abort_on_chunk_failure`: if `true`, stops remaining chunks in the same sequence after terminal failure
 
 ---
@@ -226,9 +230,11 @@ plugins:
 - ignores bot-authored Telegram messages
 - compacts Telegram sender names to first token (`Name Surname` → `Name`) before applying `sender_prefix_template`
 - chunks oversized messages by UTF-8 bytes
+- byte-aware splitting is prefix-aware and converges on final chunk count (important for emoji/multibyte content)
 - retries failed chunk sends with exponential backoff using `chunking` retry settings
 - requires a packet ID confirmation from Meshtastic SDK responses for bridge sends (retries if missing)
 - logs sequence/chunk packet IDs for every chunked send attempt
+- when enabled, waits for ACK per chunk before continuing sequence
 - on terminal chunk failure, aborts later chunks in the same sequence when `abort_on_chunk_failure=true`
 - chunk delivery failures are log-only (no Telegram failure notification)
 - if mapping exists, Telegram replies are sent with Meshtastic `replyId`

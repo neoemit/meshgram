@@ -144,6 +144,15 @@ class MeshtasticClient:
     def is_connected(self) -> bool:
         return self.iface is not None
 
+    @property
+    def supports_wait_for_ack(self) -> bool:
+        return self.iface is not None and callable(getattr(self.iface, "waitForAckNak", None))
+
+    def wait_for_ack(self) -> None:
+        if not self.supports_wait_for_ack:
+            return
+        self.iface.waitForAckNak()
+
     def invalidate_connection(self) -> None:
         if self.iface is not None:
             with contextlib.suppress(Exception):
@@ -959,6 +968,26 @@ class MeshgramApp:
                     packet_id = _extract_meshtastic_packet_id(sent_packet)
                     if action.require_packet_id and packet_id is None:
                         raise RuntimeError("Meshtastic send returned no packet id")
+                    if action.wait_for_ack and action.want_ack:
+                        if self.meshtastic.supports_wait_for_ack:
+                            ack_timeout_seconds = max(1.0, action.ack_timeout_ms / 1000)
+                            await asyncio.wait_for(
+                                asyncio.to_thread(self.meshtastic.wait_for_ack),
+                                timeout=ack_timeout_seconds,
+                            )
+                            if action.sequence_id is not None:
+                                LOGGER.info(
+                                    "Meshtastic ACK received: sequence=%s chunk=%s/%s packet_id=%s",
+                                    action.sequence_id,
+                                    action.sequence_index,
+                                    action.sequence_total,
+                                    packet_id,
+                                )
+                        else:
+                            LOGGER.warning(
+                                "Meshtastic interface does not support waitForAckNak; "
+                                "continuing without ACK gate"
+                            )
                     if action.sequence_id is not None:
                         LOGGER.info(
                             "Meshtastic chunk sent: sequence=%s chunk=%s/%s packet_id=%s bytes=%s",

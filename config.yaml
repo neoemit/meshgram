@@ -27,6 +27,8 @@ chunking:
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
   retry_backoff_factor: 2.0
+  wait_for_ack: true
+  ack_timeout_ms: 20000
   abort_on_chunk_failure: true
 
 plugins:

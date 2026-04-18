@@ -429,6 +429,46 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(result["id"], 4444)
         self.assertEqual(attempt_counter["count"], 2)
 
+    def test_chunk_send_waits_for_ack_and_retries_if_ack_wait_fails(self):
+        send_attempt_counter = {"count": 0}
+        ack_wait_counter = {"count": 0}
+
+        def _send_with_ack_wait(action):
+            send_attempt_counter["count"] += 1
+            self.sent_mesh.append(action)
+            return {"id": 6666 + send_attempt_counter["count"]}
+
+        class _AckIface:
+            def waitForAckNak(self_nonlocal):
+                _wait_for_ack()
+
+        def _wait_for_ack():
+            ack_wait_counter["count"] += 1
+            if ack_wait_counter["count"] == 1:
+                raise RuntimeError("Timed out waiting for an acknowledgment")
+
+        self.app.meshtastic.send_text = _send_with_ack_wait
+        self.app.meshtastic.iface = _AckIface()
+
+        action = SendMeshtasticAction(
+            text="chunk",
+            want_ack=True,
+            wait_for_ack=True,
+            ack_timeout_ms=2000,
+            retry_max_attempts=2,
+            retry_initial_delay_ms=0,
+            retry_backoff_factor=2.0,
+            sequence_id="seq-ack",
+            sequence_index=1,
+            sequence_total=2,
+        )
+
+        result = asyncio.run(self.app._execute_send_meshtastic(action))
+
+        self.assertEqual(result["id"], 6668)
+        self.assertEqual(send_attempt_counter["count"], 2)
+        self.assertEqual(ack_wait_counter["count"], 2)
+
     def test_meshtastic_reaction_send_retries_on_transient_failure(self):
         attempt_counter = {"count": 0}
 

@@ -80,6 +80,8 @@ class SendMeshtasticAction:
     retry_max_attempts: int = 1
     retry_initial_delay_ms: int = 0
     retry_backoff_factor: float = 1.0
+    wait_for_ack: bool = False
+    ack_timeout_ms: int = 0
     sequence_id: Optional[str] = None
     sequence_index: Optional[int] = None
     sequence_total: Optional[int] = None

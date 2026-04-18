@@ -98,41 +98,48 @@ def split_for_meshtastic(
     if utf8_len(text) <= payload_limit:
         return [text]
 
-    chunk_count = 1
-    while True:
-        prefix_sample = prefix_template.format(index=chunk_count, total=chunk_count)
-        available = payload_limit - utf8_len(prefix_sample)
-        if available <= 0:
-            raise ValueError("Chunk prefix leaves no space for payload")
+    # Keep refining chunks until prefix-aware limits converge.
+    raw_chunks: list[str] = [text]
+    max_iterations = 128
 
-        provisional_chunks = split_text_by_bytes(text, available)
-        new_count = len(provisional_chunks)
+    for _ in range(max_iterations):
+        total = len(raw_chunks)
+        next_raw_chunks: list[str] = []
+        changed = False
 
-        if new_count == chunk_count:
-            chunks = provisional_chunks
-            break
-
-        chunk_count = new_count
-
-    if len(chunks) == 1:
-        return chunks
-
-    final_chunks: list[str] = []
-    total = len(chunks)
-    for index, chunk in enumerate(chunks, start=1):
-        prefix = prefix_template.format(index=index, total=total)
-        combined = f"{prefix}{chunk}"
-        if utf8_len(combined) > payload_limit:
+        for index, raw_chunk in enumerate(raw_chunks, start=1):
+            prefix = prefix_template.format(index=index, total=total)
             available = payload_limit - utf8_len(prefix)
             if available <= 0:
                 raise ValueError("Chunk prefix leaves no space for payload")
-            piece_chunks = split_text_by_bytes(chunk, available)
-            for piece in piece_chunks:
-                final_chunks.append(f"{prefix}{piece}")
-            continue
-        final_chunks.append(combined)
 
-    return final_chunks
+            split_parts = split_text_by_bytes(raw_chunk, available)
+            if not split_parts:
+                continue
+
+            if len(split_parts) != 1 or split_parts[0] != raw_chunk:
+                changed = True
+            next_raw_chunks.extend(split_parts)
+
+        if not changed and len(next_raw_chunks) == len(raw_chunks):
+            break
+        raw_chunks = next_raw_chunks
+    else:
+        raise ValueError("Chunking did not converge for payload limit")
+
+    if len(raw_chunks) == 1:
+        return raw_chunks
+
+    total = len(raw_chunks)
+    result: list[str] = []
+    for index, raw_chunk in enumerate(raw_chunks, start=1):
+        prefix = prefix_template.format(index=index, total=total)
+        combined = f"{prefix}{raw_chunk}"
+        if utf8_len(combined) > payload_limit:
+            raise ValueError("Chunk exceeds payload limit after convergence")
+        result.append(combined)
+
+    return result
 
 
 def _is_edge_noise(char: str) -> bool:

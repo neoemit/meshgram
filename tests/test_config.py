@@ -37,6 +37,8 @@ class ConfigTests(unittest.TestCase):
                       retry_max_attempts: 5
                       retry_initial_delay_ms: 250
                       retry_backoff_factor: 1.5
+                      wait_for_ack: false
+                      ack_timeout_ms: 9000
                       abort_on_chunk_failure: false
                     plugins:
                       - name: bridge
@@ -84,6 +86,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.chunking.retry_max_attempts, 5)
             self.assertEqual(settings.chunking.retry_initial_delay_ms, 250)
             self.assertEqual(settings.chunking.retry_backoff_factor, 1.5)
+            self.assertFalse(settings.chunking.wait_for_ack)
+            self.assertEqual(settings.chunking.ack_timeout_ms, 9000)
             self.assertFalse(settings.chunking.abort_on_chunk_failure)
             self.assertEqual(settings.chunking.max_chunk_bytes, 140)
             self.assertEqual(settings.chunking.payload_safety_margin_bytes, 12)
