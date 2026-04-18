@@ -481,7 +481,25 @@ class MeshgramApp:
             await self._execute_actions(actions, loaded_plugin.name)
 
     async def _execute_actions(self, actions: list[PluginAction], plugin_name: str) -> None:
+        aborted_sequences: set[str] = set()
         for action in actions:
+            if isinstance(action, SendMeshtasticAction):
+                sequence_id = action.sequence_id
+                if (
+                    sequence_id
+                    and action.abort_on_failure
+                    and sequence_id in aborted_sequences
+                ):
+                    LOGGER.warning(
+                        "Skipping Meshtastic chunk due to prior sequence failure: "
+                        "sequence=%s chunk=%s/%s plugin=%s",
+                        sequence_id,
+                        action.sequence_index,
+                        action.sequence_total,
+                        plugin_name,
+                    )
+                    continue
+
             try:
                 if isinstance(action, SendTelegramAction):
                     sent_message = await self._execute_send_telegram(action)
@@ -492,6 +510,12 @@ class MeshgramApp:
                 else:
                     LOGGER.warning("Plugin %s returned unknown action type: %s", plugin_name, type(action))
             except Exception:
+                if (
+                    isinstance(action, SendMeshtasticAction)
+                    and action.sequence_id
+                    and action.abort_on_failure
+                ):
+                    aborted_sequences.add(action.sequence_id)
                 LOGGER.exception("Plugin %s failed executing action %s", plugin_name, type(action).__name__)
 
     async def _execute_send_telegram(self, action: SendTelegramAction):
@@ -508,11 +532,47 @@ class MeshgramApp:
         if action.delay_ms > 0:
             await asyncio.sleep(action.delay_ms / 1000)
 
-        if not self.meshtastic.is_connected:
-            LOGGER.warning("Meshtastic is not connected yet; dropping outbound message")
-            return None
+        max_attempts = max(1, action.retry_max_attempts)
+        retry_delay_seconds = max(0, action.retry_initial_delay_ms) / 1000
+        backoff_factor = max(1.0, action.retry_backoff_factor)
 
-        return self.meshtastic.send_text(action)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if not self.meshtastic.is_connected:
+                    if max_attempts == 1:
+                        LOGGER.warning("Meshtastic is not connected yet; dropping outbound message")
+                        return None
+                    raise RuntimeError("Meshtastic is not connected yet")
+                return self.meshtastic.send_text(action)
+            except Exception:
+                if attempt >= max_attempts:
+                    LOGGER.error(
+                        "Meshtastic send exhausted retries: sequence=%s chunk=%s/%s "
+                        "attempts=%s abort_on_failure=%s",
+                        action.sequence_id,
+                        action.sequence_index,
+                        action.sequence_total,
+                        max_attempts,
+                        action.abort_on_failure,
+                        exc_info=True,
+                    )
+                    raise
+
+                LOGGER.warning(
+                    "Meshtastic send failed; retrying in %.2fs "
+                    "(attempt %s/%s, sequence=%s, chunk=%s/%s)",
+                    retry_delay_seconds,
+                    attempt + 1,
+                    max_attempts,
+                    action.sequence_id,
+                    action.sequence_index,
+                    action.sequence_total,
+                )
+                if retry_delay_seconds > 0:
+                    await asyncio.sleep(retry_delay_seconds)
+                retry_delay_seconds *= backoff_factor
+
+        return None
 
     def _register_reply_link_after_telegram_send(
         self,

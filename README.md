@@ -120,12 +120,16 @@ meshtastic:
 
 telegram:
   include_captions: true
-  sender_prefix_template: "[TG:{display_name}] {message}"
+  sender_prefix_template: "[{display_name}] {message}"
 
 chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
+  retry_max_attempts: 3
+  retry_initial_delay_ms: 500
+  retry_backoff_factor: 2.0
+  abort_on_chunk_failure: true
 
 plugins:
   - name: bridge
@@ -173,12 +177,16 @@ plugins:
 #### `telegram`
 
 - `include_captions`: include media captions in Telegram → Meshtastic forwarding
-- `sender_prefix_template`: supports `{display_name}` and `{message}`
+- `sender_prefix_template`: supports `{display_name}` and `{message}` (default compact style is `[{display_name}] {message}`)
 
 #### `chunking`
 
 - Uses UTF-8 byte length (safe for emoji/multibyte text)
 - `prefix_template` supports `{index}` and `{total}`
+- `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
+- `retry_initial_delay_ms`: delay before first retry (default `500`)
+- `retry_backoff_factor`: exponential retry multiplier (default `2.0`)
+- `abort_on_chunk_failure`: if `true`, stops remaining chunks in the same sequence after terminal failure
 
 ---
 
@@ -203,8 +211,11 @@ plugins:
 - forwards Telegram `text`
 - forwards media `caption` if enabled
 - ignores bot-authored Telegram messages
-- prefixes outbound text using `sender_prefix_template`
+- compacts Telegram sender names to first token (`Name Surname` → `Name`) before applying `sender_prefix_template`
 - chunks oversized messages by UTF-8 bytes
+- retries failed chunk sends with exponential backoff using `chunking` retry settings
+- on terminal chunk failure, aborts later chunks in the same sequence when `abort_on_chunk_failure=true`
+- chunk delivery failures are log-only (no Telegram failure notification)
 - if mapping exists, Telegram replies are sent with Meshtastic `replyId`
 
 #### Reply-link behavior

@@ -174,6 +174,14 @@ class BridgePluginTests(unittest.TestCase):
         actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=28)))
         self.assertGreater(len(actions), 1)
         self.assertEqual(actions[1].delay_ms, 150)
+        self.assertEqual(actions[0].retry_max_attempts, 3)
+        self.assertEqual(actions[0].retry_initial_delay_ms, 500)
+        self.assertEqual(actions[0].retry_backoff_factor, 2.0)
+        self.assertTrue(actions[0].abort_on_failure)
+        self.assertIsNotNone(actions[0].sequence_id)
+        self.assertEqual(actions[0].sequence_index, 1)
+        self.assertEqual(actions[0].sequence_total, len(actions))
+        self.assertEqual(actions[1].sequence_id, actions[0].sequence_id)
         self.assertTrue(actions[0].bridge_canonical_for_telegram_message)
         self.assertFalse(actions[1].bridge_canonical_for_telegram_message)
         self.assertEqual(actions[0].bridge_source_telegram_chat_id, -999)
@@ -207,6 +215,38 @@ class BridgePluginTests(unittest.TestCase):
         actions = asyncio.run(plugin.on_telegram_message(tg_event, self._context()))
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].channel_index, 1)
+
+    def test_telegram_sender_display_name_is_compacted_to_first_token(self):
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=15,
+            reply_to_message_id=None,
+            text="hello",
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Name Surname",
+            has_media=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=80)))
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].text, "[Name] hello")
+
+    def test_telegram_sender_single_token_remains_unchanged(self):
+        event = TelegramMessageEvent(
+            chat_id=-999,
+            message_id=16,
+            reply_to_message_id=None,
+            text="hello",
+            text_source="text",
+            is_from_bot=False,
+            sender_display_name="Alice",
+            has_media=False,
+        )
+
+        actions = asyncio.run(self.plugin.on_telegram_message(event, self._context(payload_limit=80)))
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].text, "[Alice] hello")
 
 
 if __name__ == "__main__":

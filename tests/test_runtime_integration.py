@@ -3,7 +3,7 @@ import unittest
 
 from meshgram.app import MeshgramApp
 from meshgram.config import MeshgramSettings, PluginConfig
-from meshgram.types import MeshtasticTextEvent, TelegramMessageEvent
+from meshgram.types import MeshtasticTextEvent, SendMeshtasticAction, TelegramMessageEvent
 
 
 class _FakeTelegramMessage:
@@ -70,7 +70,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         asyncio.run(self.app._dispatch_telegram_message(event))
 
         self.assertEqual(len(self.sent_mesh), 1)
-        self.assertIn("[TG:Alice] hello from telegram", self.sent_mesh[0].text)
+        self.assertIn("[Alice] hello from telegram", self.sent_mesh[0].text)
 
     def test_meshtastic_to_telegram_loop_prevention(self):
         self.app.meshtastic.local_node_id = "!aaaa1111"
@@ -171,6 +171,115 @@ class RuntimeIntegrationTests(unittest.TestCase):
         asyncio.run(self.app._dispatch_telegram_message(telegram_reply_event))
 
         self.assertEqual(self.sent_mesh[-1].reply_id, 222)
+
+    def test_chunk_sequence_retries_and_completes_after_transient_failure(self):
+        attempt_chunk_indexes: list[int] = []
+        failure_counter = {"chunk2": 0}
+
+        def _send_with_transient_chunk2_failure(action):
+            attempt_chunk_indexes.append(action.sequence_index)
+            if action.sequence_index == 2 and failure_counter["chunk2"] == 0:
+                failure_counter["chunk2"] += 1
+                raise RuntimeError("temporary chunk 2 failure")
+            self.sent_mesh.append(action)
+            return {"id": 1000 + len(self.sent_mesh)}
+
+        self.app.meshtastic.send_text = _send_with_transient_chunk2_failure
+
+        actions = [
+            SendMeshtasticAction(
+                text="chunk1",
+                sequence_id="seq-1",
+                sequence_index=1,
+                sequence_total=3,
+                retry_max_attempts=3,
+                retry_initial_delay_ms=0,
+                retry_backoff_factor=2.0,
+                abort_on_failure=True,
+            ),
+            SendMeshtasticAction(
+                text="chunk2",
+                sequence_id="seq-1",
+                sequence_index=2,
+                sequence_total=3,
+                retry_max_attempts=3,
+                retry_initial_delay_ms=0,
+                retry_backoff_factor=2.0,
+                abort_on_failure=True,
+            ),
+            SendMeshtasticAction(
+                text="chunk3",
+                sequence_id="seq-1",
+                sequence_index=3,
+                sequence_total=3,
+                retry_max_attempts=3,
+                retry_initial_delay_ms=0,
+                retry_backoff_factor=2.0,
+                abort_on_failure=True,
+            ),
+        ]
+
+        asyncio.run(self.app._execute_actions(actions, "bridge"))
+
+        self.assertEqual(attempt_chunk_indexes, [1, 2, 2, 3])
+        self.assertEqual([action.sequence_index for action in self.sent_mesh], [1, 2, 3])
+        self.assertEqual(self.app.bot_app.bot.messages, [])
+
+    def test_chunk_sequence_aborts_after_terminal_failure(self):
+        attempt_chunk_indexes: list[int] = []
+
+        def _send_with_terminal_chunk2_failure(action):
+            attempt_chunk_indexes.append(action.sequence_index)
+            if action.sequence_index == 2:
+                raise RuntimeError("terminal chunk 2 failure")
+            self.sent_mesh.append(action)
+            return {"id": 2000 + len(self.sent_mesh)}
+
+        self.app.meshtastic.send_text = _send_with_terminal_chunk2_failure
+
+        actions = [
+            SendMeshtasticAction(
+                text="chunk1",
+                sequence_id="seq-2",
+                sequence_index=1,
+                sequence_total=3,
+                retry_max_attempts=2,
+                retry_initial_delay_ms=0,
+                retry_backoff_factor=2.0,
+                abort_on_failure=True,
+            ),
+            SendMeshtasticAction(
+                text="chunk2",
+                sequence_id="seq-2",
+                sequence_index=2,
+                sequence_total=3,
+                retry_max_attempts=2,
+                retry_initial_delay_ms=0,
+                retry_backoff_factor=2.0,
+                abort_on_failure=True,
+            ),
+            SendMeshtasticAction(
+                text="chunk3",
+                sequence_id="seq-2",
+                sequence_index=3,
+                sequence_total=3,
+                retry_max_attempts=2,
+                retry_initial_delay_ms=0,
+                retry_backoff_factor=2.0,
+                abort_on_failure=True,
+            ),
+        ]
+
+        with self.assertLogs("meshgram.app", level="ERROR") as log_context:
+            asyncio.run(self.app._execute_actions(actions, "bridge"))
+
+        self.assertEqual(attempt_chunk_indexes, [1, 2, 2])
+        self.assertEqual([action.sequence_index for action in self.sent_mesh], [1])
+        self.assertEqual(self.app.bot_app.bot.messages, [])
+        self.assertTrue(
+            any("Meshtastic send exhausted retries" in line for line in log_context.output),
+            msg=f"Expected retry exhaustion log, got: {log_context.output}",
+        )
 
 
 if __name__ == "__main__":

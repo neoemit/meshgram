@@ -27,10 +27,15 @@ class ConfigTests(unittest.TestCase):
                         serial_device: /dev/ttyUSB9
                     telegram:
                       include_captions: false
+                      sender_prefix_template: "[{display_name}] {message}"
                     chunking:
                       enabled: true
                       prefix_template: "({index}/{total}) "
                       inter_chunk_delay_ms: 200
+                      retry_max_attempts: 5
+                      retry_initial_delay_ms: 250
+                      retry_backoff_factor: 1.5
+                      abort_on_chunk_failure: false
                     plugins:
                       - name: bridge
                         enabled: true
@@ -67,6 +72,11 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.meshtastic.connection.tcp_port, 4403)
             self.assertTrue(settings.meshtastic.connection.no_nodes)
             self.assertFalse(settings.telegram.include_captions)
+            self.assertEqual(settings.telegram.sender_prefix_template, "[{display_name}] {message}")
+            self.assertEqual(settings.chunking.retry_max_attempts, 5)
+            self.assertEqual(settings.chunking.retry_initial_delay_ms, 250)
+            self.assertEqual(settings.chunking.retry_backoff_factor, 1.5)
+            self.assertFalse(settings.chunking.abort_on_chunk_failure)
 
     def test_default_plugins_when_config_missing(self):
         env = {

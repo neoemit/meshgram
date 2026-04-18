@@ -28,7 +28,7 @@ class MeshtasticConfig:
 @dataclass(slots=True)
 class TelegramConfig:
     include_captions: bool = True
-    sender_prefix_template: str = "[TG:{display_name}] {message}"
+    sender_prefix_template: str = "[{display_name}] {message}"
 
 
 @dataclass(slots=True)
@@ -36,6 +36,10 @@ class ChunkingConfig:
     enabled: bool = True
     prefix_template: str = "({index}/{total}) "
     inter_chunk_delay_ms: int = 0
+    retry_max_attempts: int = 3
+    retry_initial_delay_ms: int = 500
+    retry_backoff_factor: float = 2.0
+    abort_on_chunk_failure: bool = True
 
 
 @dataclass(slots=True)
@@ -97,6 +101,16 @@ def _as_bool(value: Any, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _as_float(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    return float(str(value))
 
 
 def _as_string_dict(value: Any) -> dict[str, str]:
@@ -200,13 +214,17 @@ def load_settings() -> MeshgramSettings:
         telegram=TelegramConfig(
             include_captions=_as_bool(telegram_data.get("include_captions"), True),
             sender_prefix_template=str(
-                telegram_data.get("sender_prefix_template", "[TG:{display_name}] {message}")
+                telegram_data.get("sender_prefix_template", "[{display_name}] {message}")
             ),
         ),
         chunking=ChunkingConfig(
             enabled=_as_bool(chunking_data.get("enabled"), True),
             prefix_template=str(chunking_data.get("prefix_template", "({index}/{total}) ")),
             inter_chunk_delay_ms=_as_int(chunking_data.get("inter_chunk_delay_ms"), 0),
+            retry_max_attempts=max(1, _as_int(chunking_data.get("retry_max_attempts"), 3)),
+            retry_initial_delay_ms=max(0, _as_int(chunking_data.get("retry_initial_delay_ms"), 500)),
+            retry_backoff_factor=max(1.0, _as_float(chunking_data.get("retry_backoff_factor"), 2.0)),
+            abort_on_chunk_failure=_as_bool(chunking_data.get("abort_on_chunk_failure"), True),
         ),
         plugins=plugins,
     )

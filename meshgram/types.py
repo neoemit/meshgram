@@ -48,6 +48,13 @@ class SendMeshtasticAction:
     reply_id: Optional[int] = None
     want_ack: bool = False
     delay_ms: int = 0
+    retry_max_attempts: int = 1
+    retry_initial_delay_ms: int = 0
+    retry_backoff_factor: float = 1.0
+    sequence_id: Optional[str] = None
+    sequence_index: Optional[int] = None
+    sequence_total: Optional[int] = None
+    abort_on_failure: bool = False
     bridge_source_telegram_chat_id: Optional[int] = None
     bridge_source_telegram_message_id: Optional[int] = None
     bridge_canonical_for_telegram_message: bool = False

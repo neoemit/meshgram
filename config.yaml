@@ -16,12 +16,16 @@ meshtastic:
 
 telegram:
   include_captions: true
-  sender_prefix_template: "[TG:{display_name}] {message}"
+  sender_prefix_template: "[{display_name}] {message}"
 
 chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
   inter_chunk_delay_ms: 150
+  retry_max_attempts: 3
+  retry_initial_delay_ms: 500
+  retry_backoff_factor: 2.0
+  abort_on_chunk_failure: true
 
 plugins:
   - name: bridge
