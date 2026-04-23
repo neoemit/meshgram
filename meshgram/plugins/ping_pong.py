@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from meshgram.plugin import BasePlugin
 from meshgram.text_utils import normalized_exact_word
 from meshgram.types import MeshtasticTextEvent, PluginAction, PluginContext, SendMeshtasticAction
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PingPongPlugin(BasePlugin):
@@ -72,8 +75,29 @@ class PingPongPlugin(BasePlugin):
         except (TypeError, ValueError):
             return self.DEFAULT_RESPONSE_DEDUPE_TTL_SECONDS
 
+    def _sender_identity(self, event: MeshtasticTextEvent) -> str:
+        raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
+
+        from_num = raw_packet.get("from")
+        if isinstance(from_num, int):
+            return f"node_num:{from_num & 0xFFFFFFFF:08x}"
+
+        from_id = event.from_id
+        if isinstance(from_id, str):
+            normalized = from_id.strip().lower()
+            if normalized:
+                return f"from_id:{normalized}"
+
+        sender_label = event.sender_label
+        if isinstance(sender_label, str):
+            normalized_label = sender_label.strip().lower()
+            if normalized_label:
+                return f"sender_label:{normalized_label}"
+
+        return "unknown"
+
     def _sender_dedupe_key(self, event: MeshtasticTextEvent, keyword: str) -> tuple[str, int, str]:
-        sender_key = event.from_id or event.sender_label or "unknown"
+        sender_key = self._sender_identity(event)
         return (sender_key, event.channel_index, keyword)
 
     def _is_duplicate_recent_keyword(self, event: MeshtasticTextEvent, keyword: str) -> bool:
@@ -93,6 +117,15 @@ class PingPongPlugin(BasePlugin):
 
         dedupe_key = self._sender_dedupe_key(event, keyword)
         if dedupe_key in self._recent_keyword_responses:
+            LOGGER.info(
+                "PingPong dedupe suppressed keyword response: keyword=%s packet_id=%s from_id=%s sender_label=%s channel=%s dedupe_key=%s",
+                keyword,
+                event.packet_id,
+                event.from_id,
+                event.sender_label,
+                event.channel_index,
+                dedupe_key,
+            )
             return True
 
         self._recent_keyword_responses[dedupe_key] = now
@@ -117,6 +150,15 @@ class PingPongPlugin(BasePlugin):
 
         if self._is_duplicate_recent_keyword(event, keyword):
             return []
+
+        LOGGER.info(
+            "PingPong sending keyword response: keyword=%s packet_id=%s from_id=%s sender_label=%s channel=%s",
+            keyword,
+            event.packet_id,
+            event.from_id,
+            event.sender_label,
+            event.channel_index,
+        )
 
         return [
             SendMeshtasticAction(

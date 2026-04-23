@@ -227,6 +227,43 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(len(first_actions), 1)
         self.assertEqual(len(later_actions), 1)
 
+    def test_duplicate_keyword_is_deduped_when_sender_identity_changes_representation(self):
+        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id=None,
+        )
+
+        first_event = MeshtasticTextEvent(
+            from_id=None,
+            to_id=None,
+            packet_id=50,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="Node A",
+            raw_packet={"from": 0xAABBCCDD},
+        )
+        duplicate_event = MeshtasticTextEvent(
+            from_id="!aabbccdd",
+            to_id=None,
+            packet_id=51,
+            reply_id=None,
+            channel_index=1,
+            text="PING",
+            sender_label="Node Alpha",
+            raw_packet={"from": 0xAABBCCDD},
+        )
+
+        with patch("meshgram.plugins.ping_pong.time.monotonic", side_effect=[100.0, 101.0]):
+            first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+            duplicate_actions = asyncio.run(plugin.on_meshtastic_message(duplicate_event, context))
+
+        self.assertEqual(len(first_actions), 1)
+        self.assertEqual(duplicate_actions, [])
+
 
 if __name__ == "__main__":
     unittest.main()
