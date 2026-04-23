@@ -264,6 +264,52 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(len(first_actions), 1)
         self.assertEqual(duplicate_actions, [])
 
+    def test_ignores_ping_from_local_node_id(self):
+        plugin = PingPongPlugin({"response_text": "Pong"})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id="!00b92212",
+        )
+
+        event = MeshtasticTextEvent(
+            from_id="!00b92212",
+            to_id=None,
+            packet_id=52,
+            reply_id=None,
+            channel_index=0,
+            text="ping",
+            sender_label="🤖",
+            raw_packet={"from": 0x00B92212},
+        )
+
+        actions = asyncio.run(plugin.on_meshtastic_message(event, context))
+        self.assertEqual(actions, [])
+
+    def test_ignores_ping_from_local_node_when_only_raw_sender_num_present(self):
+        plugin = PingPongPlugin({"response_text": "Pong"})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id="00b92212",
+        )
+
+        event = MeshtasticTextEvent(
+            from_id=None,
+            to_id=None,
+            packet_id=53,
+            reply_id=None,
+            channel_index=0,
+            text="ping",
+            sender_label="🤖",
+            raw_packet={"from": 0x00B92212},
+        )
+
+        actions = asyncio.run(plugin.on_meshtastic_message(event, context))
+        self.assertEqual(actions, [])
+
 
 if __name__ == "__main__":
     unittest.main()
