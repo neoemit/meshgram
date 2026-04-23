@@ -96,6 +96,37 @@ class PingPongPlugin(BasePlugin):
 
         return "unknown"
 
+    def _normalized_node_id(self, value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized.startswith("!"):
+            normalized = normalized[1:]
+        if normalized.startswith("0x"):
+            normalized = normalized[2:]
+        if not normalized:
+            return None
+        return f"!{normalized}"
+
+    def _sender_node_id(self, event: MeshtasticTextEvent) -> str | None:
+        raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
+        from_num = raw_packet.get("from")
+        if isinstance(from_num, int):
+            return f"!{from_num & 0xFFFFFFFF:08x}"
+
+        return self._normalized_node_id(event.from_id)
+
+    def _is_from_local_node(self, event: MeshtasticTextEvent, context: PluginContext) -> bool:
+        local_node_id = self._normalized_node_id(getattr(context, "local_node_id", None))
+        if local_node_id is None:
+            return False
+
+        sender_node_id = self._sender_node_id(event)
+        return sender_node_id == local_node_id
+
     def _sender_dedupe_key(self, event: MeshtasticTextEvent, keyword: str) -> tuple[str, int, str]:
         sender_key = self._sender_identity(event)
         return (sender_key, event.channel_index, keyword)
@@ -146,6 +177,18 @@ class PingPongPlugin(BasePlugin):
         keyword = normalized_exact_word(event.text)
         response_text = self._keyword_responses().get(keyword)
         if response_text is None:
+            return []
+
+        if self._is_from_local_node(event, context):
+            LOGGER.info(
+                "PingPong ignored local-node message: keyword=%s packet_id=%s from_id=%s sender_label=%s channel=%s local_node_id=%s",
+                keyword,
+                event.packet_id,
+                event.from_id,
+                event.sender_label,
+                event.channel_index,
+                getattr(context, "local_node_id", None),
+            )
             return []
 
         if self._is_duplicate_recent_keyword(event, keyword):
