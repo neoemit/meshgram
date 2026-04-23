@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from meshgram.config import MeshgramSettings
 from meshgram.plugins.ping_pong import PingPongPlugin
@@ -155,6 +156,76 @@ class PingPongPluginTests(unittest.TestCase):
         allowed_actions = asyncio.run(plugin.on_meshtastic_message(allowed_event, context))
         self.assertEqual(len(allowed_actions), 1)
         self.assertEqual(allowed_actions[0].channel_index, 1)
+
+    def test_duplicate_keyword_within_dedupe_window_is_ignored(self):
+        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id=None,
+        )
+
+        first_event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=46,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="node",
+        )
+        duplicate_event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=47,
+            reply_id=None,
+            channel_index=1,
+            text="PING!!!",
+            sender_label="node",
+        )
+
+        with patch("meshgram.plugins.ping_pong.time.monotonic", side_effect=[100.0, 103.0]):
+            first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+            duplicate_actions = asyncio.run(plugin.on_meshtastic_message(duplicate_event, context))
+
+        self.assertEqual(len(first_actions), 1)
+        self.assertEqual(duplicate_actions, [])
+
+    def test_duplicate_keyword_after_dedupe_window_is_allowed(self):
+        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id=None,
+        )
+
+        first_event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=48,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="node",
+        )
+        later_event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=49,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="node",
+        )
+
+        with patch("meshgram.plugins.ping_pong.time.monotonic", side_effect=[100.0, 107.0]):
+            first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+            later_actions = asyncio.run(plugin.on_meshtastic_message(later_event, context))
+
+        self.assertEqual(len(first_actions), 1)
+        self.assertEqual(len(later_actions), 1)
 
 
 if __name__ == "__main__":
