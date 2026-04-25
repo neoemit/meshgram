@@ -16,7 +16,7 @@ class PingPongPlugin(BasePlugin):
 
     def __init__(self, settings: dict | None = None):
         super().__init__(settings)
-        self._recent_keyword_responses: dict[tuple[str, int, str], float] = {}
+        self._recent_keyword_responses: dict[tuple[str, str], float] = {}
 
     def _allowed_channels(self) -> set[int] | None:
         configured = self.settings.get("channels")
@@ -127,9 +127,9 @@ class PingPongPlugin(BasePlugin):
         sender_node_id = self._sender_node_id(event)
         return sender_node_id == local_node_id
 
-    def _sender_dedupe_key(self, event: MeshtasticTextEvent, keyword: str) -> tuple[str, int, str]:
+    def _sender_dedupe_key(self, event: MeshtasticTextEvent, keyword: str) -> tuple[str, str]:
         sender_key = self._sender_identity(event)
-        return (sender_key, event.channel_index, keyword)
+        return (sender_key, keyword)
 
     def _is_duplicate_recent_keyword(self, event: MeshtasticTextEvent, keyword: str) -> bool:
         ttl_seconds = self._response_dedupe_ttl_seconds()

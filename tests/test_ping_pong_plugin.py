@@ -1,6 +1,22 @@
 import asyncio
+import time as _time_module
 import unittest
 from unittest.mock import patch
+
+_real_monotonic = _time_module.monotonic
+
+
+def _monotonic_mock(*scheduled_values):
+    """Returns a side_effect callable that yields scheduled values then falls back to real time."""
+    it = iter(scheduled_values)
+
+    def _call():
+        try:
+            return next(it)
+        except StopIteration:
+            return _real_monotonic()
+
+    return _call
 
 from meshgram.config import MeshgramSettings
 from meshgram.plugins.ping_pong import PingPongPlugin
@@ -185,8 +201,9 @@ class PingPongPluginTests(unittest.TestCase):
             sender_label="node",
         )
 
-        with patch("meshgram.plugins.ping_pong.time.monotonic", side_effect=[100.0, 103.0]):
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=100.0):
             first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=103.0):
             duplicate_actions = asyncio.run(plugin.on_meshtastic_message(duplicate_event, context))
 
         self.assertEqual(len(first_actions), 1)
@@ -220,8 +237,9 @@ class PingPongPluginTests(unittest.TestCase):
             sender_label="node",
         )
 
-        with patch("meshgram.plugins.ping_pong.time.monotonic", side_effect=[100.0, 107.0]):
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=100.0):
             first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=107.0):
             later_actions = asyncio.run(plugin.on_meshtastic_message(later_event, context))
 
         self.assertEqual(len(first_actions), 1)
@@ -257,8 +275,9 @@ class PingPongPluginTests(unittest.TestCase):
             raw_packet={"from": 0xAABBCCDD},
         )
 
-        with patch("meshgram.plugins.ping_pong.time.monotonic", side_effect=[100.0, 101.0]):
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=100.0):
             first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=101.0):
             duplicate_actions = asyncio.run(plugin.on_meshtastic_message(duplicate_event, context))
 
         self.assertEqual(len(first_actions), 1)
@@ -286,6 +305,44 @@ class PingPongPluginTests(unittest.TestCase):
 
         actions = asyncio.run(plugin.on_meshtastic_message(event, context))
         self.assertEqual(actions, [])
+
+    def test_duplicate_keyword_from_same_sender_on_different_channels_is_deduped(self):
+        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6, "channels": [0, 1]})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id=None,
+        )
+
+        ch0_event = MeshtasticTextEvent(
+            from_id="!aabbccdd",
+            to_id=None,
+            packet_id=60,
+            reply_id=None,
+            channel_index=0,
+            text="ping",
+            sender_label="node",
+            raw_packet={"from": 0xAABBCCDD},
+        )
+        ch1_event = MeshtasticTextEvent(
+            from_id="!aabbccdd",
+            to_id=None,
+            packet_id=61,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="node",
+            raw_packet={"from": 0xAABBCCDD},
+        )
+
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=100.0):
+            ch0_actions = asyncio.run(plugin.on_meshtastic_message(ch0_event, context))
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=102.0):
+            ch1_actions = asyncio.run(plugin.on_meshtastic_message(ch1_event, context))
+
+        self.assertEqual(len(ch0_actions), 1)
+        self.assertEqual(ch1_actions, [])
 
     def test_ignores_ping_from_local_node_when_only_raw_sender_num_present(self):
         plugin = PingPongPlugin({"response_text": "Pong"})
