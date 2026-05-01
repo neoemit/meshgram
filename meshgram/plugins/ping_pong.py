@@ -12,7 +12,7 @@ LOGGER = logging.getLogger(__name__)
 
 class PingPongPlugin(BasePlugin):
     name = "ping_pong"
-    DEFAULT_RESPONSE_DEDUPE_TTL_SECONDS = 6.0
+    DEFAULT_RESPONSE_DEDUPE_TTL_SECONDS = 30.0
 
     def __init__(self, settings: dict | None = None):
         super().__init__(settings)

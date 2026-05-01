@@ -245,6 +245,47 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(len(first_actions), 1)
         self.assertEqual(len(later_actions), 1)
 
+    def test_nearby_node_retry_within_default_ttl_is_suppressed(self):
+        # A 0-hop (nearby) sender may re-originate the same ping with a fresh packet_id
+        # a few seconds later (Meshtastic retry before relay confirmation). The default
+        # 30-second TTL must cover this window so only one Pong is sent.
+        plugin = PingPongPlugin({"response_text": "Pong"})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id=None,
+        )
+
+        first_event = MeshtasticTextEvent(
+            from_id="!aabbccdd",
+            to_id=None,
+            packet_id=70,
+            reply_id=None,
+            channel_index=0,
+            text="ping",
+            sender_label="nearby",
+            raw_packet={"from": 0xAABBCCDD},
+        )
+        retry_event = MeshtasticTextEvent(
+            from_id="!aabbccdd",
+            to_id=None,
+            packet_id=71,
+            reply_id=None,
+            channel_index=0,
+            text="ping",
+            sender_label="nearby",
+            raw_packet={"from": 0xAABBCCDD},
+        )
+
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=100.0):
+            first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=108.0):
+            retry_actions = asyncio.run(plugin.on_meshtastic_message(retry_event, context))
+
+        self.assertEqual(len(first_actions), 1)
+        self.assertEqual(retry_actions, [])
+
     def test_duplicate_keyword_is_deduped_when_sender_identity_changes_representation(self):
         plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6})
         context = PluginContext(
