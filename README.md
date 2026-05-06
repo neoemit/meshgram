@@ -291,7 +291,8 @@ Bridge reaction/reply settings:
 - message edge punctuation/symbols are ignored (example: `ping?` matches `Ping`)
 - command map is `settings.keyword_responses`
 - replies on the **same incoming channel** and uses `replyId`
-- suppresses rapid duplicate responses from the same sender/channel/keyword for `settings.response_dedupe_ttl_seconds` (default: `6`)
+- suppresses reprocessed/repropagated packets by Meshtastic packet id for `settings.message_dedupe_ttl_seconds` (default: `3600`, one hour)
+- suppresses rapid duplicate keyword responses from the same sender/keyword for `settings.response_dedupe_ttl_seconds` (default: `30`)
 
 Example:
 
@@ -303,7 +304,8 @@ Example:
       Ping: "Pong"
       Ack: "Ack"
     channels: [0, 1]
-    response_dedupe_ttl_seconds: 6
+    message_dedupe_ttl_seconds: 3600
+    response_dedupe_ttl_seconds: 30
 ```
 
 ### `dm_http_command`

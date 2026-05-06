@@ -13,10 +13,12 @@ LOGGER = logging.getLogger(__name__)
 class PingPongPlugin(BasePlugin):
     name = "ping_pong"
     DEFAULT_RESPONSE_DEDUPE_TTL_SECONDS = 30.0
+    DEFAULT_MESSAGE_DEDUPE_TTL_SECONDS = 60.0 * 60.0
 
     def __init__(self, settings: dict | None = None):
         super().__init__(settings)
         self._recent_keyword_responses: dict[tuple[str, str], float] = {}
+        self._responded_packet_ids: dict[int, float] = {}
 
     def _allowed_channels(self) -> set[int] | None:
         configured = self.settings.get("channels")
@@ -74,6 +76,16 @@ class PingPongPlugin(BasePlugin):
             return max(0.0, float(raw))
         except (TypeError, ValueError):
             return self.DEFAULT_RESPONSE_DEDUPE_TTL_SECONDS
+
+    def _message_dedupe_ttl_seconds(self) -> float:
+        raw = self.settings.get(
+            "message_dedupe_ttl_seconds",
+            self.DEFAULT_MESSAGE_DEDUPE_TTL_SECONDS,
+        )
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return self.DEFAULT_MESSAGE_DEDUPE_TTL_SECONDS
 
     def _sender_identity(self, event: MeshtasticTextEvent) -> str:
         raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
@@ -162,6 +174,35 @@ class PingPongPlugin(BasePlugin):
         self._recent_keyword_responses[dedupe_key] = now
         return False
 
+    def _is_duplicate_responded_packet_id(self, event: MeshtasticTextEvent, keyword: str) -> bool:
+        ttl_seconds = self._message_dedupe_ttl_seconds()
+        if ttl_seconds <= 0 or event.packet_id is None:
+            return False
+
+        now = time.monotonic()
+        expiry_cutoff = now - ttl_seconds
+        stale_packet_ids = [
+            packet_id
+            for packet_id, seen_time in self._responded_packet_ids.items()
+            if seen_time < expiry_cutoff
+        ]
+        for packet_id in stale_packet_ids:
+            self._responded_packet_ids.pop(packet_id, None)
+
+        if event.packet_id in self._responded_packet_ids:
+            LOGGER.info(
+                "PingPong message dedupe suppressed repeated packet response: keyword=%s packet_id=%s from_id=%s sender_label=%s channel=%s",
+                keyword,
+                event.packet_id,
+                event.from_id,
+                event.sender_label,
+                event.channel_index,
+            )
+            return True
+
+        self._responded_packet_ids[event.packet_id] = now
+        return False
+
     async def on_meshtastic_message(
         self,
         event: MeshtasticTextEvent,
@@ -189,6 +230,9 @@ class PingPongPlugin(BasePlugin):
                 event.channel_index,
                 getattr(context, "local_node_id", None),
             )
+            return []
+
+        if self._is_duplicate_responded_packet_id(event, keyword):
             return []
 
         if self._is_duplicate_recent_keyword(event, keyword):

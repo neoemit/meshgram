@@ -324,6 +324,44 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(len(first_actions), 1)
         self.assertEqual(duplicate_actions, [])
 
+    def test_same_packet_id_repropagated_by_another_node_is_suppressed_for_one_hour(self):
+        plugin = PingPongPlugin({"response_text": "Pong"})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            meshtastic_payload_limit=233,
+            local_node_id=None,
+        )
+
+        original_event = MeshtasticTextEvent(
+            from_id="!aabbccdd",
+            to_id=None,
+            packet_id=80,
+            reply_id=None,
+            channel_index=0,
+            text="ping",
+            sender_label="original",
+            raw_packet={"from": 0xAABBCCDD, "id": 80},
+        )
+        repropagated_event = MeshtasticTextEvent(
+            from_id="!11223344",
+            to_id=None,
+            packet_id=80,
+            reply_id=None,
+            channel_index=0,
+            text="ping",
+            sender_label="relay",
+            raw_packet={"from": 0x11223344, "id": 80},
+        )
+
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=100.0):
+            original_actions = asyncio.run(plugin.on_meshtastic_message(original_event, context))
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=3699.0):
+            repropagated_actions = asyncio.run(plugin.on_meshtastic_message(repropagated_event, context))
+
+        self.assertEqual(len(original_actions), 1)
+        self.assertEqual(repropagated_actions, [])
+
     def test_ignores_ping_from_local_node_id(self):
         plugin = PingPongPlugin({"response_text": "Pong"})
         context = PluginContext(
