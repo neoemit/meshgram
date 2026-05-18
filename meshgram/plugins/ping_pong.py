@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import time
 
+from typing import Any
+
 from meshgram.plugin import BasePlugin
 from meshgram.text_utils import normalized_exact_word
-from meshgram.types import MeshtasticTextEvent, PluginAction, PluginContext, SendMeshtasticAction
+from meshgram.types import MeshTextEvent, PluginAction, PluginContext, SendMeshAction
 
 LOGGER = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ class PingPongPlugin(BasePlugin):
     def __init__(self, settings: dict | None = None):
         super().__init__(settings)
         self._recent_keyword_responses: dict[tuple[str, str], float] = {}
-        self._responded_packet_ids: dict[int, float] = {}
+        self._responded_packet_ids: dict[Any, float] = {}
 
     def _allowed_channels(self) -> set[int] | None:
         configured = self.settings.get("channels")
@@ -87,7 +89,7 @@ class PingPongPlugin(BasePlugin):
         except (TypeError, ValueError):
             return self.DEFAULT_MESSAGE_DEDUPE_TTL_SECONDS
 
-    def _sender_identity(self, event: MeshtasticTextEvent) -> str:
+    def _sender_identity(self, event: MeshTextEvent) -> str:
         raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
 
         from_num = raw_packet.get("from")
@@ -123,7 +125,7 @@ class PingPongPlugin(BasePlugin):
             return None
         return f"!{normalized}"
 
-    def _sender_node_id(self, event: MeshtasticTextEvent) -> str | None:
+    def _sender_node_id(self, event: MeshTextEvent) -> str | None:
         raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
         from_num = raw_packet.get("from")
         if isinstance(from_num, int):
@@ -131,7 +133,7 @@ class PingPongPlugin(BasePlugin):
 
         return self._normalized_node_id(event.from_id)
 
-    def _is_from_local_node(self, event: MeshtasticTextEvent, context: PluginContext) -> bool:
+    def _is_from_local_node(self, event: MeshTextEvent, context: PluginContext) -> bool:
         local_node_id = self._normalized_node_id(getattr(context, "local_node_id", None))
         if local_node_id is None:
             return False
@@ -139,11 +141,11 @@ class PingPongPlugin(BasePlugin):
         sender_node_id = self._sender_node_id(event)
         return sender_node_id == local_node_id
 
-    def _sender_dedupe_key(self, event: MeshtasticTextEvent, keyword: str) -> tuple[str, str]:
+    def _sender_dedupe_key(self, event: MeshTextEvent, keyword: str) -> tuple[str, str]:
         sender_key = self._sender_identity(event)
         return (sender_key, keyword)
 
-    def _is_duplicate_recent_keyword(self, event: MeshtasticTextEvent, keyword: str) -> bool:
+    def _is_duplicate_recent_keyword(self, event: MeshTextEvent, keyword: str) -> bool:
         ttl_seconds = self._response_dedupe_ttl_seconds()
         if ttl_seconds <= 0:
             return False
@@ -174,7 +176,7 @@ class PingPongPlugin(BasePlugin):
         self._recent_keyword_responses[dedupe_key] = now
         return False
 
-    def _is_duplicate_responded_packet_id(self, event: MeshtasticTextEvent, keyword: str) -> bool:
+    def _is_duplicate_responded_packet_id(self, event: MeshTextEvent, keyword: str) -> bool:
         ttl_seconds = self._message_dedupe_ttl_seconds()
         if ttl_seconds <= 0 or event.packet_id is None:
             return False
@@ -203,9 +205,9 @@ class PingPongPlugin(BasePlugin):
         self._responded_packet_ids[event.packet_id] = now
         return False
 
-    async def on_meshtastic_message(
+    async def on_mesh_message(
         self,
-        event: MeshtasticTextEvent,
+        event: MeshTextEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         if event.packet_id is None:
@@ -248,7 +250,7 @@ class PingPongPlugin(BasePlugin):
         )
 
         return [
-            SendMeshtasticAction(
+            SendMeshAction(
                 text=response_text,
                 channel_index=event.channel_index,
                 reply_id=event.packet_id,

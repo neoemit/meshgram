@@ -3,17 +3,18 @@ from __future__ import annotations
 import logging
 import uuid
 
+from meshgram.config import MESHCORE_BACKEND
 from meshgram.plugin import BasePlugin
 from meshgram.text_utils import split_for_meshtastic, utf8_len
 from meshgram.types import (
-    MeshtasticReactionEvent,
-    MeshtasticTextEvent,
+    MeshReactionEvent,
+    MeshTextEvent,
     PluginAction,
     PluginContext,
-    SendMeshtasticReactionAction,
-    SendMeshtasticAction,
-    SendTelegramReactionAction,
+    SendMeshAction,
+    SendMeshReactionAction,
     SendTelegramAction,
+    SendTelegramReactionAction,
     TelegramMessageEvent,
     TelegramReactionEvent,
 )
@@ -32,20 +33,21 @@ class BridgePlugin(BasePlugin):
 
     def _bridge_channel(self, context: PluginContext) -> int:
         configured_channel = self.settings.get("channel")
-        if configured_channel is None:
-            return context.settings.meshtastic.bridge_channel
+        if configured_channel is not None:
+            try:
+                return int(configured_channel)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "bridge.settings.channel must be an integer; falling back to active backend's bridge_channel"
+                )
 
-        try:
-            return int(configured_channel)
-        except (TypeError, ValueError):
-            LOGGER.warning(
-                "bridge.settings.channel must be an integer; falling back to meshtastic.bridge_channel"
-            )
-            return context.settings.meshtastic.bridge_channel
+        if context.settings.mesh.backend == MESHCORE_BACKEND:
+            return context.settings.meshcore.bridge_channel
+        return context.settings.meshtastic.bridge_channel
 
-    async def on_meshtastic_message(
+    async def on_mesh_message(
         self,
-        event: MeshtasticTextEvent,
+        event: MeshTextEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         bridge_channel = self._bridge_channel(context)
@@ -119,7 +121,7 @@ class BridgePlugin(BasePlugin):
 
         chunking = context.settings.chunking
         is_broadcast_destination = True
-        payload_limit = context.meshtastic_payload_limit - max(0, chunking.payload_safety_margin_bytes)
+        payload_limit = context.mesh_payload_limit - max(0, chunking.payload_safety_margin_bytes)
         if meshtastic_reply_id is not None:
             # reply_id adds protobuf bytes; reserve extra headroom to avoid edge-size drops.
             payload_limit -= self.REPLY_ID_EXTRA_MARGIN_BYTES
@@ -152,11 +154,11 @@ class BridgePlugin(BasePlugin):
 
             LOGGER.warning(
                 "Chunk payload safety margin is too aggressive for this message; "
-                "falling back to full Meshtastic payload limit"
+                "falling back to full mesh payload limit"
             )
             chunks = split_for_meshtastic(
                 text=meshtastic_text,
-                payload_limit=context.meshtastic_payload_limit,
+                payload_limit=context.mesh_payload_limit,
                 prefix_template=chunking.prefix_template,
                 chunking_enabled=chunking.enabled,
             )
@@ -203,7 +205,7 @@ class BridgePlugin(BasePlugin):
         for index, chunk in enumerate(chunks):
             delay_ms = effective_chunk_delay_ms if index > 0 else 0
             actions.append(
-                SendMeshtasticAction(
+                SendMeshAction(
                     text=chunk,
                     channel_index=bridge_channel,
                     reply_id=meshtastic_reply_id if index == 0 else None,
@@ -252,7 +254,7 @@ class BridgePlugin(BasePlugin):
             if self._should_emit_missing_target_fallback():
                 chunking = context.settings.chunking
                 return [
-                    SendMeshtasticAction(
+                    SendMeshAction(
                         text=self._reaction_missing_notice(),
                         channel_index=bridge_channel,
                         want_ack=want_ack,
@@ -266,7 +268,7 @@ class BridgePlugin(BasePlugin):
 
         chunking = context.settings.chunking
         return [
-            SendMeshtasticReactionAction(
+            SendMeshReactionAction(
                 emoji=event.emoji,
                 target_packet_id=target_packet_id,
                 channel_index=bridge_channel,
@@ -277,9 +279,9 @@ class BridgePlugin(BasePlugin):
             )
         ]
 
-    async def on_meshtastic_reaction(
+    async def on_mesh_reaction(
         self,
-        event: MeshtasticReactionEvent,
+        event: MeshReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         if not self._reactions_enabled():

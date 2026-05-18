@@ -7,6 +7,9 @@ if TYPE_CHECKING:
     from .reply_links import ReplyLinkRegistry
 
 
+MeshPacketRef = Union[int, str]
+
+
 @dataclass(slots=True)
 class TelegramMessageEvent:
     chat_id: int
@@ -30,11 +33,11 @@ class TelegramReactionEvent:
 
 
 @dataclass(slots=True)
-class MeshtasticTextEvent:
+class MeshTextEvent:
     from_id: Optional[str]
     to_id: Optional[str]
-    packet_id: Optional[int]
-    reply_id: Optional[int]
+    packet_id: Optional[MeshPacketRef]
+    reply_id: Optional[MeshPacketRef]
     channel_index: int
     text: str
     sender_label: str
@@ -42,11 +45,11 @@ class MeshtasticTextEvent:
 
 
 @dataclass(slots=True)
-class MeshtasticReactionEvent:
+class MeshReactionEvent:
     from_id: Optional[str]
     to_id: Optional[str]
-    packet_id: Optional[int]
-    target_packet_id: int
+    packet_id: Optional[MeshPacketRef]
+    target_packet_id: MeshPacketRef
     channel_index: int
     emoji: str
     sender_label: str
@@ -58,7 +61,7 @@ class SendTelegramAction:
     chat_id: int
     text: str
     reply_to_message_id: Optional[int] = None
-    bridge_source_meshtastic_packet_id: Optional[int] = None
+    bridge_source_meshtastic_packet_id: Optional[MeshPacketRef] = None
 
 
 @dataclass(slots=True)
@@ -70,11 +73,11 @@ class SendTelegramReactionAction:
 
 
 @dataclass(slots=True)
-class SendMeshtasticAction:
+class SendMeshAction:
     text: str
     destination_id: Optional[Union[int, str]] = None
     channel_index: int = 0
-    reply_id: Optional[int] = None
+    reply_id: Optional[MeshPacketRef] = None
     want_ack: bool = False
     delay_ms: int = 0
     retry_max_attempts: int = 1
@@ -93,9 +96,9 @@ class SendMeshtasticAction:
 
 
 @dataclass(slots=True)
-class SendMeshtasticReactionAction:
+class SendMeshReactionAction:
     emoji: str
-    target_packet_id: int
+    target_packet_id: MeshPacketRef
     destination_id: Optional[Union[int, str]] = None
     channel_index: int = 0
     want_ack: bool = False
@@ -104,11 +107,19 @@ class SendMeshtasticReactionAction:
     retry_backoff_factor: float = 2.0
 
 
+# Backward-compatible aliases (deprecated, retained so out-of-tree plugins and
+# any old imports keep working).
+MeshtasticTextEvent = MeshTextEvent
+MeshtasticReactionEvent = MeshReactionEvent
+SendMeshtasticAction = SendMeshAction
+SendMeshtasticReactionAction = SendMeshReactionAction
+
+
 PluginAction = Union[
     SendTelegramAction,
     SendTelegramReactionAction,
-    SendMeshtasticAction,
-    SendMeshtasticReactionAction,
+    SendMeshAction,
+    SendMeshReactionAction,
 ]
 
 
@@ -116,9 +127,13 @@ PluginAction = Union[
 class PluginContext:
     settings: "MeshgramSettings"
     telegram_group_id: int
-    meshtastic_payload_limit: int
+    mesh_payload_limit: int
     local_node_id: Optional[str]
     reply_links: Optional["ReplyLinkRegistry"] = None
+
+    @property
+    def meshtastic_payload_limit(self) -> int:
+        return self.mesh_payload_limit
 
 
 class Plugin(Protocol):
@@ -141,16 +156,16 @@ class Plugin(Protocol):
     ) -> list[PluginAction]:
         ...
 
-    async def on_meshtastic_message(
+    async def on_mesh_message(
         self,
-        event: MeshtasticTextEvent,
+        event: MeshTextEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         ...
 
-    async def on_meshtastic_reaction(
+    async def on_mesh_reaction(
         self,
-        event: MeshtasticReactionEvent,
+        event: MeshReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         ...

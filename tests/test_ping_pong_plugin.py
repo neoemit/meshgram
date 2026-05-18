@@ -46,7 +46,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -78,7 +78,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -112,7 +112,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -132,7 +132,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -144,7 +144,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -178,7 +178,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -214,7 +214,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -253,7 +253,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -291,7 +291,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -329,7 +329,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -367,7 +367,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id="!00b92212",
         )
 
@@ -390,7 +390,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id=None,
         )
 
@@ -428,7 +428,7 @@ class PingPongPluginTests(unittest.TestCase):
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id="00b92212",
         )
 

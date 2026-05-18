@@ -402,7 +402,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual([action.sequence_index for action in self.sent_mesh], [1])
         self.assertEqual(self.app.bot_app.bot.messages, [])
         self.assertTrue(
-            any("Meshtastic send exhausted retries" in line for line in log_context.output),
+            any("Mesh send exhausted retries" in line for line in log_context.output),
             msg=f"Expected retry exhaustion log, got: {log_context.output}",
         )
 

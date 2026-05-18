@@ -31,7 +31,19 @@ docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml up --build 
 
 ## Architecture
 
-Meshgram is a **plugin-based bidirectional bridge between Meshtastic (mesh radio) and Telegram**. It relays messages, replies, and emoji reactions across both platforms.
+Meshgram is a **plugin-based bidirectional bridge between a mesh radio and Telegram**. It supports two backends, selectable at deploy time:
+
+- **`meshtastic`** (default) — Meshtastic devices over serial or TCP, via the `meshtastic` Python library.
+- **`meshcore`** — MeshCore companion radios over serial, TCP, or BLE, via the `meshcore` Python library.
+
+Backend selection: `MESH_BACKEND=meshtastic|meshcore` env var, or `mesh.backend` in `config.yaml`. Existing Meshtastic deployments continue to work with no env/config changes (backend defaults to `meshtastic`).
+
+MeshCore caveats vs. Meshtastic:
+- No packet-level reactions — Telegram→MeshCore reaction actions are dropped with a debug log; MeshCore never emits reaction events.
+- No reply threading — `SendMeshAction.reply_id` is silently dropped on the meshcore backend (the message still goes out as plain text).
+- Identifiers are opaque strings (synthetic IDs derived from `expected_ack` codes and message timestamps) rather than 32-bit numeric packet IDs.
+
+The bridge relays messages, replies (Meshtastic only), and emoji reactions (Meshtastic only) across both platforms.
 
 ### Runtime flow
 
@@ -60,10 +72,14 @@ Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshta
 
 | File | Role |
 |------|------|
-| `meshgram/app.py` | MeshgramApp + MeshtasticClient; event dispatch; action execution |
+| `meshgram/app.py` | `MeshgramApp`; event dispatch; action execution; Telegram-side helpers |
+| `meshgram/transport/__init__.py` | `MeshTransport` ABC + `create_transport()` factory |
+| `meshgram/transport/meshtastic.py` | `MeshtasticTransport` (also exported as `MeshtasticClient` for back-compat) |
+| `meshgram/transport/meshcore.py` | `MeshCoreTransport` |
+| `meshgram/_mesh_helpers.py` | Shared helpers (node-id normalization, emoji extraction, port-num check) |
 | `meshgram/config.py` | Settings dataclasses; `load_settings()` with env-over-YAML precedence |
-| `meshgram/types.py` | All event and action dataclasses; `Plugin` protocol; `PluginContext` |
-| `meshgram/reply_links.py` | In-memory bidirectional Telegram↔Meshtastic message ID registry with TTL |
+| `meshgram/types.py` | All event and action dataclasses; `Plugin` protocol; `PluginContext`. Type names use the `Mesh*` prefix; the older `Meshtastic*` names are kept as aliases. |
+| `meshgram/reply_links.py` | In-memory bidirectional Telegram↔mesh message ID registry with TTL |
 | `meshgram/text_utils.py` | UTF-8 byte-aware chunking for radio MTU constraints |
 
 ### Config

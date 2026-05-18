@@ -34,7 +34,7 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
         self.context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=233,
+            mesh_payload_limit=233,
             local_node_id="!abcd0001",
         )
 

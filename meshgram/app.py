@@ -6,10 +6,6 @@ import logging
 import time
 from typing import Any, Optional, Sequence
 
-from meshtastic import BROADCAST_ADDR, BROADCAST_NUM
-import meshtastic.serial_interface
-import meshtastic.tcp_interface
-from pubsub import pub
 from telegram import (
     Message,
     MessageReactionCountUpdated,
@@ -28,420 +24,41 @@ from telegram.ext import (
     filters,
 )
 
-from .config import MeshgramSettings, load_settings
+from ._mesh_helpers import (
+    extract_optional_int,
+    extract_reaction_emoji_from_value,
+    is_broadcast_destination,
+    is_emoji_modifier,
+    sanitize_reaction_emoji_text,
+)
+from .config import MESHTASTIC_BACKEND, MeshgramSettings, load_settings
 from .plugin import LoadedPlugin, load_plugins
 from .reply_links import ReplyLinkRegistry
+from .transport import MeshTransport, create_transport
 from .types import (
-    MeshtasticReactionEvent,
-    MeshtasticTextEvent,
+    MeshPacketRef,
+    MeshReactionEvent,
+    MeshTextEvent,
     PluginAction,
     PluginContext,
-    SendMeshtasticReactionAction,
-    SendMeshtasticAction,
-    SendTelegramReactionAction,
+    SendMeshAction,
+    SendMeshReactionAction,
     SendTelegramAction,
+    SendTelegramReactionAction,
     TelegramMessageEvent,
     TelegramReactionEvent,
+    # Backward-compatible aliases (kept so external imports stay valid):
+    MeshtasticReactionEvent,
+    MeshtasticTextEvent,
+    SendMeshtasticAction,
+    SendMeshtasticReactionAction,
 )
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_MESHTASTIC_PAYLOAD_LIMIT = 233
 MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 TELEGRAM_REACTION_WRITE_DEDUPE_TTL_SECONDS = 12.0
 DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI = "👍"
 TELEGRAM_REACTION_INVALID_ERROR_TOKEN = "reaction_invalid"
-_EMOJI_MODIFIER_CODEPOINTS = {
-    0x20E3,  # COMBINING ENCLOSING KEYCAP
-    0xFE0E,  # VARIATION SELECTOR-15
-    0xFE0F,  # VARIATION SELECTOR-16
-}
-
-try:
-    from meshtastic.protobuf import mesh_pb2
-except ModuleNotFoundError:
-    try:
-        import meshtastic.mesh_pb2 as mesh_pb2  # type: ignore[attr-defined]
-    except ModuleNotFoundError:
-        mesh_pb2 = None  # type: ignore[assignment]
-
-try:
-    from meshtastic.protobuf import portnums_pb2
-except ModuleNotFoundError:
-    try:
-        import meshtastic.portnums_pb2 as portnums_pb2  # type: ignore[attr-defined]
-    except ModuleNotFoundError:
-        portnums_pb2 = None  # type: ignore[assignment]
-
-
-class MeshtasticClient:
-    def __init__(self, settings: MeshgramSettings):
-        self.settings = settings
-        self.iface: Any = None
-        self.local_node_id: Optional[str] = None
-        self._packet_callback = None
-        self._supports_sendtext_reply_id: Optional[bool] = None
-        self._supports_senddata_reply_id: Optional[bool] = None
-        self._supports_lowlevel_packet: Optional[bool] = None
-
-    @property
-    def payload_limit(self) -> int:
-        if mesh_pb2 is None:
-            return DEFAULT_MESHTASTIC_PAYLOAD_LIMIT
-
-        constants = getattr(mesh_pb2, "Constants", None)
-        payload_len = getattr(constants, "DATA_PAYLOAD_LEN", None)
-        if payload_len is None:
-            return DEFAULT_MESHTASTIC_PAYLOAD_LIMIT
-
-        return int(payload_len)
-
-    def connect(self, packet_callback) -> None:
-        self._packet_callback = packet_callback
-
-        connection = self.settings.meshtastic.connection
-        if connection.mode == "tcp":
-            LOGGER.info(
-                "Connecting to Meshtastic over TCP: %s:%s",
-                connection.tcp_host,
-                connection.tcp_port,
-            )
-            self.iface = self._create_tcp_interface(connection.tcp_host, connection.tcp_port, connection.no_nodes)
-        else:
-            if connection.serial_device:
-                LOGGER.info("Connecting to Meshtastic serial device: %s", connection.serial_device)
-            else:
-                LOGGER.info("Connecting to Meshtastic serial device via auto-detect")
-            self.iface = self._create_serial_interface(connection.serial_device, connection.no_nodes)
-
-        pub.subscribe(self._on_receive, "meshtastic.receive")
-        self.refresh_local_node_id()
-
-    def _create_tcp_interface(self, host: str, port: int, no_nodes: bool):
-        kwargs = {
-            "hostname": host,
-            "portNumber": port,
-        }
-        if no_nodes:
-            kwargs["noNodes"] = True
-
-        try:
-            return meshtastic.tcp_interface.TCPInterface(**kwargs)
-        except TypeError as exc:
-            if "noNodes" in str(exc):
-                LOGGER.info("Meshtastic TCPInterface does not support noNodes; retrying without it")
-                return meshtastic.tcp_interface.TCPInterface(hostname=host, portNumber=port)
-            raise
-
-    def _create_serial_interface(self, device: Optional[str], no_nodes: bool):
-        kwargs = {"devPath": device}
-        if no_nodes:
-            kwargs["noNodes"] = True
-
-        try:
-            return meshtastic.serial_interface.SerialInterface(**kwargs)
-        except TypeError as exc:
-            if "noNodes" in str(exc):
-                LOGGER.info("Meshtastic SerialInterface does not support noNodes; retrying without it")
-                return meshtastic.serial_interface.SerialInterface(devPath=device)
-            raise
-
-    @property
-    def is_connected(self) -> bool:
-        return self.iface is not None
-
-    @property
-    def supports_wait_for_ack(self) -> bool:
-        return self.iface is not None and callable(getattr(self.iface, "waitForAckNak", None))
-
-    def wait_for_ack(self) -> None:
-        if not self.supports_wait_for_ack:
-            return
-        self.iface.waitForAckNak()
-
-    def invalidate_connection(self) -> None:
-        if self.iface is not None:
-            with contextlib.suppress(Exception):
-                self.iface.close()
-        self.iface = None
-        self.local_node_id = None
-        self._supports_sendtext_reply_id = None
-        self._supports_senddata_reply_id = None
-        self._supports_lowlevel_packet = None
-
-    def refresh_local_node_id(self) -> None:
-        if self.iface is None:
-            return
-
-        try:
-            user = self.iface.getMyUser()
-        except Exception:
-            return
-
-        if isinstance(user, dict):
-            maybe_id = user.get("id")
-            if isinstance(maybe_id, str) and maybe_id:
-                self.local_node_id = maybe_id
-
-    def _on_receive(self, packet, interface) -> None:
-        if self._packet_callback is not None:
-            self._packet_callback(packet)
-
-    def resolve_sender_label(self, from_id: Optional[str], from_num: Optional[int] = None) -> str:
-        override_label = self._resolve_override_label(from_id, from_num)
-        if override_label:
-            return override_label
-
-        node_info = self._find_node_info(from_id, from_num)
-        if isinstance(node_info, dict):
-            user = node_info.get("user", {})
-            if isinstance(user, dict):
-                short_name = user.get("shortName")
-                if isinstance(short_name, str) and short_name.strip():
-                    return short_name.strip()
-
-                long_name = user.get("longName")
-                if isinstance(long_name, str) and long_name.strip():
-                    return long_name.strip()
-
-        fallback_id = from_id
-        if fallback_id is None and from_num is not None:
-            fallback_id = _node_num_to_id(from_num)
-        if fallback_id is not None:
-            return fallback_id
-        return "unknown"
-
-    def _resolve_override_label(self, from_id: Optional[str], from_num: Optional[int]) -> Optional[str]:
-        overrides = self.settings.meshtastic.node_name_overrides
-        if not overrides:
-            return None
-
-        candidates: list[str] = []
-        if from_id:
-            normalized = _normalize_node_id(from_id)
-            for value in (from_id, normalized):
-                if not value:
-                    continue
-                candidates.append(value)
-                if value.startswith("!"):
-                    candidates.append(value[1:])
-
-        if from_num is not None:
-            normalized_num = from_num & 0xFFFFFFFF
-            normalized_id = _node_num_to_id(normalized_num)
-            candidates.extend(
-                [
-                    str(from_num),
-                    str(normalized_num),
-                    normalized_id,
-                    normalized_id[1:],
-                    f"0x{normalized_num:08x}",
-                ]
-            )
-
-        for candidate in candidates:
-            direct = overrides.get(candidate)
-            if direct:
-                return direct
-
-        normalized_candidates = {candidate.strip().lower() for candidate in candidates if candidate.strip()}
-        for key, value in overrides.items():
-            normalized_key = str(key).strip().lower()
-            if normalized_key in normalized_candidates:
-                return value
-
-        return None
-
-    def _find_node_info(self, from_id: Optional[str], from_num: Optional[int]) -> Optional[dict[str, Any]]:
-        if self.iface is None:
-            return None
-
-        nodes = getattr(self.iface, "nodes", {})
-        if not isinstance(nodes, dict):
-            return None
-
-        normalized_id = _normalize_node_id(from_id) if from_id else None
-        normalized_num = (from_num & 0xFFFFFFFF) if from_num is not None else None
-
-        candidate_keys: list[Any] = []
-        if normalized_id:
-            candidate_keys.extend([normalized_id, normalized_id[1:]])
-        if from_id:
-            candidate_keys.append(from_id)
-        if normalized_num is not None:
-            candidate_keys.extend([normalized_num, str(normalized_num)])
-
-        for key in candidate_keys:
-            node_info = nodes.get(key)
-            if isinstance(node_info, dict):
-                return node_info
-
-        for key, node_info in nodes.items():
-            if not isinstance(node_info, dict):
-                continue
-
-            if normalized_id is not None and isinstance(key, str):
-                key_id = _normalize_node_id(key)
-                if key_id == normalized_id:
-                    return node_info
-
-            user = node_info.get("user", {})
-            if isinstance(user, dict):
-                if normalized_id is not None:
-                    user_id = user.get("id")
-                    if isinstance(user_id, str) and _normalize_node_id(user_id) == normalized_id:
-                        return node_info
-
-                if normalized_num is not None:
-                    user_num = _extract_optional_int(user.get("num"))
-                    if user_num is not None and (user_num & 0xFFFFFFFF) == normalized_num:
-                        return node_info
-
-            if normalized_num is not None:
-                node_num = _extract_optional_int(node_info.get("num"))
-                if node_num is not None and (node_num & 0xFFFFFFFF) == normalized_num:
-                    return node_info
-
-        return None
-
-    def send_text(self, action: SendMeshtasticAction):
-        if self.iface is None:
-            raise RuntimeError("Meshtastic interface is not connected")
-
-        destination_id = action.destination_id if action.destination_id is not None else BROADCAST_ADDR
-        effective_want_ack = action.want_ack and not _is_broadcast_destination(destination_id)
-        if action.want_ack and not effective_want_ack:
-            LOGGER.info(
-                "Disabling Meshtastic wantAck for broadcast destination to avoid false ACK waits/retries"
-            )
-        kwargs = {
-            "destinationId": destination_id,
-            "channelIndex": action.channel_index,
-            "wantAck": effective_want_ack,
-        }
-
-        if action.reply_id is None:
-            return self.iface.sendText(action.text, **kwargs)
-
-        if self._supports_sendtext_reply_id is not False:
-            try:
-                self._supports_sendtext_reply_id = True
-                return self.iface.sendText(action.text, replyId=action.reply_id, **kwargs)
-            except TypeError as exc:
-                if "replyId" not in str(exc):
-                    raise
-                self._supports_sendtext_reply_id = False
-                LOGGER.info(
-                    "Meshtastic sendText does not support replyId; trying compatibility fallback"
-                )
-
-        if self._supports_senddata_reply_id is not False and portnums_pb2 is not None:
-            send_data = getattr(self.iface, "sendData", None)
-            if callable(send_data):
-                try:
-                    self._supports_senddata_reply_id = True
-                    return send_data(
-                        action.text.encode("utf-8"),
-                        destinationId=destination_id,
-                        portNum=portnums_pb2.PortNum.TEXT_MESSAGE_APP,
-                        wantAck=effective_want_ack,
-                        channelIndex=action.channel_index,
-                        replyId=action.reply_id,
-                    )
-                except TypeError as exc:
-                    if "replyId" not in str(exc):
-                        raise
-                    self._supports_senddata_reply_id = False
-                    LOGGER.info(
-                        "Meshtastic sendData does not support replyId; trying low-level fallback"
-                    )
-
-        if self._can_use_lowlevel_packet():
-            return self._send_text_packet_lowlevel(
-                text=action.text,
-                destination_id=destination_id,
-                channel_index=action.channel_index,
-                want_ack=effective_want_ack,
-                reply_id=action.reply_id,
-            )
-
-        LOGGER.warning(
-            "Reply threading fallback unavailable; sending message without reply linkage"
-        )
-        return self.iface.sendText(action.text, **kwargs)
-
-    def send_reaction(self, action: SendMeshtasticReactionAction):
-        if self.iface is None:
-            raise RuntimeError("Meshtastic interface is not connected")
-        normalized_emoji = _sanitize_reaction_emoji_text(action.emoji)
-        if not normalized_emoji:
-            raise ValueError("Reaction emoji cannot be empty")
-
-        destination_id = action.destination_id if action.destination_id is not None else BROADCAST_ADDR
-        if self._can_use_lowlevel_packet():
-            return self._send_text_packet_lowlevel(
-                text=normalized_emoji,
-                destination_id=destination_id,
-                channel_index=action.channel_index,
-                want_ack=action.want_ack,
-                reply_id=action.target_packet_id,
-                emoji_codepoint=ord(normalized_emoji[0]),
-            )
-
-        LOGGER.warning(
-            "Low-level Meshtastic packet API unavailable; sending reaction as plain reply text"
-        )
-        return self.send_text(
-            SendMeshtasticAction(
-                text=normalized_emoji,
-                destination_id=destination_id,
-                channel_index=action.channel_index,
-                reply_id=action.target_packet_id,
-                want_ack=action.want_ack,
-            )
-        )
-
-    def _can_use_lowlevel_packet(self) -> bool:
-        if self._supports_lowlevel_packet is None:
-            self._supports_lowlevel_packet = (
-                mesh_pb2 is not None
-                and portnums_pb2 is not None
-                and callable(getattr(self.iface, "_sendPacket", None))
-            )
-        return self._supports_lowlevel_packet
-
-    def _send_text_packet_lowlevel(
-        self,
-        text: str,
-        destination_id: str | int,
-        channel_index: int,
-        want_ack: bool,
-        reply_id: Optional[int] = None,
-        emoji_codepoint: Optional[int] = None,
-    ):
-        if not self._can_use_lowlevel_packet():
-            raise RuntimeError("Low-level packet send is unavailable")
-        if mesh_pb2 is None or portnums_pb2 is None:
-            raise RuntimeError("Meshtastic protobuf modules are unavailable")
-
-        mesh_packet = mesh_pb2.MeshPacket()
-        mesh_packet.channel = channel_index
-        mesh_packet.decoded.payload = text.encode("utf-8")
-        mesh_packet.decoded.portnum = portnums_pb2.PortNum.TEXT_MESSAGE_APP
-        if reply_id is not None:
-            mesh_packet.decoded.reply_id = reply_id
-        if emoji_codepoint is not None:
-            mesh_packet.decoded.emoji = emoji_codepoint
-
-        return self.iface._sendPacket(
-            mesh_packet,
-            destinationId=destination_id,
-            wantAck=want_ack,
-        )
-
-    def close(self) -> None:
-        with contextlib.suppress(Exception):
-            pub.unsubscribe(self._on_receive, "meshtastic.receive")
-        self.invalidate_connection()
 
 
 class MeshgramApp:
@@ -449,40 +66,51 @@ class MeshgramApp:
         self.settings = settings
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.bot_app: Optional[Application] = None
-        self.meshtastic = MeshtasticClient(settings)
+        self.mesh: MeshTransport = create_transport(settings)
         self.plugins: list[LoadedPlugin] = load_plugins(settings.plugins)
         self.reply_links = ReplyLinkRegistry(
             ttl_hours=_get_bridge_reply_ttl_hours(settings),
         )
         self._mesh_connect_task: Optional[asyncio.Task[None]] = None
-        self._seen_meshtastic_packet_ids: dict[int, float] = {}
+        self._seen_meshtastic_packet_ids: dict[MeshPacketRef, float] = {}
         self._meshtastic_send_lock = asyncio.Lock()
         self._telegram_reaction_counts: dict[tuple[int, int], dict[str, int]] = {}
         self._recent_telegram_reaction_writes: dict[tuple[int, int, str], float] = {}
 
+    # Backward-compatible alias — tests and older callsites access ``app.meshtastic``.
+    @property
+    def meshtastic(self) -> MeshTransport:
+        return self.mesh
+
+    @meshtastic.setter
+    def meshtastic(self, value: MeshTransport) -> None:
+        self.mesh = value
+
     async def _post_init(self, app: Application) -> None:
         self.loop = asyncio.get_running_loop()
-        self._mesh_connect_task = asyncio.create_task(self._ensure_meshtastic_connected())
+        self._mesh_connect_task = asyncio.create_task(self._ensure_mesh_connected())
 
         await self._dispatch_startup()
-        LOGGER.info("Meshgram runtime initialized")
+        LOGGER.info("Meshgram runtime initialized (backend=%s)", self.mesh.backend_name)
 
-    async def _ensure_meshtastic_connected(self) -> None:
+    async def _ensure_mesh_connected(self) -> None:
         retry_delay_seconds = 5
         healthy_poll_seconds = 2
 
         while True:
-            if self.meshtastic.is_connected:
+            if self.mesh.is_connected:
                 await asyncio.sleep(healthy_poll_seconds)
                 continue
 
             try:
-                self.meshtastic.connect(self._on_meshtastic_packet)
-                LOGGER.info("Meshtastic connection established")
+                loop = asyncio.get_running_loop()
+                await self.mesh.connect(loop, self._on_mesh_text, self._on_mesh_reaction)
+                LOGGER.info("Mesh connection established (backend=%s)", self.mesh.backend_name)
             except Exception as exc:
-                self.meshtastic.invalidate_connection()
+                self.mesh.invalidate_connection()
                 LOGGER.warning(
-                    "Meshtastic connection failed (%s). Retrying in %ss.",
+                    "Mesh connection failed (backend=%s, error=%s). Retrying in %ss.",
+                    self.mesh.backend_name,
                     exc,
                     retry_delay_seconds,
                 )
@@ -500,14 +128,16 @@ class MeshgramApp:
             await self._execute_actions(actions, loaded_plugin.name)
 
     def _plugin_context(self) -> PluginContext:
-        self.meshtastic.refresh_local_node_id()
+        self.mesh.refresh_local_node_id()
         return PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=self.meshtastic.payload_limit,
-            local_node_id=self.meshtastic.local_node_id,
+            mesh_payload_limit=self.mesh.payload_limit,
+            local_node_id=self.mesh.local_node_id,
             reply_links=self.reply_links,
         )
+
+    # --- Telegram handlers --------------------------------------------------
 
     async def _handle_telegram_message(
         self,
@@ -701,34 +331,19 @@ class MeshgramApp:
 
             await self._execute_actions(actions, loaded_plugin.name)
 
-    def _on_meshtastic_packet(self, packet: dict[str, Any]) -> None:
-        if self.loop is None:
+    # --- Mesh inbound -------------------------------------------------------
+
+    async def _on_mesh_text(self, event: MeshTextEvent) -> None:
+        if event.packet_id is not None and self._is_duplicate_meshtastic_packet_id(event.packet_id):
             return
+        await self._dispatch_mesh_message(event)
 
-        packet_id = _extract_optional_int(packet.get("id"))
-        if packet_id is not None and self._is_duplicate_meshtastic_packet_id(packet_id):
+    async def _on_mesh_reaction(self, event: MeshReactionEvent) -> None:
+        if event.packet_id is not None and self._is_duplicate_meshtastic_packet_id(event.packet_id):
             return
+        await self._dispatch_mesh_reaction(event)
 
-        reaction_event = self._build_meshtastic_reaction_event(packet)
-        if reaction_event is not None:
-            future = asyncio.run_coroutine_threadsafe(
-                self._dispatch_meshtastic_reaction(reaction_event),
-                self.loop,
-            )
-            future.add_done_callback(_log_future_exception)
-            return
-
-        message_event = self._build_meshtastic_event(packet)
-        if message_event is None:
-            return
-
-        future = asyncio.run_coroutine_threadsafe(
-            self._dispatch_meshtastic_message(message_event),
-            self.loop,
-        )
-        future.add_done_callback(_log_future_exception)
-
-    def _is_duplicate_meshtastic_packet_id(self, packet_id: int) -> bool:
+    def _is_duplicate_meshtastic_packet_id(self, packet_id: MeshPacketRef) -> bool:
         now = time.monotonic()
         expiry_cutoff = now - MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS
 
@@ -746,131 +361,43 @@ class MeshgramApp:
         self._seen_meshtastic_packet_ids[packet_id] = now
         return False
 
-    def _build_meshtastic_event(self, packet: dict[str, Any]) -> Optional[MeshtasticTextEvent]:
-        decoded = packet.get("decoded", {})
-        if not isinstance(decoded, dict):
-            return None
-
-        if not _is_text_message_portnum(decoded.get("portnum")):
-            return None
-        if _extract_reaction_emoji(decoded) is not None:
-            return None
-
-        payload = decoded.get("payload", b"")
-        if isinstance(payload, bytes):
-            payload_bytes = payload
-        elif isinstance(payload, str):
-            payload_bytes = payload.encode("utf-8", errors="ignore")
-        else:
-            return None
-
-        text = payload_bytes.decode(errors="ignore")
-        if not text.strip():
-            return None
-
-        from_num = _extract_optional_int(packet.get("from"))
-        to_num = _extract_optional_int(packet.get("to"))
-
-        from_id = _normalize_node_id(packet.get("fromId"), fallback_num=from_num)
-        to_id = _normalize_node_id(packet.get("toId"), fallback_num=to_num)
-
-        try:
-            channel_index = int(packet.get("channel", 0))
-        except (TypeError, ValueError):
-            channel_index = 0
-
-        packet_id = _extract_optional_int(packet.get("id"))
-
-        reply_id = _extract_optional_int(decoded.get("replyId"))
-        if reply_id is None:
-            reply_id = _extract_optional_int(decoded.get("reply_id"))
-
-        sender_label = self.meshtastic.resolve_sender_label(from_id, from_num=from_num)
-
-        return MeshtasticTextEvent(
-            from_id=from_id,
-            to_id=to_id,
-            packet_id=packet_id,
-            reply_id=reply_id,
-            channel_index=channel_index,
-            text=text,
-            sender_label=sender_label,
-            raw_packet=packet,
-        )
-
-    def _build_meshtastic_reaction_event(self, packet: dict[str, Any]) -> Optional[MeshtasticReactionEvent]:
-        decoded = packet.get("decoded", {})
-        if not isinstance(decoded, dict):
-            return None
-        if not _is_text_message_portnum(decoded.get("portnum")):
-            return None
-
-        emoji = _extract_reaction_emoji(decoded)
-        if emoji is None:
-            return None
-
-        target_packet_id = _extract_optional_int(decoded.get("replyId"))
-        if target_packet_id is None:
-            target_packet_id = _extract_optional_int(decoded.get("reply_id"))
-        if target_packet_id is None:
-            target_packet_id = _extract_optional_int(packet.get("replyId"))
-        if target_packet_id is None:
-            target_packet_id = _extract_optional_int(packet.get("reply_id"))
-        if target_packet_id is None:
-            return None
-
-        from_num = _extract_optional_int(packet.get("from"))
-        to_num = _extract_optional_int(packet.get("to"))
-        from_id = _normalize_node_id(packet.get("fromId"), fallback_num=from_num)
-        to_id = _normalize_node_id(packet.get("toId"), fallback_num=to_num)
-
-        try:
-            channel_index = int(packet.get("channel", 0))
-        except (TypeError, ValueError):
-            channel_index = 0
-
-        packet_id = _extract_optional_int(packet.get("id"))
-        sender_label = self.meshtastic.resolve_sender_label(from_id, from_num=from_num)
-
-        return MeshtasticReactionEvent(
-            from_id=from_id,
-            to_id=to_id,
-            packet_id=packet_id,
-            target_packet_id=target_packet_id,
-            channel_index=channel_index,
-            emoji=emoji,
-            sender_label=sender_label,
-            raw_packet=packet,
-        )
-
-    async def _dispatch_meshtastic_message(self, event: MeshtasticTextEvent) -> None:
+    async def _dispatch_mesh_message(self, event: MeshTextEvent) -> None:
         context = self._plugin_context()
 
         for loaded_plugin in self.plugins:
             try:
-                actions = await loaded_plugin.instance.on_meshtastic_message(event, context)
+                actions = await _invoke_plugin_mesh_message(loaded_plugin.instance, event, context)
             except Exception:
-                LOGGER.exception("Plugin %s failed handling meshtastic message", loaded_plugin.name)
+                LOGGER.exception("Plugin %s failed handling mesh message", loaded_plugin.name)
                 continue
 
             await self._execute_actions(actions, loaded_plugin.name)
 
-    async def _dispatch_meshtastic_reaction(self, event: MeshtasticReactionEvent) -> None:
+    async def _dispatch_mesh_reaction(self, event: MeshReactionEvent) -> None:
         context = self._plugin_context()
 
         for loaded_plugin in self.plugins:
             try:
-                actions = await loaded_plugin.instance.on_meshtastic_reaction(event, context)
+                actions = await _invoke_plugin_mesh_reaction(loaded_plugin.instance, event, context)
             except Exception:
-                LOGGER.exception("Plugin %s failed handling meshtastic reaction", loaded_plugin.name)
+                LOGGER.exception("Plugin %s failed handling mesh reaction", loaded_plugin.name)
                 continue
 
             await self._execute_actions(actions, loaded_plugin.name)
+
+    # Backward-compatible method aliases (used by existing tests):
+    async def _dispatch_meshtastic_message(self, event: MeshTextEvent) -> None:
+        await self._dispatch_mesh_message(event)
+
+    async def _dispatch_meshtastic_reaction(self, event: MeshReactionEvent) -> None:
+        await self._dispatch_mesh_reaction(event)
+
+    # --- Action execution ---------------------------------------------------
 
     async def _execute_actions(self, actions: list[PluginAction], plugin_name: str) -> None:
         aborted_sequences: set[str] = set()
         for action in actions:
-            if isinstance(action, SendMeshtasticAction):
+            if isinstance(action, SendMeshAction):
                 sequence_id = action.sequence_id
                 if (
                     sequence_id
@@ -878,7 +405,7 @@ class MeshgramApp:
                     and sequence_id in aborted_sequences
                 ):
                     LOGGER.warning(
-                        "Skipping Meshtastic chunk due to prior sequence failure: "
+                        "Skipping mesh chunk due to prior sequence failure: "
                         "sequence=%s chunk=%s/%s plugin=%s",
                         sequence_id,
                         action.sequence_index,
@@ -893,16 +420,16 @@ class MeshgramApp:
                     self._register_reply_link_after_telegram_send(action, sent_message)
                 elif isinstance(action, SendTelegramReactionAction):
                     await self._execute_send_telegram_reaction(action)
-                elif isinstance(action, SendMeshtasticAction):
-                    sent_packet = await self._execute_send_meshtastic(action)
-                    self._register_reply_link_after_meshtastic_send(action, sent_packet)
-                elif isinstance(action, SendMeshtasticReactionAction):
-                    await self._execute_send_meshtastic_reaction(action)
+                elif isinstance(action, SendMeshAction):
+                    sent_packet = await self._execute_send_mesh(action)
+                    self._register_reply_link_after_mesh_send(action, sent_packet)
+                elif isinstance(action, SendMeshReactionAction):
+                    await self._execute_send_mesh_reaction(action)
                 else:
                     LOGGER.warning("Plugin %s returned unknown action type: %s", plugin_name, type(action))
             except Exception:
                 if (
-                    isinstance(action, SendMeshtasticAction)
+                    isinstance(action, SendMeshAction)
                     and action.sequence_id
                     and action.abort_on_failure
                 ):
@@ -935,7 +462,7 @@ class MeshgramApp:
                 self._record_telegram_reaction_write(action.chat_id, action.message_id, emoji)
                 if emoji != action.emoji:
                     LOGGER.info(
-                        "Applied Telegram reaction fallback emoji '%s' for Meshtastic emoji '%s'",
+                        "Applied Telegram reaction fallback emoji '%s' for mesh emoji '%s'",
                         emoji,
                         action.emoji,
                     )
@@ -958,7 +485,7 @@ class MeshgramApp:
                     return
                 raise
 
-    async def _execute_send_meshtastic(self, action: SendMeshtasticAction):
+    async def _execute_send_mesh(self, action: SendMeshAction):
         async with self._meshtastic_send_lock:
             if action.delay_ms > 0:
                 await asyncio.sleep(action.delay_ms / 1000)
@@ -969,44 +496,44 @@ class MeshgramApp:
 
             for attempt in range(1, max_attempts + 1):
                 try:
-                    if not self.meshtastic.is_connected:
+                    if not self.mesh.is_connected:
                         if max_attempts == 1:
-                            LOGGER.warning("Meshtastic is not connected yet; dropping outbound message")
+                            LOGGER.warning("Mesh transport is not connected yet; dropping outbound message")
                             return None
-                        raise RuntimeError("Meshtastic is not connected yet")
+                        raise RuntimeError("Mesh transport is not connected yet")
 
-                    sent_packet = self.meshtastic.send_text(action)
-                    packet_id = _extract_meshtastic_packet_id(sent_packet)
+                    sent_packet = await self.mesh.asend_text(action)
+                    packet_id = MeshTransport.extract_packet_id(sent_packet)
                     if action.require_packet_id and packet_id is None:
-                        raise RuntimeError("Meshtastic send returned no packet id")
+                        raise RuntimeError("Mesh send returned no packet id")
                     should_wait_for_ack = (
                         action.wait_for_ack
                         and action.want_ack
-                        and not _is_broadcast_destination(action.destination_id)
+                        and not is_broadcast_destination(action.destination_id)
                     )
-                    if should_wait_for_ack:
-                        if self.meshtastic.supports_wait_for_ack:
-                            ack_timeout_seconds = max(1.0, action.ack_timeout_ms / 1000)
-                            await asyncio.wait_for(
-                                asyncio.to_thread(self.meshtastic.wait_for_ack),
-                                timeout=ack_timeout_seconds,
+                    if should_wait_for_ack and self.mesh.supports_wait_for_ack:
+                        ack_timeout_seconds = max(1.0, action.ack_timeout_ms / 1000)
+                        await asyncio.wait_for(
+                            self.mesh.wait_for_ack(),
+                            timeout=ack_timeout_seconds,
+                        )
+                        if action.sequence_id is not None:
+                            LOGGER.info(
+                                "Mesh ACK received: sequence=%s chunk=%s/%s packet_id=%s",
+                                action.sequence_id,
+                                action.sequence_index,
+                                action.sequence_total,
+                                packet_id,
                             )
-                            if action.sequence_id is not None:
-                                LOGGER.info(
-                                    "Meshtastic ACK received: sequence=%s chunk=%s/%s packet_id=%s",
-                                    action.sequence_id,
-                                    action.sequence_index,
-                                    action.sequence_total,
-                                    packet_id,
-                                )
-                        else:
-                            LOGGER.warning(
-                                "Meshtastic interface does not support waitForAckNak; "
-                                "continuing without ACK gate"
-                            )
+                    elif should_wait_for_ack and not self.mesh.supports_wait_for_ack:
+                        LOGGER.debug(
+                            "Mesh transport %s does not expose a generic wait_for_ack; "
+                            "trusting per-send ACK handling.",
+                            self.mesh.backend_name,
+                        )
                     if action.sequence_id is not None:
                         LOGGER.info(
-                            "Meshtastic chunk sent: sequence=%s chunk=%s/%s packet_id=%s bytes=%s",
+                            "Mesh chunk sent: sequence=%s chunk=%s/%s packet_id=%s bytes=%s",
                             action.sequence_id,
                             action.sequence_index,
                             action.sequence_total,
@@ -1016,11 +543,11 @@ class MeshgramApp:
                     return sent_packet
                 except Exception as exc:
                     if _is_connection_error(exc):
-                        self.meshtastic.invalidate_connection()
+                        self.mesh.invalidate_connection()
 
                     if attempt >= max_attempts:
                         LOGGER.error(
-                            "Meshtastic send exhausted retries: sequence=%s chunk=%s/%s "
+                            "Mesh send exhausted retries: sequence=%s chunk=%s/%s "
                             "attempts=%s abort_on_failure=%s",
                             action.sequence_id,
                             action.sequence_index,
@@ -1032,7 +559,7 @@ class MeshgramApp:
                         raise
 
                     LOGGER.warning(
-                        "Meshtastic send failed; retrying in %.2fs "
+                        "Mesh send failed; retrying in %.2fs "
                         "(attempt %s/%s, sequence=%s, chunk=%s/%s)",
                         retry_delay_seconds,
                         attempt + 1,
@@ -1047,7 +574,16 @@ class MeshgramApp:
 
             return None
 
-    async def _execute_send_meshtastic_reaction(self, action: SendMeshtasticReactionAction):
+    async def _execute_send_mesh_reaction(self, action: SendMeshReactionAction):
+        if not self.mesh.supports_reactions:
+            LOGGER.debug(
+                "Mesh backend %s does not support reactions; dropping emoji=%s target=%s",
+                self.mesh.backend_name,
+                action.emoji,
+                action.target_packet_id,
+            )
+            return None
+
         async with self._meshtastic_send_lock:
             max_attempts = max(1, action.retry_max_attempts)
             retry_delay_seconds = max(0, action.retry_initial_delay_ms) / 1000
@@ -1055,20 +591,20 @@ class MeshgramApp:
 
             for attempt in range(1, max_attempts + 1):
                 try:
-                    if not self.meshtastic.is_connected:
+                    if not self.mesh.is_connected:
                         if max_attempts == 1:
-                            LOGGER.warning("Meshtastic is not connected yet; dropping outbound reaction")
+                            LOGGER.warning("Mesh transport is not connected yet; dropping outbound reaction")
                             return None
-                        raise RuntimeError("Meshtastic is not connected yet")
+                        raise RuntimeError("Mesh transport is not connected yet")
 
-                    return self.meshtastic.send_reaction(action)
+                    return await self.mesh.asend_reaction(action)
                 except Exception as exc:
                     if _is_connection_error(exc):
-                        self.meshtastic.invalidate_connection()
+                        self.mesh.invalidate_connection()
 
                     if attempt >= max_attempts:
                         LOGGER.error(
-                            "Meshtastic reaction send exhausted retries: "
+                            "Mesh reaction send exhausted retries: "
                             "attempts=%s chat-target=%s packet-target=%s",
                             max_attempts,
                             action.destination_id,
@@ -1078,7 +614,7 @@ class MeshgramApp:
                         raise
 
                     LOGGER.warning(
-                        "Meshtastic reaction send failed; retrying in %.2fs "
+                        "Mesh reaction send failed; retrying in %.2fs "
                         "(attempt %s/%s target_packet=%s)",
                         retry_delay_seconds,
                         attempt + 1,
@@ -1090,6 +626,15 @@ class MeshgramApp:
                     retry_delay_seconds *= backoff_factor
 
             return None
+
+    # Backward-compatible method aliases (used by existing tests):
+    async def _execute_send_meshtastic(self, action: SendMeshAction):
+        return await self._execute_send_mesh(action)
+
+    async def _execute_send_meshtastic_reaction(self, action: SendMeshReactionAction):
+        return await self._execute_send_mesh_reaction(action)
+
+    # --- Reply-link bookkeeping --------------------------------------------
 
     def _register_reply_link_after_telegram_send(
         self,
@@ -1115,9 +660,9 @@ class MeshgramApp:
             source_packet_id,
         )
 
-    def _register_reply_link_after_meshtastic_send(
+    def _register_reply_link_after_mesh_send(
         self,
-        action: SendMeshtasticAction,
+        action: SendMeshAction,
         sent_packet: Any,
     ) -> None:
         source_chat_id = action.bridge_source_telegram_chat_id
@@ -1125,7 +670,7 @@ class MeshgramApp:
         if source_chat_id is None or source_message_id is None:
             return
 
-        meshtastic_packet_id = _extract_meshtastic_packet_id(sent_packet)
+        meshtastic_packet_id = MeshTransport.extract_packet_id(sent_packet)
         if meshtastic_packet_id is None:
             return
 
@@ -1141,6 +686,32 @@ class MeshgramApp:
                 source_message_id,
                 meshtastic_packet_id,
             )
+
+    # Backward-compatible alias:
+    def _register_reply_link_after_meshtastic_send(self, action, sent_packet):  # type: ignore[override]
+        self._register_reply_link_after_mesh_send(action, sent_packet)
+
+    # --- Test-facing helpers (event building) -------------------------------
+    # The current sender-resolution tests still call into these helpers via the
+    # app object. They delegate to the meshtastic transport's builders.
+
+    def _build_meshtastic_event(self, packet: dict[str, Any]) -> Optional[MeshTextEvent]:
+        if self.mesh.backend_name != MESHTASTIC_BACKEND:
+            return None
+        from .transport.meshtastic import MeshtasticTransport
+
+        assert isinstance(self.mesh, MeshtasticTransport)
+        return self.mesh._build_text_event(packet)
+
+    def _build_meshtastic_reaction_event(self, packet: dict[str, Any]) -> Optional[MeshReactionEvent]:
+        if self.mesh.backend_name != MESHTASTIC_BACKEND:
+            return None
+        from .transport.meshtastic import MeshtasticTransport
+
+        assert isinstance(self.mesh, MeshtasticTransport)
+        return self.mesh._build_reaction_event(packet)
+
+    # --- Lifecycle ----------------------------------------------------------
 
     def run(self) -> None:
         self.bot_app = (
@@ -1160,13 +731,48 @@ class MeshgramApp:
             )
         )
 
-        LOGGER.info("Starting Meshgram polling loop")
+        LOGGER.info("Starting Meshgram polling loop (backend=%s)", self.mesh.backend_name)
         try:
             self.bot_app.run_polling(allowed_updates=Update.ALL_TYPES)
         finally:
             if self._mesh_connect_task is not None:
                 self._mesh_connect_task.cancel()
-            self.meshtastic.close()
+            self.mesh.close()
+
+
+# ---------------------------------------------------------------------------
+# Plugin dispatch shims — try the new mesh_* hook, fall back to legacy meshtastic_*
+
+async def _invoke_plugin_mesh_message(
+    plugin_instance: Any,
+    event: MeshTextEvent,
+    context: PluginContext,
+) -> list[PluginAction]:
+    hook = getattr(plugin_instance, "on_mesh_message", None)
+    if callable(hook):
+        return await hook(event, context)
+    legacy = getattr(plugin_instance, "on_meshtastic_message", None)
+    if callable(legacy):
+        return await legacy(event, context)
+    return []
+
+
+async def _invoke_plugin_mesh_reaction(
+    plugin_instance: Any,
+    event: MeshReactionEvent,
+    context: PluginContext,
+) -> list[PluginAction]:
+    hook = getattr(plugin_instance, "on_mesh_reaction", None)
+    if callable(hook):
+        return await hook(event, context)
+    legacy = getattr(plugin_instance, "on_meshtastic_reaction", None)
+    if callable(legacy):
+        return await legacy(event, context)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Telegram-side helpers
 
 def _message_has_media(message: Message) -> bool:
     media_fields = (
@@ -1215,7 +821,7 @@ def _extract_first_unicode_reaction_emoji(
 
 
 def _build_telegram_reaction_candidates(emoji: str) -> list[str]:
-    text = _sanitize_reaction_emoji_text(emoji)
+    text = sanitize_reaction_emoji_text(emoji)
     if not text:
         return [DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI]
 
@@ -1223,8 +829,8 @@ def _build_telegram_reaction_candidates(emoji: str) -> list[str]:
     for value in (
         text,
         _telegram_reaction_alias(text),
-        f"{text}\ufe0f",
-        text.replace("\ufe0f", ""),
+        f"{text}️",
+        text.replace("️", ""),
         DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI,
     ):
         normalized = value.strip()
@@ -1257,52 +863,12 @@ def _extract_unicode_emoji_counts(reactions: Sequence[ReactionCount]) -> dict[st
         if not isinstance(emoji, str) or not emoji:
             continue
 
-        total_count = _extract_optional_int(getattr(reaction_count, "total_count", None))
+        total_count = extract_optional_int(getattr(reaction_count, "total_count", None))
         if total_count is None:
             continue
 
         counts[emoji] = total_count
     return counts
-
-
-def _extract_reaction_emoji(decoded: dict[str, Any]) -> Optional[str]:
-    if "emoji" not in decoded:
-        return None
-
-    raw_emoji = decoded.get("emoji")
-    normalized = _extract_reaction_emoji_from_value(raw_emoji)
-    if normalized:
-        return normalized
-
-    # Some firmware/library paths expose only emoji modifiers in `decoded.emoji`
-    # while carrying the visible glyph in payload. Use payload as best-effort fallback.
-    return _extract_reaction_emoji_from_payload(decoded.get("payload"))
-
-
-def _is_text_message_portnum(portnum: Any) -> bool:
-    if portnum == "TEXT_MESSAGE_APP":
-        return True
-
-    text_portnum_value: Optional[int] = None
-    if portnums_pb2 is not None:
-        text_portnum_value = int(portnums_pb2.PortNum.TEXT_MESSAGE_APP)
-    else:
-        # Meshtastic TEXT_MESSAGE_APP is historically enum value 1.
-        text_portnum_value = 1
-
-    if isinstance(portnum, int):
-        return portnum == text_portnum_value
-
-    if isinstance(portnum, str):
-        normalized = portnum.strip()
-        if not normalized:
-            return False
-        if normalized == "TEXT_MESSAGE_APP":
-            return True
-        maybe_int = _extract_optional_int(normalized)
-        return maybe_int == text_portnum_value
-
-    return False
 
 
 def _is_connection_error(exc: Exception) -> bool:
@@ -1324,161 +890,6 @@ def _message_reaction_handler_types() -> int:
     return types
 
 
-def _extract_reaction_emoji_from_value(raw_emoji: Any) -> Optional[str]:
-    emoji_codepoint = _extract_optional_int(raw_emoji)
-    if emoji_codepoint is not None:
-        return _extract_reaction_emoji_from_codepoint(emoji_codepoint)
-
-    if isinstance(raw_emoji, str):
-        return _sanitize_reaction_emoji_text(raw_emoji)
-
-    if isinstance(raw_emoji, bytes):
-        decoded_emoji = raw_emoji.decode("utf-8", errors="ignore")
-        return _sanitize_reaction_emoji_text(decoded_emoji)
-
-    return None
-
-
-def _extract_reaction_emoji_from_payload(raw_payload: Any) -> Optional[str]:
-    payload_text: Optional[str] = None
-    if isinstance(raw_payload, bytes):
-        payload_text = raw_payload.decode("utf-8", errors="ignore")
-    elif isinstance(raw_payload, str):
-        payload_text = raw_payload
-
-    if not payload_text:
-        return None
-
-    return _sanitize_reaction_emoji_text(payload_text)
-
-
-def _extract_reaction_emoji_from_codepoint(codepoint: int) -> Optional[str]:
-    if codepoint <= 0:
-        return None
-    if _is_emoji_modifier_codepoint(codepoint):
-        return None
-    with contextlib.suppress(ValueError):
-        return chr(codepoint)
-    return None
-
-
-def _sanitize_reaction_emoji_text(raw_text: str) -> Optional[str]:
-    text = raw_text.strip()
-    if not text:
-        return None
-
-    chars = list(text)
-    start_index = 0
-    while start_index < len(chars) and _is_emoji_modifier(chars[start_index]):
-        start_index += 1
-
-    if start_index >= len(chars):
-        return None
-
-    first_visible = chars[start_index]
-    emoji_chars: list[str] = [first_visible]
-    index = start_index + 1
-    while index < len(chars):
-        char = chars[index]
-        codepoint = ord(char)
-        if _is_emoji_modifier_codepoint(codepoint):
-            emoji_chars.append(char)
-            index += 1
-            continue
-
-        if char == "\u200d":
-            emoji_chars.append(char)
-            index += 1
-            if index < len(chars):
-                emoji_chars.append(chars[index])
-                index += 1
-            continue
-
-        break
-
-    normalized = "".join(emoji_chars).strip()
-    if not normalized:
-        return None
-
-    if all(_is_emoji_modifier(char) for char in normalized):
-        return None
-
-    return normalized
-
-
-def _is_emoji_modifier(char: str) -> bool:
-    return _is_emoji_modifier_codepoint(ord(char))
-
-
-def _is_emoji_modifier_codepoint(codepoint: int) -> bool:
-    if codepoint in _EMOJI_MODIFIER_CODEPOINTS:
-        return True
-    if 0x1F3FB <= codepoint <= 0x1F3FF:
-        return True
-    return False
-
-
-def _is_broadcast_destination(destination_id: Any) -> bool:
-    if destination_id is None:
-        return True
-
-    if isinstance(destination_id, int):
-        return destination_id == BROADCAST_NUM
-
-    if isinstance(destination_id, str):
-        normalized = destination_id.strip().lower()
-        if not normalized:
-            return False
-        return normalized in {"^all", "all", "broadcast", "broadcast_addr"}
-
-    return False
-
-
-def _extract_optional_int(value: Any) -> Optional[int]:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        with contextlib.suppress(ValueError):
-            return int(stripped)
-        with contextlib.suppress(ValueError):
-            return int(stripped, 0)
-    return None
-
-
-def _node_num_to_id(node_num: int) -> str:
-    return f"!{node_num & 0xFFFFFFFF:08x}"
-
-
-def _normalize_node_id(value: Any, fallback_num: Optional[int] = None) -> Optional[str]:
-    if isinstance(value, str):
-        text = value.strip()
-        if text:
-            if text.startswith("!"):
-                text = text[1:]
-            if text.lower().startswith("0x"):
-                text = text[2:]
-
-            if text.isdigit():
-                if len(text) == 8:
-                    return f"!{text.lower()}"
-                return _node_num_to_id(int(text))
-
-            if text and all(char in "0123456789abcdefABCDEF" for char in text):
-                return f"!{text.lower()}"
-
-            return value.strip()
-
-    if fallback_num is not None:
-        return _node_num_to_id(fallback_num)
-
-    return None
-
-
 def _extract_telegram_message_id(sent_message: Any) -> Optional[int]:
     if sent_message is None:
         return None
@@ -1489,17 +900,6 @@ def _extract_telegram_message_id(sent_message: Any) -> Optional[int]:
     return None
 
 
-def _extract_meshtastic_packet_id(sent_packet: Any) -> Optional[int]:
-    if sent_packet is None:
-        return None
-
-    if isinstance(sent_packet, dict):
-        return _extract_optional_int(sent_packet.get("id"))
-
-    value = getattr(sent_packet, "id", None)
-    return _extract_optional_int(value)
-
-
 def _get_bridge_reply_ttl_hours(settings: MeshgramSettings) -> int:
     default_ttl_hours = 24
 
@@ -1508,23 +908,12 @@ def _get_bridge_reply_ttl_hours(settings: MeshgramSettings) -> int:
             continue
 
         value = plugin.settings.get("reply_link_ttl_hours", default_ttl_hours)
-        ttl_hours = _extract_optional_int(value)
+        ttl_hours = extract_optional_int(value)
         if ttl_hours is None or ttl_hours <= 0:
             return default_ttl_hours
         return ttl_hours
 
     return default_ttl_hours
-
-
-def _log_future_exception(future: asyncio.Future[Any]) -> None:
-    with contextlib.suppress(asyncio.CancelledError):
-        exception = future.exception()
-        if exception:
-            LOGGER.error(
-                "Meshtastic dispatch failed: %s",
-                exception,
-                exc_info=(type(exception), exception, exception.__traceback__),
-            )
 
 
 def main() -> None:
@@ -1538,3 +927,7 @@ def main() -> None:
 
     app = MeshgramApp(settings)
     app.run()
+
+
+# Backward-compatible export so ``from meshgram.app import MeshtasticClient`` keeps working.
+from .transport.meshtastic import MeshtasticClient  # noqa: E402,F401

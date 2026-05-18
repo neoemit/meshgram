@@ -7,8 +7,8 @@ from typing import Any
 
 from .config import PluginConfig
 from .types import (
-    MeshtasticReactionEvent,
-    MeshtasticTextEvent,
+    MeshReactionEvent,
+    MeshTextEvent,
     Plugin,
     PluginAction,
     PluginContext,
@@ -48,19 +48,35 @@ class BasePlugin:
     ) -> list[PluginAction]:
         return []
 
-    async def on_meshtastic_message(
+    async def on_mesh_message(
         self,
-        event: MeshtasticTextEvent,
+        event: MeshTextEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         return []
 
-    async def on_meshtastic_reaction(
+    async def on_mesh_reaction(
         self,
-        event: MeshtasticReactionEvent,
+        event: MeshReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         return []
+
+    # Legacy aliases — kept so any external callers (and existing tests that
+    # invoke the hook directly) continue to reach the canonical override.
+    async def on_meshtastic_message(
+        self,
+        event: MeshTextEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        return await self.on_mesh_message(event, context)
+
+    async def on_meshtastic_reaction(
+        self,
+        event: MeshReactionEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        return await self.on_mesh_reaction(event, context)
 
 
 @dataclass(slots=True)

@@ -9,6 +9,14 @@ import yaml
 from dotenv import load_dotenv
 
 
+MESHTASTIC_BACKEND = "meshtastic"
+MESHCORE_BACKEND = "meshcore"
+SUPPORTED_BACKENDS = {MESHTASTIC_BACKEND, MESHCORE_BACKEND}
+
+MESHTASTIC_MODES = {"serial", "tcp"}
+MESHCORE_MODES = {"serial", "tcp", "ble"}
+
+
 @dataclass(slots=True)
 class MeshtasticConnectionConfig:
     mode: str = "serial"
@@ -23,6 +31,30 @@ class MeshtasticConfig:
     bridge_channel: int = 0
     node_name_overrides: dict[str, str] = field(default_factory=dict)
     connection: MeshtasticConnectionConfig = field(default_factory=MeshtasticConnectionConfig)
+
+
+@dataclass(slots=True)
+class MeshCoreConnectionConfig:
+    mode: str = "serial"
+    serial_device: str | None = None
+    baudrate: int = 115200
+    tcp_host: str = "localhost"
+    tcp_port: int = 5000
+    ble_address: str | None = None
+    ble_pin: str | None = None
+    auto_reconnect: bool = True
+
+
+@dataclass(slots=True)
+class MeshCoreConfig:
+    bridge_channel: int = 0
+    contact_name_overrides: dict[str, str] = field(default_factory=dict)
+    connection: MeshCoreConnectionConfig = field(default_factory=MeshCoreConnectionConfig)
+
+
+@dataclass(slots=True)
+class MeshConfig:
+    backend: str = MESHTASTIC_BACKEND
 
 
 @dataclass(slots=True)
@@ -61,7 +93,9 @@ class MeshgramSettings:
     telegram_group_id: int
     config_path: str
     log_level: str = "INFO"
+    mesh: MeshConfig = field(default_factory=MeshConfig)
     meshtastic: MeshtasticConfig = field(default_factory=MeshtasticConfig)
+    meshcore: MeshCoreConfig = field(default_factory=MeshCoreConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     plugins: list[PluginConfig] = field(default_factory=list)
@@ -133,6 +167,142 @@ def _as_string_dict(value: Any) -> dict[str, str]:
     return result
 
 
+def _as_optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _resolve_backend() -> str:
+    raw = os.getenv("MESH_BACKEND")
+    if raw is None:
+        return MESHTASTIC_BACKEND
+    backend = raw.strip().lower()
+    if backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"MESH_BACKEND must be one of: {sorted(SUPPORTED_BACKENDS)}; got {raw!r}"
+        )
+    return backend
+
+
+def _build_meshtastic_config(
+    config_data: dict[str, Any],
+    *,
+    backend: str,
+) -> MeshtasticConfig:
+    meshtastic_data = (
+        config_data.get("meshtastic", {})
+        if isinstance(config_data.get("meshtastic", {}), dict)
+        else {}
+    )
+    connection_data = (
+        meshtastic_data.get("connection", {})
+        if isinstance(meshtastic_data.get("connection", {}), dict)
+        else {}
+    )
+
+    env_mode = os.getenv("MESH_MODE")
+    raw_mode = env_mode if env_mode is not None else connection_data.get("mode", "serial")
+    mode = str(raw_mode).strip().lower()
+    if backend == MESHTASTIC_BACKEND and mode not in MESHTASTIC_MODES:
+        raise ValueError(
+            f"Meshtastic mode must be one of: {sorted(MESHTASTIC_MODES)}; got {raw_mode!r}"
+        )
+
+    serial_device = os.getenv("MESH_DEVICE", connection_data.get("serial_device"))
+    tcp_host = os.getenv("MESH_HOST", str(connection_data.get("tcp_host", "localhost")))
+
+    tcp_port_raw = os.getenv("MESH_PORT")
+    if tcp_port_raw is not None:
+        tcp_port = _as_int(tcp_port_raw, 4403)
+    else:
+        tcp_port = _as_int(connection_data.get("tcp_port"), 4403)
+
+    no_nodes = _as_bool(os.getenv("MESH_NO_NODES"), _as_bool(connection_data.get("no_nodes"), False))
+
+    # When the active backend is meshcore, the meshtastic block stays in settings
+    # but the mode value is whatever was in YAML (env override doesn't apply).
+    effective_mode = mode if backend == MESHTASTIC_BACKEND else str(connection_data.get("mode", "serial")).strip().lower() or "serial"
+
+    return MeshtasticConfig(
+        bridge_channel=_as_int(meshtastic_data.get("bridge_channel"), 0),
+        node_name_overrides=_as_string_dict(meshtastic_data.get("node_name_overrides")),
+        connection=MeshtasticConnectionConfig(
+            mode=effective_mode,
+            serial_device=serial_device,
+            tcp_host=tcp_host,
+            tcp_port=tcp_port,
+            no_nodes=no_nodes,
+        ),
+    )
+
+
+def _build_meshcore_config(
+    config_data: dict[str, Any],
+    *,
+    backend: str,
+) -> MeshCoreConfig:
+    meshcore_data = (
+        config_data.get("meshcore", {})
+        if isinstance(config_data.get("meshcore", {}), dict)
+        else {}
+    )
+    connection_data = (
+        meshcore_data.get("connection", {})
+        if isinstance(meshcore_data.get("connection", {}), dict)
+        else {}
+    )
+
+    env_mode = os.getenv("MESH_MODE")
+    raw_mode = env_mode if env_mode is not None else connection_data.get("mode", "serial")
+    mode = str(raw_mode).strip().lower()
+    if backend == MESHCORE_BACKEND and mode not in MESHCORE_MODES:
+        raise ValueError(
+            f"MeshCore mode must be one of: {sorted(MESHCORE_MODES)}; got {raw_mode!r}"
+        )
+
+    serial_device = os.getenv("MESH_DEVICE", connection_data.get("serial_device"))
+
+    baudrate_raw = os.getenv("MESH_BAUDRATE")
+    if baudrate_raw is not None:
+        baudrate = _as_int(baudrate_raw, 115200)
+    else:
+        baudrate = _as_int(connection_data.get("baudrate"), 115200)
+
+    tcp_host = os.getenv("MESH_HOST", str(connection_data.get("tcp_host", "localhost")))
+
+    tcp_port_raw = os.getenv("MESH_PORT")
+    if tcp_port_raw is not None:
+        tcp_port = _as_int(tcp_port_raw, 5000)
+    else:
+        tcp_port = _as_int(connection_data.get("tcp_port"), 5000)
+
+    ble_address = os.getenv("MESH_BLE_ADDRESS", _as_optional_string(connection_data.get("ble_address")))
+    ble_pin = os.getenv("MESH_BLE_PIN", _as_optional_string(connection_data.get("ble_pin")))
+    auto_reconnect = _as_bool(
+        os.getenv("MESH_AUTO_RECONNECT"),
+        _as_bool(connection_data.get("auto_reconnect"), True),
+    )
+
+    effective_mode = mode if backend == MESHCORE_BACKEND else str(connection_data.get("mode", "serial")).strip().lower() or "serial"
+
+    return MeshCoreConfig(
+        bridge_channel=_as_int(meshcore_data.get("bridge_channel"), 0),
+        contact_name_overrides=_as_string_dict(meshcore_data.get("contact_name_overrides")),
+        connection=MeshCoreConnectionConfig(
+            mode=effective_mode,
+            serial_device=serial_device,
+            baudrate=baudrate,
+            tcp_host=tcp_host,
+            tcp_port=tcp_port,
+            ble_address=ble_address,
+            ble_pin=ble_pin,
+            auto_reconnect=auto_reconnect,
+        ),
+    )
+
+
 def load_settings() -> MeshgramSettings:
     load_dotenv()
 
@@ -153,32 +323,20 @@ def load_settings() -> MeshgramSettings:
     config_data = _read_yaml(config_path)
 
     runtime_data = config_data.get("runtime", {}) if isinstance(config_data.get("runtime", {}), dict) else {}
-    meshtastic_data = (
-        config_data.get("meshtastic", {}) if isinstance(config_data.get("meshtastic", {}), dict) else {}
-    )
     telegram_data = config_data.get("telegram", {}) if isinstance(config_data.get("telegram", {}), dict) else {}
     chunking_data = config_data.get("chunking", {}) if isinstance(config_data.get("chunking", {}), dict) else {}
 
-    connection_data = (
-        meshtastic_data.get("connection", {})
-        if isinstance(meshtastic_data.get("connection", {}), dict)
-        else {}
-    )
+    mesh_data = config_data.get("mesh", {}) if isinstance(config_data.get("mesh", {}), dict) else {}
+    yaml_backend = str(mesh_data.get("backend", MESHTASTIC_BACKEND)).strip().lower()
+    if yaml_backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"mesh.backend must be one of: {sorted(SUPPORTED_BACKENDS)}; got {yaml_backend!r}"
+        )
+    env_backend = os.getenv("MESH_BACKEND")
+    backend = _resolve_backend() if env_backend is not None else yaml_backend
 
-    mode = str(os.getenv("MESH_MODE", connection_data.get("mode", "serial"))).strip().lower()
-    if mode not in {"serial", "tcp"}:
-        raise ValueError("Meshtastic mode must be one of: serial, tcp")
-
-    serial_device = os.getenv("MESH_DEVICE", connection_data.get("serial_device"))
-    tcp_host = os.getenv("MESH_HOST", str(connection_data.get("tcp_host", "localhost")))
-
-    tcp_port_raw = os.getenv("MESH_PORT")
-    if tcp_port_raw is not None:
-        tcp_port = _as_int(tcp_port_raw, 4403)
-    else:
-        tcp_port = _as_int(connection_data.get("tcp_port"), 4403)
-
-    no_nodes = _as_bool(os.getenv("MESH_NO_NODES"), _as_bool(connection_data.get("no_nodes"), False))
+    meshtastic_config = _build_meshtastic_config(config_data, backend=backend)
+    meshcore_config = _build_meshcore_config(config_data, backend=backend)
 
     plugins_data = config_data.get("plugins")
     if isinstance(plugins_data, list):
@@ -206,17 +364,9 @@ def load_settings() -> MeshgramSettings:
         telegram_group_id=group_id,
         config_path=config_path,
         log_level=log_level,
-        meshtastic=MeshtasticConfig(
-            bridge_channel=_as_int(meshtastic_data.get("bridge_channel"), 0),
-            node_name_overrides=_as_string_dict(meshtastic_data.get("node_name_overrides")),
-            connection=MeshtasticConnectionConfig(
-                mode=mode,
-                serial_device=serial_device,
-                tcp_host=tcp_host,
-                tcp_port=tcp_port,
-                no_nodes=no_nodes,
-            ),
-        ),
+        mesh=MeshConfig(backend=backend),
+        meshtastic=meshtastic_config,
+        meshcore=meshcore_config,
         telegram=TelegramConfig(
             include_captions=_as_bool(telegram_data.get("include_captions"), True),
             sender_prefix_template=str(

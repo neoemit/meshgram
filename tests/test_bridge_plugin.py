@@ -61,7 +61,7 @@ class BridgePluginTests(unittest.TestCase):
         return PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
-            meshtastic_payload_limit=payload_limit,
+            mesh_payload_limit=payload_limit,
             local_node_id=local_node_id,
             reply_links=self.reply_links,
         )

@@ -1,4 +1,5 @@
 meshtastic==2.2.10
+meshcore>=2.3.7
 python-telegram-bot==20.8
 python-dotenv==1.0.1
 PyYAML==6.0.2

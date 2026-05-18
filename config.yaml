@@ -1,6 +1,11 @@
 runtime:
   log_level: INFO
 
+# Selects which radio backend the bridge speaks to.
+# Override at runtime with MESH_BACKEND.
+mesh:
+  backend: meshtastic   # or "meshcore"
+
 meshtastic:
   bridge_channel: 1
   node_name_overrides: {}
@@ -13,6 +18,23 @@ meshtastic:
     # serial_device: null
     tcp_host: host.docker.internal
     tcp_port: 4403
+
+# Only used when mesh.backend = meshcore.
+# MeshCore has no native packet-level reactions and no reply threading;
+# the bridge silently drops reaction syncs and reply-id metadata in that mode.
+meshcore:
+  bridge_channel: 0
+  # Map pubkey prefix → display name (similar to meshtastic.node_name_overrides):
+  contact_name_overrides: {}
+  connection:
+    mode: serial               # serial | tcp | ble
+    serial_device: /dev/ttyUSB0
+    baudrate: 115200
+    tcp_host: localhost
+    tcp_port: 5000
+    # ble_address: "12:34:56:78:90:AB"
+    # ble_pin: "123456"
+    auto_reconnect: true
 
 telegram:
   include_captions: true

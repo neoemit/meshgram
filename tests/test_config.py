@@ -9,6 +9,13 @@ from meshgram.config import load_settings
 
 
 class ConfigTests(unittest.TestCase):
+    def setUp(self):
+        # ``load_settings`` calls ``load_dotenv`` which would otherwise read
+        # the repo's `.env` and pollute the test environment.
+        self._dotenv_patcher = patch("meshgram.config.load_dotenv", lambda *a, **kw: False)
+        self._dotenv_patcher.start()
+        self.addCleanup(self._dotenv_patcher.stop)
+
     def test_load_settings_and_env_overrides(self):
         with tempfile.TemporaryDirectory() as tempdir:
             config_path = Path(tempdir) / "config.yaml"
@@ -97,6 +104,74 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.chunking.payload_safety_margin_bytes, 12)
             self.assertEqual(settings.plugins[0].settings["reactions_enabled"], True)
             self.assertEqual(settings.plugins[0].settings["missing_target_policy"], "fallback_message")
+
+    def test_default_backend_is_meshtastic_when_unset(self):
+        env = {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "TELEGRAM_GROUP_ID": "-100123",
+            "MESHGRAM_CONFIG_PATH": "/tmp/non-existent-config.yaml",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.assertEqual(settings.mesh.backend, "meshtastic")
+
+    def test_mesh_backend_env_selects_meshcore_and_ble(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_path = Path(tempdir) / "config.yaml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    mesh:
+                      backend: meshcore
+                    meshcore:
+                      bridge_channel: 2
+                      connection:
+                        mode: serial
+                        baudrate: 115200
+                    """
+                ).strip(),
+                encoding="utf-8",
+            )
+            env = {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "TELEGRAM_GROUP_ID": "-100123",
+                "MESHGRAM_CONFIG_PATH": str(config_path),
+                "MESH_BACKEND": "meshcore",
+                "MESH_MODE": "ble",
+                "MESH_BLE_ADDRESS": "12:34:56:78:90:AB",
+                "MESH_BLE_PIN": "123456",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                settings = load_settings()
+
+        self.assertEqual(settings.mesh.backend, "meshcore")
+        self.assertEqual(settings.meshcore.bridge_channel, 2)
+        self.assertEqual(settings.meshcore.connection.mode, "ble")
+        self.assertEqual(settings.meshcore.connection.ble_address, "12:34:56:78:90:AB")
+        self.assertEqual(settings.meshcore.connection.ble_pin, "123456")
+
+    def test_ble_mode_rejected_for_meshtastic_backend(self):
+        env = {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "TELEGRAM_GROUP_ID": "-100123",
+            "MESHGRAM_CONFIG_PATH": "/tmp/non-existent-config.yaml",
+            "MESH_BACKEND": "meshtastic",
+            "MESH_MODE": "ble",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(ValueError, "Meshtastic mode"):
+                load_settings()
+
+    def test_unknown_backend_raises(self):
+        env = {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "TELEGRAM_GROUP_ID": "-100123",
+            "MESHGRAM_CONFIG_PATH": "/tmp/non-existent-config.yaml",
+            "MESH_BACKEND": "spectrum",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(ValueError, "MESH_BACKEND"):
+                load_settings()
 
     def test_default_plugins_when_config_missing(self):
         env = {

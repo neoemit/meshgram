@@ -10,7 +10,7 @@ from urllib import request
 
 from meshgram.plugin import BasePlugin
 from meshgram.text_utils import normalized_exact_word
-from meshgram.types import MeshtasticTextEvent, PluginAction, PluginContext, SendMeshtasticAction
+from meshgram.types import MeshTextEvent, PluginAction, PluginContext, SendMeshAction
 
 LOGGER = logging.getLogger(__name__)
 ENV_TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -19,9 +19,9 @@ ENV_TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 class DirectMessageHttpCommandPlugin(BasePlugin):
     name = "dm_http_command"
 
-    async def on_meshtastic_message(
+    async def on_mesh_message(
         self,
-        event: MeshtasticTextEvent,
+        event: MeshTextEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         if not _is_direct_message_to_local_node(event, context):
@@ -52,7 +52,7 @@ class DirectMessageHttpCommandPlugin(BasePlugin):
                 return []
 
         return [
-            SendMeshtasticAction(
+            SendMeshAction(
                 text=response_text,
                 destination_id=event.from_id,
                 channel_index=event.channel_index,
@@ -218,7 +218,7 @@ def _normalize_node_id(node_id: Optional[str]) -> Optional[str]:
     return text
 
 
-def _is_direct_message_to_local_node(event: MeshtasticTextEvent, context: PluginContext) -> bool:
+def _is_direct_message_to_local_node(event: MeshTextEvent, context: PluginContext) -> bool:
     local_node_id = _normalize_node_id(context.local_node_id)
     to_id = _normalize_node_id(event.to_id)
     from_id = _normalize_node_id(event.from_id)
