@@ -1,300 +1,369 @@
 # Meshgram 🌐
 
-Meshgram is a plugin-based bridge between **Meshtastic** and **Telegram**.
+Plugin-based bridge between a **mesh radio network** and **Telegram**.
 
-It lets you relay messages between a Telegram group and a Meshtastic channel, run channel-scoped automation plugins, and support direct-message command workflows.
-
-## Highlights ✨
-
-- 🔁 Bidirectional bridge between Telegram and Meshtastic
-- 🧵 Cross-platform reply linking (Telegram replies ↔ Meshtastic replies)
-- ❤️ Bidirectional emoji reaction sync for linked messages
-- ✂️ UTF-8 byte-aware chunking for long Telegram messages
-- 🧩 Plugin architecture for feature extensions
-- 🐳 Docker support for Linux and macOS workflows
-- 🛠️ Linux `systemd` deployment guide and templates
+Supports both **Meshtastic** and **MeshCore** radios. Speaks serial, TCP, and BLE. Runs on Linux, macOS, and Docker.
 
 ---
 
-## Architecture 🧱
+## ✨ Highlights
 
-### Core runtime
-
-- Loads secrets from `.env` and behavior config from `config.yaml`
-- Connects to Telegram and Meshtastic transports
-- Normalizes inbound events
-- Dispatches events to enabled plugins
-- Executes plugin actions with centralized logging/error handling
-
-### Built-in plugins
-
-- `bridge`
-- `ping_pong`
-- `dm_http_command`
+- 🔁 Bidirectional message bridge — Telegram ↔ mesh
+- 🧵 Cross-platform reply linking (Meshtastic)
+- ❤️ Bidirectional emoji reaction sync for linked messages (Meshtastic)
+- ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
+- 🧩 Plugin architecture (`bridge`, `ping_pong`, `dm_http_command`)
+- 🐳 First-class Docker deployment with platform-specific overlays
+- 🛠️ Linux `systemd` service templates included
 
 ---
 
-## Project Layout 📁
+## 🧭 What Works Where
 
-```text
-meshgram/
-├── main.py
-├── config.yaml
-├── .env.example
-├── Dockerfile
-├── docker-compose.yml
-├── docker-compose.macos-tcp.yml
-├── docker-compose.linux-serial.yml
-├── deploy/
-│   └── systemd/
-│       ├── meshgram.service
-│       └── meshgram.env.example
-├── meshgram/
-│   ├── app.py
-│   ├── config.py
-│   ├── plugin.py
-│   ├── reply_links.py
-│   ├── text_utils.py
-│   ├── types.py
-│   └── plugins/
-│       ├── bridge.py
-│       ├── ping_pong.py
-│       └── dm_http_command.py
-└── tests/
+| Backend       | Serial / USB | TCP                          | BLE          |
+|---------------|--------------|------------------------------|--------------|
+| Meshtastic    | ✅ Linux, macOS, Docker (Linux only) | ✅ all platforms | ❌ not supported by bridge |
+| MeshCore      | ✅ Linux, macOS, Docker (Linux only) | ✅ all platforms | ✅ Linux, macOS (host Python only — not Docker) |
+
+**Platform notes:**
+- **Linux:** every combination works, including USB passthrough into Docker.
+- **macOS:** Docker Desktop **cannot** pass through USB or Bluetooth. Use bare-metal Python for serial/BLE, or run a host-side serial→TCP bridge (`socat`) and use the TCP overlay.
+- **Docker:** USB passthrough requires Linux host. BLE never works in Docker.
+
+**Backend differences:**
+- MeshCore has **no packet-level reactions** — Telegram→MeshCore reaction actions are dropped silently.
+- MeshCore has **no reply threading** — replies are forwarded as plain text.
+- MeshCore identifiers are opaque strings, Meshtastic uses 32-bit packet IDs. The bridge handles both.
+
+---
+
+## 🚀 Quick Start
+
+### 1. Get a Telegram bot
+
+1. Talk to [@BotFather](https://t.me/BotFather), `/newbot`, save the token.
+2. Add the bot to your group, make it admin (or at least allow it to read messages).
+3. Get the group's chat ID — easiest way: forward a message from the group to [@userinfobot](https://t.me/userinfobot).
+
+### 2. Clone and configure
+
+```bash
+git clone <this-repo> meshgram && cd meshgram
+cp .env.example .env
+# edit .env — set TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID, and your MESH_* vars
 ```
 
----
+### 3. Pick how you want to run it
 
-## Requirements ✅
-
-- Python `3.12+`
-- Telegram bot token
-- Telegram group/chat ID
-- Meshtastic node reachable over:
-  - serial (`/dev/ttyUSB*`, `/dev/ttyACM*`, `/dev/tty.*`), or
-  - TCP (`host:4403`)
+Jump to one of:
+- 🐧 [Linux — bare-metal Python](#-linux--bare-metal-python)
+- 🍎 [macOS — bare-metal Python](#-macos--bare-metal-python)
+- 🐳 [Docker on Linux (USB serial)](#-docker-on-linux-usb-serial)
+- 🐳 [Docker on macOS (TCP bridge)](#-docker-on-macos-tcp-bridge)
+- 🧰 [Linux systemd service](#-linux-systemd-service)
 
 ---
 
-## Environment Variables (`.env`) 🔐
+## 🐧 Linux — Bare-Metal Python
 
-Create your env file:
+Works for any backend, any transport (including BLE).
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
+
+**Backend selection** — set in `.env`:
+
+```dotenv
+# Meshtastic over USB serial
+MESH_BACKEND=meshtastic
+MESH_MODE=serial
+MESH_DEVICE=/dev/ttyUSB0
+```
+
+```dotenv
+# MeshCore over USB serial
+MESH_BACKEND=meshcore
+MESH_MODE=serial
+MESH_DEVICE=/dev/ttyACM0
+MESH_BAUDRATE=115200
+```
+
+```dotenv
+# MeshCore over BLE (Linux/macOS, host Python only)
+MESH_BACKEND=meshcore
+MESH_MODE=ble
+MESH_BLE_ADDRESS=12:34:56:78:90:AB
+# MESH_BLE_PIN=123456     # if your companion needs pairing
+```
+
+```dotenv
+# Either backend over TCP (e.g. Meshtastic node on the LAN)
+MESH_BACKEND=meshtastic
+MESH_MODE=tcp
+MESH_HOST=192.168.1.50
+MESH_PORT=4403
+```
+
+**Serial permissions** (one-time):
+```bash
+sudo usermod -aG dialout $USER
+# log out / back in, or `newgrp dialout`
+```
+
+**Optional — stable device path with udev** (recommended when you have multiple USB devices):
+```bash
+# /etc/udev/rules.d/99-meshcore.rules
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", SYMLINK+="meshcore"
+```
+Then reload: `sudo udevadm control --reload && sudo udevadm trigger --action=add`. Use `MESH_DEVICE=/dev/meshcore`.
+
+---
+
+## 🍎 macOS — Bare-Metal Python
+
+Same setup as Linux. Bare-metal is the recommended path on Mac because Docker Desktop can't see USB or Bluetooth.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
+
+Find your serial device:
+```bash
+ls /dev/cu.usbmodem* /dev/cu.usbserial*
+```
+
+`.env` example:
+```dotenv
+MESH_BACKEND=meshcore
+MESH_MODE=serial
+MESH_DEVICE=/dev/cu.usbmodem34B7DA5AFD281
+MESH_BAUDRATE=115200
+```
+
+For **BLE on macOS**, grant Bluetooth permission to your terminal: System Settings → Privacy & Security → Bluetooth → enable Terminal (or iTerm).
+
+---
+
+## 🐳 Docker on Linux (USB Serial)
+
+This is the cleanest production path on Linux.
 
 ```bash
 cp .env.example .env
+# edit .env — make sure MESH_DEVICE points at your radio (e.g. /dev/ttyUSB0 or /dev/meshcore)
+
+docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml up --build -d
+docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml logs -f meshgram
 ```
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | none | Telegram bot token |
-| `TELEGRAM_GROUP_ID` | Yes | none | Telegram target chat/group ID |
-| `MESHGRAM_CONFIG_PATH` | No | `config.yaml` | YAML config path |
-| `LOG_LEVEL` | No | `INFO` | Python logging level |
-| `MESH_MODE` | No | from YAML (`serial`) | Meshtastic mode override (`serial`/`tcp`) |
-| `MESH_NO_NODES` | No | from YAML (`false`) | Skip full node DB download on connect |
-| `MESH_DEVICE` | No | from YAML | Serial device override |
-| `MESH_HOST` | No | from YAML | TCP host override |
-| `MESH_PORT` | No | from YAML or `4403` | TCP port override |
-| `SOLAR_HOST` | No | none | Example env var for `dm_http_command` URL templating (`${SOLAR_HOST}`) |
-| `SOLAR_TOKEN` | No | none | Example bearer token env var for `dm_http_command` auth |
-| `SOLAR_API_KEY` | No | none | Example API key env var for `dm_http_command` headers |
+The `linux-serial` overlay adds:
+- `devices: [${MESH_DEVICE}:${MESH_DEVICE}]` — passes the USB serial device into the container
+- `group_add: [dialout]` — grants the container access
+
+**Tip — drop the `-f` flags:** copy the overlay to `docker-compose.override.yml` (auto-loaded by compose):
+```bash
+cp docker-compose.linux-serial.yml docker-compose.override.yml
+echo "docker-compose.override.yml" >> .gitignore
+docker compose up -d   # uses both files automatically
+```
 
 ---
 
-## Configuration (`config.yaml`) ⚙️
+## 🐳 Docker on macOS (TCP Bridge)
 
-### Complete example
+Docker Desktop on macOS cannot pass `/dev/cu.*` devices into the container. Workaround: run `socat` on the host to expose the serial port as TCP, then point the container at it.
+
+```bash
+brew install socat
+
+# In one terminal — keep running:
+socat -d -d TCP-LISTEN:4403,reuseaddr,fork FILE:/dev/cu.usbmodem34B7DA5AFD281,raw,echo=0,b115200
+
+# In another terminal:
+docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml up --build -d
+docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml logs -f meshgram
+```
+
+The `macos-tcp` overlay forces `MESH_MODE=tcp` with `MESH_HOST=host.docker.internal` and `MESH_PORT=4403`.
+
+> ⚠️ This works for Meshtastic's serial wire protocol. For MeshCore companion radios over TCP, prefer running the companion's TCP firmware directly or use bare-metal Python instead.
+
+---
+
+## 🧰 Linux systemd Service
+
+Use this when running on a Linux host without Docker.
+
+```bash
+# 1. Create service user + install location
+sudo useradd --system --home /opt/meshgram --create-home --shell /usr/sbin/nologin meshgram
+sudo mkdir -p /opt/meshgram
+sudo chown -R meshgram:meshgram /opt/meshgram
+# copy/clone the repo into /opt/meshgram
+
+# 2. venv + dependencies
+sudo -u meshgram bash -lc 'cd /opt/meshgram && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
+
+# 3. Configure
+sudo -u meshgram cp /opt/meshgram/deploy/systemd/meshgram.env.example /opt/meshgram/.env
+sudo -u meshgram nano /opt/meshgram/.env
+sudo -u meshgram nano /opt/meshgram/config.yaml
+
+# 4. Install + enable unit
+sudo cp /opt/meshgram/deploy/systemd/meshgram.service /etc/systemd/system/meshgram.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now meshgram
+sudo systemctl status meshgram --no-pager
+```
+
+Serial permissions:
+```bash
+sudo usermod -aG dialout meshgram
+sudo systemctl restart meshgram
+```
+
+Logs / lifecycle:
+```bash
+journalctl -u meshgram -f
+sudo systemctl restart meshgram
+sudo systemctl stop meshgram
+```
+
+If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, and `ReadWritePaths` in the unit file.
+
+---
+
+## 🔐 Environment Variables (`.env`)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | ✅ | — | Telegram bot token |
+| `TELEGRAM_GROUP_ID` | ✅ | — | Telegram target chat/group ID |
+| `MESH_BACKEND` | — | `meshtastic` | `meshtastic` or `meshcore` |
+| `MESH_MODE` | — | from YAML | `serial`, `tcp`, or `ble` (BLE = meshcore only) |
+| `MESH_DEVICE` | — | from YAML | Serial device path (e.g. `/dev/ttyUSB0`, `/dev/cu.usbmodemXXX`) |
+| `MESH_BAUDRATE` | — | `115200` | Serial baudrate (MeshCore only; Meshtastic auto-negotiates) |
+| `MESH_HOST` | — | from YAML | TCP host (use `host.docker.internal` on Docker Desktop) |
+| `MESH_PORT` | — | `4403` (Meshtastic) / `5000` (MeshCore) | TCP port |
+| `MESH_BLE_ADDRESS` | — | — | BLE MAC address (MeshCore + `MESH_MODE=ble`) |
+| `MESH_BLE_PIN` | — | — | BLE pairing PIN (optional) |
+| `MESH_NO_NODES` | — | `false` | Skip Meshtastic node DB download — improves resilience on proxied links |
+| `MESHGRAM_CONFIG_PATH` | — | `config.yaml` | Path to YAML config |
+| `LOG_LEVEL` | — | `INFO` | Python logging level |
+| `SOLAR_HOST` / `SOLAR_TOKEN` / `SOLAR_API_KEY` | — | — | Examples for `dm_http_command` URL/auth templating |
+
+Env vars override YAML for the same field.
+
+---
+
+## ⚙️ Configuration (`config.yaml`)
+
+### Minimal example
 
 ```yaml
-runtime:
-  log_level: INFO
+mesh:
+  backend: meshtastic    # or "meshcore"
 
 meshtastic:
   bridge_channel: 1
-  node_name_overrides:
-    "!1234abcd": "RTR-A"
   connection:
     mode: tcp
-    no_nodes: true
-    tcp_host: host.docker.internal
+    tcp_host: meshtastic.local
     tcp_port: 4403
 
 telegram:
   include_captions: true
   sender_prefix_template: "[{display_name}] {message}"
 
-chunking:
-  enabled: true
-  prefix_template: "({index}/{total}) "
-  inter_chunk_delay_ms: 150
-  max_chunk_bytes: 160
-  broadcast_max_chunk_bytes: 120
-  broadcast_min_inter_chunk_delay_ms: 2500
-  payload_safety_margin_bytes: 12
-  retry_max_attempts: 3
-  retry_initial_delay_ms: 500
-  retry_backoff_factor: 2.0
-  wait_for_ack: true
-  ack_timeout_ms: 20000
-  abort_on_chunk_failure: true
-
 plugins:
   - name: bridge
     enabled: true
     settings:
       channel: 1
-      reply_link_ttl_hours: 24
-      reactions_enabled: true
-      meshtastic_want_ack: true
-      missing_target_policy: fallback_message
-      reply_missing_suffix: "(reply target not found)"
-      reaction_missing_notice_template: "(reaction target not found)"
-
-  - name: ping_pong
-    enabled: true
-    settings:
-      keyword_responses:
-        Ping: "Pong"
-        Ack: "Ack"
-      channels: [0, 1]
-
-  - name: dm_http_command
-    enabled: false
-    settings:
-      timeout_seconds: 8
-      error_message: "Unable to fetch {command}"
-      commands:
-        BATTERY:
-          url: "http://${SOLAR_HOST}/battery/"
-          type: "json"
-          value: "data.inv1.soc"
-          msg: "{value}%"
-          auth:
-            type: bearer
-            token_env: SOLAR_TOKEN
-          headers:
-            X-Api-Key: "${SOLAR_API_KEY}"
 ```
 
-### Key config fields
+### MeshCore example
 
-#### `meshtastic`
+```yaml
+mesh:
+  backend: meshcore
 
-- `bridge_channel`: default channel fallback for bridge plugin
-- `node_name_overrides`: force stable sender labels if peer metadata is incomplete
-  - key formats supported: `!1234abcd`, `1234abcd`, `305441741`, `0x1234abcd`
-- `connection.mode`: `serial` or `tcp`
-- `connection.no_nodes`: can improve resilience on proxied links, but may reduce dynamic node metadata
+meshcore:
+  bridge_channel: 0
+  contact_name_overrides:
+    "baad3b19": "Companion-1"
+  connection:
+    mode: serial
+    serial_device: /dev/meshcore
+    baudrate: 115200
+    # tcp_host: localhost
+    # tcp_port: 5000
+    # ble_address: "12:34:56:78:90:AB"
+    # ble_pin: "123456"
+    auto_reconnect: true
+```
 
-#### `telegram`
+### Full config reference
 
-- `include_captions`: include media captions in Telegram → Meshtastic forwarding
-- `sender_prefix_template`: supports `{display_name}` and `{message}` (default compact style is `[{display_name}] {message}`)
+See [`config.yaml`](./config.yaml) in the repo — it contains every supported field with comments.
 
-#### `chunking`
+### Sender label resolution order
 
-- Uses UTF-8 byte length (safe for emoji/multibyte text)
-- `prefix_template` supports `{index}` and `{total}`
-- `inter_chunk_delay_ms`: requested delay between chunk sends (default `150`)
-- chunked bridge sends enforce a minimum `900ms` inter-chunk delay for reliability
-- `max_chunk_bytes`: hard cap for chunk payload bytes before SDK/radio limits (default `160`)
-- if `max_chunk_bytes <= 0`, Meshgram uses safe default cap `160`
-- `broadcast_max_chunk_bytes`: additional cap for broadcast chunk payloads (default `120`)
-- `broadcast_min_inter_chunk_delay_ms`: minimum delay between broadcast chunks (default `2500`)
-- `payload_safety_margin_bytes`: reserves bytes below reported SDK payload max to reduce edge-size drops (default `12`)
-- `retry_max_attempts`: retries per chunk before terminal failure (default `3`)
-- `retry_initial_delay_ms`: delay before first retry (default `500`)
-- `retry_backoff_factor`: exponential retry multiplier (default `2.0`)
-- `wait_for_ack`: for chunked sends, wait for Meshtastic ACK before sending next chunk (default `true`)
-- `ack_timeout_ms`: timeout for ACK wait before retrying a chunk send (default `20000`)
-- ACK gating is automatically skipped for broadcast (`^all`) sends
-- `abort_on_chunk_failure`: if `true`, stops remaining chunks in the same sequence after terminal failure
+Meshtastic: `node_name_overrides` → `shortName` → `longName` → normalized node ID.
+MeshCore: `contact_name_overrides[pubkey_prefix]` → contact `adv_name` → pubkey prefix.
+
+### Chunking (relevant on both backends)
+
+UTF-8 byte-aware splitting for radio MTU. Key knobs:
+- `max_chunk_bytes` (default `160`) — hard cap per chunk
+- `broadcast_max_chunk_bytes` (default `120`) — stricter cap for `^all` channels
+- `inter_chunk_delay_ms` / `broadcast_min_inter_chunk_delay_ms` — spacing between chunks
+- `retry_max_attempts`, `retry_initial_delay_ms`, `retry_backoff_factor` — retry policy
+- `wait_for_ack` + `ack_timeout_ms` — gate next chunk on Meshtastic ACK (auto-skipped for broadcast and ignored on MeshCore)
+- `abort_on_chunk_failure` — stop remaining chunks after terminal failure
+- `payload_safety_margin_bytes` — reserve bytes below SDK max to avoid edge drops
 
 ---
 
-## Plugin Reference 🧩
+## 🧩 Plugins
 
-### `bridge`
+### `bridge` — Telegram ↔ Mesh relay
 
-#### Meshtastic → Telegram
+- Forwards text both directions, with sender prefix from `sender_prefix_template`
+- Forwards Telegram media captions when `telegram.include_captions: true`
+- Ignores bot-authored Telegram messages (loop prevention)
+- Filters by channel: `bridge.settings.channel` (fallback to `<backend>.bridge_channel`)
+- Reply linking (Meshtastic only): replies on either side map back to the original
+- Reaction sync (Meshtastic only, requires `reactions_enabled: true`): linked messages only, first Unicode emoji, anonymous count fallback for Telegram
 
-- forwards `TEXT_MESSAGE_APP` payloads
-- channel filter: `bridge.settings.channel` (fallback `meshtastic.bridge_channel`)
-- local-node loop suppression
-- sender label order:
-  1. `node_name_overrides`
-  2. node `shortName`
-  3. node `longName`
-  4. normalized node ID
-- if mapping exists, Meshtastic replies are forwarded as Telegram replies
+Settings:
 
-#### Telegram → Meshtastic
+```yaml
+- name: bridge
+  enabled: true
+  settings:
+    channel: 1
+    reply_link_ttl_hours: 24
+    reactions_enabled: true                      # Meshtastic only
+    meshtastic_want_ack: true                    # Meshtastic only
+    missing_target_policy: fallback_message
+    reply_missing_suffix: "(reply target not found)"
+    reaction_missing_notice_template: "(reaction target not found)"
+```
 
-- forwards Telegram `text`
-- forwards media `caption` if enabled
-- ignores bot-authored Telegram messages
-- compacts Telegram sender names to first token (`Name Surname` → `Name`) before applying `sender_prefix_template`
-- chunks oversized messages by UTF-8 bytes
-- byte-aware splitting is prefix-aware and converges on final chunk count (important for emoji/multibyte content)
-- chunked broadcast sends use a stricter safety profile (smaller chunks + longer spacing)
-- retries failed chunk sends with exponential backoff using `chunking` retry settings
-- requires a packet ID confirmation from Meshtastic SDK responses for bridge sends (retries if missing)
-- logs sequence/chunk packet IDs for every chunked send attempt
-- when enabled, waits for ACK per chunk before continuing sequence (unicast destinations only)
-- on terminal chunk failure, aborts later chunks in the same sequence when `abort_on_chunk_failure=true`
-- chunk delivery failures are log-only (no Telegram failure notification)
-- if mapping exists, Telegram replies are sent with Meshtastic `replyId`
-- if reply target mapping is missing, message is still forwarded with `reply_missing_suffix`
+### `ping_pong` — keyword auto-responder
 
-#### Reply-link behavior
-
-- in-memory mapping TTL set by `reply_link_ttl_hours` (default `24`)
-- for chunked Telegram → Meshtastic sends:
-  - first chunk is canonical for Telegram-reply lookup
-  - replies to any chunk still map back to source Telegram message
-- compatibility fallback for older Meshtastic SDKs:
-  - `sendText(..., replyId=...)`
-  - then `sendData(..., replyId=...)`
-  - then low-level packet send with `decoded.reply_id`
-
-#### Reaction behavior
-
-- reaction sync is enabled with `reactions_enabled: true`
-- scope is **linked messages only** (requires known cross-platform mapping)
-- Telegram → Meshtastic:
-  - only non-bot actors in configured group are considered
-  - only first Unicode emoji reaction is mirrored
-  - reaction removals and custom Telegram emoji are ignored
-  - if Telegram only emits anonymous reaction-count updates, Meshgram uses best-effort emoji inference from count deltas
-- Meshtastic → Telegram:
-  - packets with `decoded.emoji` + `replyId/reply_id` are mapped as reactions
-  - local-node packets are ignored for loop prevention
-  - if Telegram rejects an emoji as `Reaction_invalid`, Meshgram retries with normalized variants, then safe fallback `👍`
-  - if all candidates are rejected by Telegram, reaction sync is skipped (logged) without crashing plugin flow
-- if reaction target mapping is missing and `missing_target_policy: fallback_message`, bridge emits `reaction_missing_notice_template`
-- actor identity is platform-limited:
-  - Telegram reaction appears from bot
-  - Meshtastic reaction appears from bridge node
-
-Bridge reaction/reply settings:
-
-- `reactions_enabled`: enable/disable bidirectional reaction sync (`true` default)
-- `meshtastic_want_ack`: request Meshtastic reliable delivery for bridge-originated outbound packets (`true` default)
-- `missing_target_policy`: currently `fallback_message` (emit notice when mapping is missing)
-- `reply_missing_suffix`: inline suffix appended when reply target mapping is missing
-- `reaction_missing_notice_template`: notice sent when reaction target mapping is missing
-
-### `ping_pong`
-
-- listens on all channels by default, or `settings.channels` allowlist
-- exact keyword matching using normalized, case-insensitive single-word input
-- message edge punctuation/symbols are ignored (example: `ping?` matches `Ping`)
-- command map is `settings.keyword_responses`
-- replies on the **same incoming channel** and uses `replyId`
-- suppresses reprocessed/repropagated packets by Meshtastic packet id for `settings.message_dedupe_ttl_seconds` (default: `3600`, one hour)
-- suppresses rapid duplicate keyword responses from the same sender/keyword for `settings.response_dedupe_ttl_seconds` (default: `30`)
-
-Example:
+- Replies to exact single-word keywords (case-insensitive, punctuation-stripped)
+- Replies on the same channel the message came in on
+- Per-channel allowlist via `channels`
+- Dedupe windows for incoming packets and outbound responses
 
 ```yaml
 - name: ping_pong
@@ -308,21 +377,9 @@ Example:
     response_dedupe_ttl_seconds: 30
 ```
 
-### `dm_http_command`
+### `dm_http_command` — DM → HTTP → DM reply
 
-Responds to mapped **single-word direct messages** sent to your bridge node.
-
-How it works:
-
-1. A node sends a DM command (example: `BATTERY`)
-2. Plugin matches command case-insensitively
-3. Plugin performs HTTP GET to configured URL
-4. Plugin parses response (`json` or `text`)
-5. Plugin resolves configured `value` path
-6. Plugin formats reply using `msg` template
-7. Plugin replies to the sender as DM
-
-Example mapping:
+A node sends a single-word DM (e.g. `BATTERY`), the plugin fetches a configured HTTP endpoint, extracts a value, and DMs the formatted result back.
 
 ```yaml
 - name: dm_http_command
@@ -333,8 +390,8 @@ Example mapping:
     commands:
       BATTERY:
         url: "http://${SOLAR_HOST}/battery/"
-        type: "json"
-        value: "data.inv1.soc"
+        type: "json"           # or "text"
+        value: "data.inv1.soc" # dot path; supports list indices
         msg: "{value}%"
         auth:
           type: bearer
@@ -343,241 +400,120 @@ Example mapping:
           X-Api-Key: "${SOLAR_API_KEY}"
 ```
 
-Given payload:
-
-```json
-{"data":{"inv1":{"name":"asd","soc":99}}}
-```
-
-`BATTERY` reply becomes:
-
-```text
-99%
-```
-
-Command settings:
-
-- `url`: HTTP endpoint to call
-  - supports env templating with `${ENV_VAR}`
-- `type`: `json` or `text`
-- `value`: extraction path (`.` separated; supports list indices for JSON arrays)
-- `msg`: output template (supports `{value}` and `{command}`)
-- `timeout_seconds`: optional per-command timeout (falls back to plugin-level timeout)
-- `headers`: optional HTTP headers map (header values support `${ENV_VAR}`)
-- `auth`: optional auth settings
-  - `type`: currently `bearer`
-  - `token_env`: env var containing token
-  - `header`: optional header name override (default `Authorization`)
-  - `prefix`: optional scheme prefix (default `Bearer`)
+Env templating with `${VAR}` works in `url` and `headers`. Auth currently supports `bearer`.
 
 ---
 
-## Ways to Run Meshgram ▶️
+## ⚠️ MeshCore Caveats
 
-### 1) Local Python (best for debugging) 🛠️
+When `MESH_BACKEND=meshcore`:
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# edit .env and config.yaml
-python main.py
-```
+- **No reactions** — Telegram reactions don't reach the radio; MeshCore packets never produce reaction events.
+- **No reply threading** — `reply_id` is silently dropped; messages still send as plain text.
+- **Opaque packet IDs** — internal IDs become strings (derived from MeshCore's `expected_ack` codes).
+- **`meshtastic_want_ack` / `wait_for_ack`** — ignored by the MeshCore transport.
 
-### 2) Docker Compose (base) 🐳
-
-```bash
-cp .env.example .env
-# edit .env and config.yaml
-docker compose up --build -d
-docker compose logs -f meshgram
-```
-
-### 3) Docker + Linux USB serial passthrough 🐧
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml up --build -d
-docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml logs -f meshgram
-```
-
-Linux serial notes:
-
-- set `MESH_DEVICE` in `.env` (example: `/dev/ttyUSB0`)
-- verify device exists (`ls /dev/ttyUSB* /dev/ttyACM*`)
-- ensure serial permissions/group access (`dialout` on many distros)
-
-### 4) Docker on macOS with host serial→TCP bridge 🍎
-
-Docker Desktop cannot directly pass macOS `/dev/tty.*` devices into Linux containers.
-
-Install `socat`:
-
-```bash
-brew install socat
-```
-
-Start host serial bridge:
-
-```bash
-socat -d -d TCP-LISTEN:4403,reuseaddr,fork FILE:/dev/tty.usbmodem34B7DA5AFD281,raw,echo=0,b115200
-```
-
-Run Meshgram with macOS TCP override:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml up --build -d
-docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml logs -f meshgram
-```
+Everything else (channel routing, chunking, plugins, sender labels via `contact_name_overrides`) works the same.
 
 ---
 
-## Linux `systemd` Service Setup 🧰
-
-Use this when running Meshgram directly on Linux host Python (without Docker).
-
-### 1) Create service user
-
-```bash
-sudo useradd --system --home /opt/meshgram --create-home --shell /usr/sbin/nologin meshgram
-```
-
-### 2) Install app files
-
-```bash
-sudo mkdir -p /opt/meshgram
-sudo chown -R meshgram:meshgram /opt/meshgram
-# copy repository files into /opt/meshgram (or clone there)
-```
-
-### 3) Create venv + install dependencies
-
-```bash
-sudo -u meshgram bash -lc 'cd /opt/meshgram && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
-```
-
-### 4) Configure environment and YAML
-
-```bash
-sudo -u meshgram cp /opt/meshgram/deploy/systemd/meshgram.env.example /opt/meshgram/.env
-sudo -u meshgram nano /opt/meshgram/.env
-sudo -u meshgram nano /opt/meshgram/config.yaml
-```
-
-### 5) Install provided unit file
-
-```bash
-sudo cp /opt/meshgram/deploy/systemd/meshgram.service /etc/systemd/system/meshgram.service
-```
-
-If your install path is not `/opt/meshgram`, update these fields in the unit file:
-
-- `WorkingDirectory`
-- `EnvironmentFile`
-- `ExecStart`
-- `ReadWritePaths`
-
-### 6) Enable and start service
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now meshgram
-sudo systemctl status meshgram --no-pager
-```
-
-### 7) Logs, restart, stop
-
-```bash
-journalctl -u meshgram -f
-sudo systemctl restart meshgram
-sudo systemctl stop meshgram
-sudo systemctl disable meshgram
-```
-
-### 8) Serial permission tip
-
-If serial access fails in serial mode:
-
-```bash
-sudo usermod -aG dialout meshgram
-sudo systemctl restart meshgram
-```
-
----
-
-## Best-Practice Guidelines 📘
-
-- Keep secrets in `.env`, not `config.yaml`
-- Keep plugin scope narrow by channel and purpose
-- Use `node_name_overrides` for deterministic sender labels
-- Keep `dm_http_command` endpoints on trusted/internal networks
-- Prefer short, unambiguous single-word command keys for DM command plugin
-- Keep bot token used by only one active polling instance
-
----
-
-## Testing 🧪
-
-Run tests:
+## 🧪 Testing
 
 ```bash
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Current test coverage includes:
-
-- config/env loading and override precedence
-- chunking behavior (ASCII, emoji, long-token fallback)
-- bridge filtering/loop prevention/reply mapping
-- Telegram reaction parsing (`message_reaction` + anonymous count update fallback)
-- Meshtastic reaction parsing compatibility (portnum/emoji format variants)
-- ping keyword-response behavior and channel filtering
-- DM HTTP command plugin behavior
-- sender name resolution fallback/override behavior
+Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library.
 
 ---
 
-## Troubleshooting 🩺
+## 🩺 Troubleshooting
 
-### Meshtastic connection fails
-
-- verify selected mode (`serial` or `tcp`)
-- verify host/device values in env + YAML
-- on macOS Docker, ensure `socat` is listening on `4403`
-- verify container can reach `host.docker.internal`
+### Mesh connection fails
+- Confirm `MESH_BACKEND`, `MESH_MODE`, and the matching `MESH_DEVICE` / `MESH_HOST` / `MESH_BLE_ADDRESS`.
+- On Linux: `ls /dev/ttyUSB* /dev/ttyACM*` and check group access (`groups $USER` must include `dialout`).
+- On macOS Docker: confirm `socat` is listening on the configured TCP port.
+- In Docker: container needs `host.docker.internal` reachable (Docker Desktop only — on Linux Docker you may need `--add-host=host.docker.internal:host-gateway`).
 
 ### Telegram `409 Conflict` on polling
+- Only one process can poll a given bot token. Stop the duplicate.
 
-- only one bot polling process can run per token
-- stop duplicate local/container instance
+### Messages not bridging
+- Check `TELEGRAM_GROUP_ID` matches the chat.
+- Check `bridge.settings.channel` matches the radio channel index.
+- Telegram side: ensure message has text or an enabled caption, and sender is not a bot.
 
-### Messages are not bridging
+### Long Telegram messages arrive partial on the radio
+- Confirm `chunking.enabled: true`.
+- Lower `max_chunk_bytes` (try `140`).
+- For broadcast channels, lower `broadcast_max_chunk_bytes` and raise `broadcast_min_inter_chunk_delay_ms`.
+- Watch logs for `Mesh send exhausted retries` and adjust retry settings.
 
-- verify `TELEGRAM_GROUP_ID`
-- verify bridge channel (`bridge.settings.channel`)
-- ensure source message has textual content (`text` or enabled `caption`)
-- ensure Telegram sender is not a bot
+### Reactions not syncing (Meshtastic)
+- Confirm `bridge.settings.reactions_enabled: true`.
+- Reactions only work on **already linked** messages — test by reacting to a message that was just bridged.
+- For MeshCore: reactions are intentionally unsupported.
 
-### Telegram long message arrives partially on Meshtastic
+### Sender label shows the raw node ID
+- Expected when peer metadata is missing.
+- Set `meshtastic.node_name_overrides` or `meshcore.contact_name_overrides` for deterministic labels.
 
-- ensure chunking is enabled (`chunking.enabled: true`)
-- increase `chunking.inter_chunk_delay_ms` (for busy links)
-- lower `chunking.max_chunk_bytes` (for example `160` or `140`) if packets are still missed
-- lower `chunking.broadcast_max_chunk_bytes` (for example `100` or `90`) on very noisy broadcast channels
-- increase `chunking.broadcast_min_inter_chunk_delay_ms` (for example `3000-5000`) if later chunks are missed
-- increase `chunking.payload_safety_margin_bytes` if you still see first-chunk drops
-- keep `bridge.settings.meshtastic_want_ack: true`
-- watch logs for `Meshtastic send exhausted retries` to identify failing chunk indexes
+### MeshCore "could not open port"
+- Verify the symlink/device path actually exists: `ls -l /dev/meshcore` (or whatever you set).
+- For udev SYMLINK rules to fire, trigger an `add` action: `sudo udevadm trigger --action=add --sysname-match=ttyACM0`.
 
-### Reactions are not syncing
+### Logs appear duplicated
+- Check there's only one container (`docker ps -a`) and one Python process (`docker exec meshgram sh -c 'ls /proc | grep "^[0-9]*$"'`). If output is duplicated only in your terminal but the raw container log (`docker inspect <name> --format '{{.LogPath}}'`) shows one copy per line, it's a transient compose/terminal artifact — restart with `docker compose up -d` and re-attach with `docker compose logs -f`.
 
-- confirm `bridge.settings.reactions_enabled: true`
-- test on recently bridged/linked messages (reaction sync requires mapping)
-- for Telegram → Meshtastic, ensure bot can receive reaction updates in that group
-- if you see only anonymous reaction counts from Telegram, keep the bot running long enough to establish per-message baseline deltas
+---
 
-### Sender label shows node ID
+## 📁 Project Layout
 
-- expected when peer metadata is unavailable
-- set `meshtastic.node_name_overrides` for deterministic labels
-- disable `no_nodes` if you prefer richer dynamic node metadata
+```text
+meshgram/
+├── main.py                       # entrypoint
+├── config.yaml                   # behavior config
+├── .env.example                  # secrets + connection vars
+├── Dockerfile
+├── docker-compose.yml            # base
+├── docker-compose.linux-serial.yml   # overlay — USB passthrough on Linux
+├── docker-compose.macos-tcp.yml      # overlay — TCP via host socat on macOS
+├── deploy/
+│   └── systemd/
+│       ├── meshgram.service
+│       └── meshgram.env.example
+├── meshgram/
+│   ├── app.py
+│   ├── config.py
+│   ├── plugin.py
+│   ├── reply_links.py
+│   ├── text_utils.py
+│   ├── types.py
+│   ├── _mesh_helpers.py
+│   ├── transport/
+│   │   ├── __init__.py           # MeshTransport ABC + create_transport()
+│   │   ├── meshtastic.py
+│   │   └── meshcore.py
+│   └── plugins/
+│       ├── bridge.py
+│       ├── ping_pong.py
+│       └── dm_http_command.py
+└── tests/
+```
+
+---
+
+## 📘 Best Practices
+
+- Keep secrets in `.env`, not `config.yaml`.
+- Use `node_name_overrides` / `contact_name_overrides` for deterministic sender labels.
+- Keep `dm_http_command` endpoints on trusted/internal networks.
+- Use short, unambiguous single-word keys for DM commands.
+- Only one polling process per bot token.
+- On Linux Docker, use `docker-compose.override.yml` for your local overlay instead of long `-f` chains.
+
+---
+
+## 📜 License
+
+See [`LICENSE`](./LICENSE).
