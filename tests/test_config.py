@@ -125,6 +125,8 @@ class ConfigTests(unittest.TestCase):
                       backend: meshcore
                     meshcore:
                       bridge_channel: 2
+                      outbound_echo_text_fallback_enabled: true
+                      outbound_echo_text_fallback_ttl_seconds: 4.5
                       connection:
                         mode: serial
                         baudrate: 115200
@@ -146,6 +148,8 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.mesh.backend, "meshcore")
         self.assertEqual(settings.meshcore.bridge_channel, 2)
+        self.assertTrue(settings.meshcore.outbound_echo_text_fallback_enabled)
+        self.assertEqual(settings.meshcore.outbound_echo_text_fallback_ttl_seconds, 4.5)
         self.assertEqual(settings.meshcore.connection.mode, "ble")
         self.assertEqual(settings.meshcore.connection.ble_address, "12:34:56:78:90:AB")
         self.assertEqual(settings.meshcore.connection.ble_pin, "123456")

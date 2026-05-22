@@ -363,7 +363,8 @@ Settings:
 - Replies to exact single-word keywords (case-insensitive, punctuation-stripped)
 - Replies on the same channel the message came in on
 - Per-channel allowlist via `channels`
-- Dedupe windows for incoming packets and outbound responses
+- Message-ID dedupe for replayed packets (default behavior)
+- Optional sender+keyword cooldown window for noisy networks
 
 ```yaml
 - name: ping_pong
@@ -373,8 +374,9 @@ Settings:
       Ping: "Pong"
       Ack: "Ack"
     channels: [0, 1]
+    response_dedupe_mode: packet_id_only        # or sender_keyword_window
     message_dedupe_ttl_seconds: 3600
-    response_dedupe_ttl_seconds: 30
+    response_dedupe_ttl_seconds: 30             # used by sender_keyword_window mode
 ```
 
 ### `dm_http_command` — DM → HTTP → DM reply
@@ -412,6 +414,7 @@ When `MESH_BACKEND=meshcore`:
 - **No reply threading** — `reply_id` is silently dropped; messages still send as plain text.
 - **Opaque packet IDs** — internal IDs become strings (derived from MeshCore's `expected_ack` codes).
 - **`meshtastic_want_ack` / `wait_for_ack`** — ignored by the MeshCore transport.
+- **Echo suppression policy** — self-echo detection is identity-based; optional text fallback is configurable via `meshcore.outbound_echo_text_fallback_*`.
 
 Everything else (channel routing, chunking, plugins, sender labels via `contact_name_overrides`) works the same.
 

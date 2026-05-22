@@ -174,7 +174,13 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(allowed_actions[0].channel_index, 1)
 
     def test_duplicate_keyword_within_dedupe_window_is_ignored(self):
-        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6})
+        plugin = PingPongPlugin(
+            {
+                "response_text": "Pong",
+                "response_dedupe_mode": "sender_keyword_window",
+                "response_dedupe_ttl_seconds": 6,
+            }
+        )
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
@@ -209,8 +215,50 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(len(first_actions), 1)
         self.assertEqual(duplicate_actions, [])
 
-    def test_duplicate_keyword_after_dedupe_window_is_allowed(self):
-        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6})
+    def test_repeated_keyword_with_new_packet_id_is_allowed_by_default(self):
+        plugin = PingPongPlugin({"response_text": "Pong"})
+        context = PluginContext(
+            settings=self.settings,
+            telegram_group_id=self.settings.telegram_group_id,
+            mesh_payload_limit=233,
+            local_node_id=None,
+        )
+
+        first_event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=48,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="node",
+        )
+        later_event = MeshtasticTextEvent(
+            from_id="!aaaa1111",
+            to_id=None,
+            packet_id=49,
+            reply_id=None,
+            channel_index=1,
+            text="ping",
+            sender_label="node",
+        )
+
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=100.0):
+            first_actions = asyncio.run(plugin.on_meshtastic_message(first_event, context))
+        with patch("meshgram.plugins.ping_pong.time.monotonic", return_value=101.0):
+            later_actions = asyncio.run(plugin.on_meshtastic_message(later_event, context))
+
+        self.assertEqual(len(first_actions), 1)
+        self.assertEqual(len(later_actions), 1)
+
+    def test_duplicate_keyword_after_dedupe_window_is_allowed_when_sender_keyword_mode_enabled(self):
+        plugin = PingPongPlugin(
+            {
+                "response_text": "Pong",
+                "response_dedupe_mode": "sender_keyword_window",
+                "response_dedupe_ttl_seconds": 6,
+            }
+        )
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
@@ -245,11 +293,17 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(len(first_actions), 1)
         self.assertEqual(len(later_actions), 1)
 
-    def test_nearby_node_retry_within_default_ttl_is_suppressed(self):
+    def test_nearby_node_retry_within_default_ttl_is_suppressed_when_sender_keyword_mode_enabled(self):
         # A 0-hop (nearby) sender may re-originate the same ping with a fresh packet_id
-        # a few seconds later (Meshtastic retry before relay confirmation). The default
-        # 30-second TTL must cover this window so only one Pong is sent.
-        plugin = PingPongPlugin({"response_text": "Pong"})
+        # a few seconds later (Meshtastic retry before relay confirmation). In
+        # sender_keyword_window mode, the default 30-second TTL covers this
+        # window so only one Pong is sent.
+        plugin = PingPongPlugin(
+            {
+                "response_text": "Pong",
+                "response_dedupe_mode": "sender_keyword_window",
+            }
+        )
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
@@ -287,7 +341,13 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(retry_actions, [])
 
     def test_duplicate_keyword_is_deduped_when_sender_identity_changes_representation(self):
-        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6})
+        plugin = PingPongPlugin(
+            {
+                "response_text": "Pong",
+                "response_dedupe_mode": "sender_keyword_window",
+                "response_dedupe_ttl_seconds": 6,
+            }
+        )
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,
@@ -386,7 +446,14 @@ class PingPongPluginTests(unittest.TestCase):
         self.assertEqual(actions, [])
 
     def test_duplicate_keyword_from_same_sender_on_different_channels_is_deduped(self):
-        plugin = PingPongPlugin({"response_text": "Pong", "response_dedupe_ttl_seconds": 6, "channels": [0, 1]})
+        plugin = PingPongPlugin(
+            {
+                "response_text": "Pong",
+                "response_dedupe_mode": "sender_keyword_window",
+                "response_dedupe_ttl_seconds": 6,
+                "channels": [0, 1],
+            }
+        )
         context = PluginContext(
             settings=self.settings,
             telegram_group_id=self.settings.telegram_group_id,

@@ -26,6 +26,10 @@ meshcore:
   bridge_channel: 0
   # Map pubkey prefix → display name (similar to meshtastic.node_name_overrides):
   contact_name_overrides: {}
+  # Optional fallback for identity-less channel echoes. Keep disabled unless
+  # your MeshCore feed omits sender identity and you observe self-echo loops.
+  outbound_echo_text_fallback_enabled: false
+  outbound_echo_text_fallback_ttl_seconds: 2.0
   connection:
     mode: serial               # serial | tcp | ble
     serial_device: /dev/ttyUSB0
@@ -72,6 +76,9 @@ plugins:
       keyword_responses:
         Ping: "Pong"
         Ack: "Ack"
+      # packet_id_only (default): respond to each distinct message ID.
+      # sender_keyword_window: also suppress repeated keyword pings per sender.
+      response_dedupe_mode: packet_id_only
       channels: [0, 1]
 
   - name: dm_http_command

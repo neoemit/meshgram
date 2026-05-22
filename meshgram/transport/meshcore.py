@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_MESHCORE_PAYLOAD_LIMIT = 140
-OUTBOUND_ECHO_DEDUPE_TTL_SECONDS = 30.0
+DEFAULT_OUTBOUND_ECHO_TEXT_FALLBACK_TTL_SECONDS = 2.0
 
 
 class MeshCoreTransport(MeshTransport):
@@ -42,8 +42,8 @@ class MeshCoreTransport(MeshTransport):
         self._contacts: dict[str, dict[str, Any]] = {}
         self._subscriptions: list[Any] = []
         self.local_short_name: Optional[str] = None
-        # text → monotonic-time-sent, used to suppress radio echoes of our own
-        # outbound channel messages within ``OUTBOUND_ECHO_DEDUPE_TTL_SECONDS``.
+        # Optional fallback cache for identity-less echoes:
+        # (channel, text) -> monotonic-time-sent.
         self._recent_outbound_texts: dict[tuple[int, str], float] = {}
 
     # --- Lifecycle ----------------------------------------------------------
@@ -153,6 +153,8 @@ class MeshCoreTransport(MeshTransport):
                         self._loop.create_task(coro)
         self._mc = None
         self.local_node_id = None
+        self.local_short_name = None
+        self._recent_outbound_texts.clear()
 
     def close(self) -> None:
         self.invalidate_connection()
@@ -252,8 +254,22 @@ class MeshCoreTransport(MeshTransport):
             sender_label = self._channel_sender_label(body, channel_index)
         timestamp = payload.get("sender_timestamp") or payload.get("timestamp")
 
-        if self._is_local_echo(channel_index, embedded_sender, body):
-            LOGGER.debug("Suppressing MeshCore channel echo of our own transmission: %r", raw_text[:80])
+        echo_reason = self._local_echo_reason(
+            channel_index=channel_index,
+            sender_pubkey_prefix=pubkey_prefix or None,
+            embedded_sender=embedded_sender,
+            body=body,
+        )
+        if echo_reason is not None:
+            LOGGER.debug(
+                "Suppressing MeshCore channel echo of our own transmission: "
+                "reason=%s channel=%s pubkey_prefix=%s sender=%r text=%r",
+                echo_reason,
+                channel_index,
+                pubkey_prefix or None,
+                embedded_sender,
+                raw_text[:80],
+            )
             return
 
         LOGGER.info(
@@ -352,36 +368,98 @@ class MeshCoreTransport(MeshTransport):
         return {"id": packet_id}
 
     def _record_outbound_text(self, channel_index: int, text: str) -> None:
+        if not self._outbound_echo_text_fallback_enabled():
+            return
+
+        normalized_text = text.strip()
+        if not normalized_text:
+            return
+
         now = time.monotonic()
         self._prune_outbound_cache(now)
-        self._recent_outbound_texts[(channel_index, text.strip())] = now
+        self._recent_outbound_texts[(channel_index, normalized_text)] = now
 
     def _prune_outbound_cache(self, now: float) -> None:
-        cutoff = now - OUTBOUND_ECHO_DEDUPE_TTL_SECONDS
+        ttl_seconds = self._outbound_echo_text_fallback_ttl_seconds()
+        if ttl_seconds <= 0:
+            self._recent_outbound_texts.clear()
+            return
+
+        cutoff = now - ttl_seconds
         stale = [key for key, ts in self._recent_outbound_texts.items() if ts < cutoff]
         for key in stale:
             self._recent_outbound_texts.pop(key, None)
 
-    def _is_local_echo(self, channel_index: int, embedded_sender: Optional[str], body: str) -> bool:
-        # 1) Body match against recent outbound text (most reliable).
-        self._prune_outbound_cache(time.monotonic())
-        if (channel_index, body.strip()) in self._recent_outbound_texts:
-            return True
+    def _local_echo_reason(
+        self,
+        *,
+        channel_index: int,
+        sender_pubkey_prefix: Optional[str],
+        embedded_sender: Optional[str],
+        body: str,
+    ) -> Optional[str]:
+        normalized_local_node_id = self._normalize_pubkey_prefix(self.local_node_id)
+        normalized_sender_pubkey = self._normalize_pubkey_prefix(sender_pubkey_prefix)
+        if (
+            normalized_local_node_id is not None
+            and normalized_sender_pubkey is not None
+            and (
+                normalized_sender_pubkey.startswith(normalized_local_node_id)
+                or normalized_local_node_id.startswith(normalized_sender_pubkey)
+            )
+        ):
+            return "local_pubkey_prefix"
 
-        # 2) Sender name match against our local short_name, ignoring trust/role markers.
-        if embedded_sender and self.local_short_name:
-            stripped_sender = embedded_sender.split("•", 1)[0].strip().lower()
-            if stripped_sender and stripped_sender == self.local_short_name.lower():
-                return True
+        normalized_embedded_sender = self._normalize_embedded_sender(embedded_sender)
+        if normalized_embedded_sender and self.local_short_name:
+            local_short_name = self.local_short_name.strip().lower()
+            if local_short_name and normalized_embedded_sender == local_short_name:
+                return "local_short_name"
 
-        # 3) Sender prefix match against local pubkey (rare on channels, defensive).
-        if embedded_sender and self.local_node_id:
-            sender_low = embedded_sender.lower()
-            node_low = self.local_node_id.lower()
-            if sender_low == node_low or sender_low == node_low[:12]:
-                return True
+        if (
+            normalized_embedded_sender is not None
+            and normalized_local_node_id is not None
+            and (
+                normalized_embedded_sender == normalized_local_node_id
+                or normalized_embedded_sender == normalized_local_node_id[:12]
+            )
+        ):
+            return "embedded_pubkey_prefix"
 
-        return False
+        if self._outbound_echo_text_fallback_enabled():
+            self._prune_outbound_cache(time.monotonic())
+            if (channel_index, body.strip()) in self._recent_outbound_texts:
+                return "text_fallback"
+
+        return None
+
+    def _outbound_echo_text_fallback_enabled(self) -> bool:
+        return bool(self.settings.meshcore.outbound_echo_text_fallback_enabled)
+
+    def _outbound_echo_text_fallback_ttl_seconds(self) -> float:
+        raw = self.settings.meshcore.outbound_echo_text_fallback_ttl_seconds
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_OUTBOUND_ECHO_TEXT_FALLBACK_TTL_SECONDS
+
+    @staticmethod
+    def _normalize_pubkey_prefix(value: object) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        if normalized.startswith("!"):
+            normalized = normalized[1:]
+        if normalized.startswith("0x"):
+            normalized = normalized[2:]
+        return normalized or None
+
+    @staticmethod
+    def _normalize_embedded_sender(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.split("•", 1)[0].strip().lower()
+        return normalized or None
 
     async def asend_reaction(self, action: SendMeshReactionAction) -> object:
         LOGGER.debug(

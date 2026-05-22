@@ -49,6 +49,8 @@ class MeshCoreConnectionConfig:
 class MeshCoreConfig:
     bridge_channel: int = 0
     contact_name_overrides: dict[str, str] = field(default_factory=dict)
+    outbound_echo_text_fallback_enabled: bool = False
+    outbound_echo_text_fallback_ttl_seconds: float = 2.0
     connection: MeshCoreConnectionConfig = field(default_factory=MeshCoreConnectionConfig)
 
 
@@ -290,6 +292,14 @@ def _build_meshcore_config(
     return MeshCoreConfig(
         bridge_channel=_as_int(meshcore_data.get("bridge_channel"), 0),
         contact_name_overrides=_as_string_dict(meshcore_data.get("contact_name_overrides")),
+        outbound_echo_text_fallback_enabled=_as_bool(
+            meshcore_data.get("outbound_echo_text_fallback_enabled"),
+            False,
+        ),
+        outbound_echo_text_fallback_ttl_seconds=max(
+            0.0,
+            _as_float(meshcore_data.get("outbound_echo_text_fallback_ttl_seconds"), 2.0),
+        ),
         connection=MeshCoreConnectionConfig(
             mode=effective_mode,
             serial_device=serial_device,
