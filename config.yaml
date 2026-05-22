@@ -72,7 +72,7 @@ plugins:
       keyword_responses:
         Ping: "Pong"
         Ack: "Ack"
-      channels: [0, 1]
+      channels: [1, 2]
 
   - name: dm_http_command
     enabled: false
