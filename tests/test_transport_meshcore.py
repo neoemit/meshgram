@@ -186,6 +186,92 @@ class MeshCoreTransportTests(unittest.TestCase):
         self.assertEqual(received[0].text, "hi")
         self.assertEqual(received[0].channel_index, 1)
 
+    def test_inbound_channel_message_with_local_pubkey_is_suppressed(self):
+        received: list = []
+
+        async def collector(event):
+            received.append(event)
+
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            channel_callback = next(
+                cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
+            )
+            event = self._stub_event(
+                self._event_cls.CHANNEL_MSG_RECV,
+                {
+                    "text": "me: hi",
+                    "channel_idx": 1,
+                    "pubkey_prefix": "deadbeefdeadbe",
+                },
+            )
+            loop.run_until_complete(channel_callback(event))
+        finally:
+            loop.close()
+
+        self.assertEqual(received, [])
+
+    def test_inbound_channel_message_same_text_from_non_local_sender_is_not_suppressed_by_default(self):
+        received: list = []
+
+        async def collector(event):
+            received.append(event)
+
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            loop.run_until_complete(transport.asend_text(SendMeshAction(text="status", channel_index=1)))
+            channel_callback = next(
+                cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
+            )
+            event = self._stub_event(
+                self._event_cls.CHANNEL_MSG_RECV,
+                {
+                    "text": "relay: status",
+                    "channel_idx": 1,
+                    "pubkey_prefix": "cafebabecafe",
+                },
+            )
+            loop.run_until_complete(channel_callback(event))
+        finally:
+            loop.close()
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].text, "status")
+        self.assertEqual(received[0].from_id, "cafebabecafe")
+
+    def test_outbound_text_fallback_can_be_enabled_for_identity_less_echoes(self):
+        received: list = []
+
+        async def collector(event):
+            received.append(event)
+
+        self.settings.meshcore.outbound_echo_text_fallback_enabled = True
+        self.settings.meshcore.outbound_echo_text_fallback_ttl_seconds = 10.0
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            loop.run_until_complete(transport.asend_text(SendMeshAction(text="status", channel_index=1)))
+            channel_callback = next(
+                cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
+            )
+            event = self._stub_event(
+                self._event_cls.CHANNEL_MSG_RECV,
+                {
+                    "text": "status",
+                    "channel_idx": 1,
+                },
+            )
+            loop.run_until_complete(channel_callback(event))
+        finally:
+            loop.close()
+
+        self.assertEqual(received, [])
+
     def test_backend_capabilities(self):
         transport = self._make_transport()
         self.assertEqual(transport.backend_name, "meshcore")

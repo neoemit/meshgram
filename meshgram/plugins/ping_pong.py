@@ -16,6 +16,9 @@ class PingPongPlugin(BasePlugin):
     name = "ping_pong"
     DEFAULT_RESPONSE_DEDUPE_TTL_SECONDS = 30.0
     DEFAULT_MESSAGE_DEDUPE_TTL_SECONDS = 60.0 * 60.0
+    RESPONSE_DEDUPE_MODE_PACKET_ID_ONLY = "packet_id_only"
+    RESPONSE_DEDUPE_MODE_SENDER_KEYWORD_WINDOW = "sender_keyword_window"
+    DEFAULT_RESPONSE_DEDUPE_MODE = RESPONSE_DEDUPE_MODE_PACKET_ID_ONLY
 
     def __init__(self, settings: dict | None = None):
         super().__init__(settings)
@@ -88,6 +91,20 @@ class PingPongPlugin(BasePlugin):
             return max(0.0, float(raw))
         except (TypeError, ValueError):
             return self.DEFAULT_MESSAGE_DEDUPE_TTL_SECONDS
+
+    def _response_dedupe_mode(self) -> str:
+        raw = str(
+            self.settings.get(
+                "response_dedupe_mode",
+                self.DEFAULT_RESPONSE_DEDUPE_MODE,
+            )
+        ).strip().lower()
+        if raw in {
+            self.RESPONSE_DEDUPE_MODE_PACKET_ID_ONLY,
+            self.RESPONSE_DEDUPE_MODE_SENDER_KEYWORD_WINDOW,
+        }:
+            return raw
+        return self.DEFAULT_RESPONSE_DEDUPE_MODE
 
     def _sender_identity(self, event: MeshTextEvent) -> str:
         raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
@@ -237,8 +254,9 @@ class PingPongPlugin(BasePlugin):
         if self._is_duplicate_responded_packet_id(event, keyword):
             return []
 
-        if self._is_duplicate_recent_keyword(event, keyword):
-            return []
+        if self._response_dedupe_mode() == self.RESPONSE_DEDUPE_MODE_SENDER_KEYWORD_WINDOW:
+            if self._is_duplicate_recent_keyword(event, keyword):
+                return []
 
         LOGGER.info(
             "PingPong sending keyword response: keyword=%s packet_id=%s from_id=%s sender_label=%s channel=%s",
