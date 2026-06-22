@@ -379,6 +379,29 @@ Settings:
     response_dedupe_ttl_seconds: 30             # used by sender_keyword_window mode
 ```
 
+### `trace_me` — MeshCore route trace responder
+
+MeshCore only. Replies to an exact channel message like `Trace` with the path hashes of repeaters that forwarded that message before it reached Meshgram:
+
+```text
+ff,2e,02 (3 hops)
+```
+
+```yaml
+- name: trace_me              # `trace-me` is also accepted as an alias
+  enabled: true
+  settings:
+    keywords: ["trace"]
+    response_channel: same     # or a concrete MeshCore channel index, e.g. 0
+    # channels: [0]            # optional incoming-channel allowlist
+```
+
+Notes:
+
+- This plugin is ignored unless `mesh.backend: meshcore` / `MESH_BACKEND=meshcore`.
+- MeshCore receive frames expose hop count metadata; repeater hash lists depend on MeshCore channel-log path enrichment. When hashes are unavailable, the bot replies with the known hop count and `repeater list unavailable`.
+- Path hashes are displayed in MeshCore's reported order and split according to path hash mode (1-, 2-, or 3-byte hashes).
+
 ### `dm_http_command` — DM → HTTP → DM reply
 
 A node sends a single-word DM (e.g. `BATTERY`), the plugin fetches a configured HTTP endpoint, extracts a value, and DMs the formatted result back.
@@ -426,7 +449,7 @@ Everything else (channel routing, chunking, plugins, sender labels via `contact_
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library.
+Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library.
 
 ---
 

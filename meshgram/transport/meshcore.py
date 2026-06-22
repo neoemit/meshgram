@@ -117,6 +117,8 @@ class MeshCoreTransport(MeshTransport):
             self._mc = None
             raise RuntimeError(handshake_hint)
 
+        self._enable_channel_log_path_enrichment()
+
         await self._refresh_local_node_async()
         await self._refresh_contacts_async()
 
@@ -158,6 +160,19 @@ class MeshCoreTransport(MeshTransport):
 
     def close(self) -> None:
         self.invalidate_connection()
+
+    def _enable_channel_log_path_enrichment(self) -> None:
+        set_decrypt_channel_logs = getattr(self._mc, "set_decrypt_channel_logs", None)
+        if not callable(set_decrypt_channel_logs):
+            LOGGER.debug("MeshCore SDK does not expose channel-log path enrichment")
+            return
+
+        try:
+            set_decrypt_channel_logs(True)
+        except Exception as exc:  # pragma: no cover - defensive for SDK/device quirks
+            LOGGER.warning("MeshCore channel-log path enrichment could not be enabled: %s", exc)
+        else:
+            LOGGER.info("MeshCore channel-log path enrichment enabled")
 
     def refresh_local_node_id(self) -> None:
         # Sync-callable shim from app; the real refresh is async and runs at connect.

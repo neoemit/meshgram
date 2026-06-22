@@ -51,6 +51,7 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
             self.self_info = {"public_key": "deadbeefdeadbeef0000"}
             self.is_connected = True
             self._auto_fetching = False
+            self.decrypt_channel_logs_enabled = False
             self.subscribed: list[tuple[str, Any]] = []
 
         @classmethod
@@ -81,6 +82,9 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
 
         async def disconnect(self):
             self.is_connected = False
+
+        def set_decrypt_channel_logs(self, value):
+            self.decrypt_channel_logs_enabled = bool(value)
 
         async def wait_for_event(self, event_type, attribute_filters=None, timeout=None):
             return _Event(_EventType.ACK, {"code": (attribute_filters or {}).get("code", "")})
@@ -277,6 +281,49 @@ class MeshCoreTransportTests(unittest.TestCase):
         self.assertEqual(transport.backend_name, "meshcore")
         self.assertFalse(transport.supports_reactions)
         self.assertFalse(transport.supports_reply_threading)
+
+    def test_connect_enables_channel_log_path_enrichment_when_supported(self):
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            self.assertTrue(transport._mc.decrypt_channel_logs_enabled)
+        finally:
+            loop.close()
+
+    def test_inbound_channel_message_preserves_path_metadata(self):
+        received: list = []
+
+        async def collector(event):
+            received.append(event)
+
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            channel_callback = next(
+                cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
+            )
+            event = self._stub_event(
+                self._event_cls.CHANNEL_MSG_RECV,
+                {
+                    "text": "alice: Trace",
+                    "channel_idx": 1,
+                    "pubkey_prefix": "cafebabecafe",
+                    "path_len": 3,
+                    "path_hash_mode": 0,
+                    "path": "ff2e02",
+                },
+            )
+            loop.run_until_complete(channel_callback(event))
+        finally:
+            loop.close()
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].text, "Trace")
+        self.assertEqual(received[0].raw_packet["path"], "ff2e02")
+        self.assertEqual(received[0].raw_packet["path_len"], 3)
+        self.assertEqual(received[0].raw_packet["path_hash_mode"], 0)
 
     def _stub_event(self, event_type, payload):
         from meshcore import EventType  # noqa: F401 — ensures stub is active

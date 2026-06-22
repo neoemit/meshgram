@@ -22,6 +22,8 @@ BUILTIN_PLUGINS: dict[str, str] = {
     "bridge": "meshgram.plugins.bridge:BridgePlugin",
     "ping_pong": "meshgram.plugins.ping_pong:PingPongPlugin",
     "dm_http_command": "meshgram.plugins.dm_http_command:DirectMessageHttpCommandPlugin",
+    "trace_me": "meshgram.plugins.trace_me:TraceMePlugin",
+    "trace-me": "meshgram.plugins.trace_me:TraceMePlugin",
 }
 
 

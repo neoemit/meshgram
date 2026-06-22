@@ -81,6 +81,16 @@ plugins:
       response_dedupe_mode: packet_id_only
       channels: [1, 2]
 
+  - name: trace_me  # "trace-me" also works
+    enabled: false
+    settings:
+      # MeshCore only. Reply when a MeshCore channel message is exactly "trace".
+      keywords: ["trace"]
+      # Omit or set to "same" to reply on the incoming MeshCore channel.
+      response_channel: same
+      # Optional allowlist of incoming MeshCore channels that can trigger trace responses.
+      # channels: [0]
+
   - name: dm_http_command
     enabled: false
     settings:
