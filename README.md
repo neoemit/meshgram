@@ -399,7 +399,7 @@ ff,2e,02 (3 hops)
 Notes:
 
 - This plugin is ignored unless `mesh.backend: meshcore` / `MESH_BACKEND=meshcore`.
-- MeshCore receive frames expose hop count metadata; repeater hash lists depend on MeshCore channel-log path enrichment. When hashes are unavailable, the bot replies with the known hop count and `repeater list unavailable`.
+- MeshCore receive frames expose hop count metadata; repeater hash lists depend on MeshCore channel-log path enrichment. Meshgram enables channel-log decoding and refreshes channel metadata at startup so `meshcore_py` can correlate RF logs with received channel messages. When hashes are unavailable, the bot replies with the known hop count and `repeater list unavailable`.
 - Path hashes are displayed in MeshCore's reported order and split according to path hash mode (1-, 2-, or 3-byte hashes).
 
 ### `dm_http_command` — DM → HTTP → DM reply

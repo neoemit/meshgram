@@ -23,6 +23,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_MESHCORE_PAYLOAD_LIMIT = 140
 DEFAULT_OUTBOUND_ECHO_TEXT_FALLBACK_TTL_SECONDS = 2.0
+MESHCORE_CHANNEL_INDEX_RANGE = range(8)
 
 
 class MeshCoreTransport(MeshTransport):
@@ -120,6 +121,7 @@ class MeshCoreTransport(MeshTransport):
         self._enable_channel_log_path_enrichment()
 
         await self._refresh_local_node_async()
+        await self._refresh_channels_async()
         await self._refresh_contacts_async()
 
         self._subscriptions.append(
@@ -191,6 +193,37 @@ class MeshCoreTransport(MeshTransport):
                 if isinstance(value, str) and value.strip():
                     self.local_short_name = value.strip()
                     break
+
+    async def _refresh_channels_async(self) -> None:
+        """Load MeshCore channel secrets so RF logs can be matched to channel messages.
+
+        meshcore_py can only add the repeater hash path to CHANNEL_MSG_RECV
+        events after it has channel information in its packet parser. The
+        companion receive frame itself exposes only the hop count; the full path
+        comes from decrypting correlated RF LOG_DATA entries.
+        """
+        get_channel: Any = getattr(getattr(self._mc, "commands", None), "get_channel", None)
+        if not callable(get_channel):
+            LOGGER.debug("MeshCore SDK does not expose get_channel; path hashes may be unavailable")
+            return
+
+        from meshcore import EventType  # type: ignore[attr-defined]
+
+        loaded = 0
+        for channel_index in MESHCORE_CHANNEL_INDEX_RANGE:
+            try:
+                result = await get_channel(channel_index)
+            except Exception as exc:
+                LOGGER.debug("MeshCore get_channel(%s) failed: %s", channel_index, exc)
+                continue
+
+            if getattr(result, "type", None) == EventType.ERROR:
+                LOGGER.debug("MeshCore get_channel(%s) returned error: %s", channel_index, result.payload)
+                continue
+            if getattr(result, "type", None) is not None:
+                loaded += 1
+
+        LOGGER.info("MeshCore channel metadata refreshed for path enrichment (channels=%s)", loaded)
 
     async def _refresh_contacts_async(self) -> None:
         try:

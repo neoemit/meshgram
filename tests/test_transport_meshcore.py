@@ -24,6 +24,7 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
         CHANNEL_MSG_RECV = "CHANNEL_MSG_RECV"
         NEW_CONTACT = "NEW_CONTACT"
         CONTACTS = "CONTACTS"
+        CHANNEL_INFO = "CHANNEL_INFO"
 
     class _Event:
         def __init__(self, type_: str, payload: Any):
@@ -33,6 +34,7 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
     class _Commands:
         def __init__(self, sink: list[dict[str, Any]]):
             self._sink = sink
+            self.channel_requests: list[int] = []
 
         async def send_msg(self, dst: Any, msg: str, timestamp: Any = None) -> _Event:
             self._sink.append({"kind": "dm", "dst": dst, "msg": msg})
@@ -44,6 +46,10 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
 
         async def get_contacts(self, lastmod: int = 0) -> _Event:
             return _Event(_EventType.CONTACTS, {"deadbeefdeadbeef": {"adv_name": "Alice", "public_key": "deadbeefdeadbeef"}})
+
+        async def get_channel(self, channel_idx: int) -> _Event:
+            self.channel_requests.append(channel_idx)
+            return _Event(_EventType.CHANNEL_INFO, {"channel_idx": channel_idx, "channel_name": f"ch{channel_idx}"})
 
     class _MeshCore:
         def __init__(self):
@@ -288,6 +294,15 @@ class MeshCoreTransportTests(unittest.TestCase):
         try:
             loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
             self.assertTrue(transport._mc.decrypt_channel_logs_enabled)
+        finally:
+            loop.close()
+
+    def test_connect_fetches_channel_info_for_log_path_enrichment(self):
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            self.assertEqual(transport._mc.commands.channel_requests, list(range(8)))
         finally:
             loop.close()
 
