@@ -33,6 +33,7 @@ from ._mesh_helpers import (
 )
 from .config import MESHTASTIC_BACKEND, MeshgramSettings, load_settings
 from .plugin import LoadedPlugin, load_plugins
+from .plugins.bridge import validate_bridge_channel_mappings
 from .reply_links import ReplyLinkRegistry
 from .transport import MeshTransport, create_transport
 from .types import (
@@ -67,6 +68,7 @@ class MeshgramApp:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.bot_app: Optional[Application] = None
         self.mesh: MeshTransport = create_transport(settings)
+        validate_bridge_channel_mappings(settings.plugins, settings)
         self.plugins: list[LoadedPlugin] = load_plugins(settings.plugins)
         self.reply_links = ReplyLinkRegistry(
             ttl_hours=_get_bridge_reply_ttl_hours(settings),
@@ -901,19 +903,27 @@ def _extract_telegram_message_id(sent_message: Any) -> Optional[int]:
 
 
 def _get_bridge_reply_ttl_hours(settings: MeshgramSettings) -> int:
+    # NOTE: with multiple bridge instances (1:1 channel-mapping deployments),
+    # ReplyLinkRegistry is still a single app-wide instance (app.py:__init__),
+    # so a single TTL has to be picked for all mappings. We take the max
+    # across all enabled bridge instances rather than "first configured wins"
+    # so no instance's configured retention is silently ignored/shortened.
     default_ttl_hours = 24
+    configured_ttl_hours: list[int] = []
 
     for plugin in settings.plugins:
-        if plugin.name != "bridge":
+        if plugin.name != "bridge" or not plugin.enabled:
             continue
 
         value = plugin.settings.get("reply_link_ttl_hours", default_ttl_hours)
         ttl_hours = extract_optional_int(value)
         if ttl_hours is None or ttl_hours <= 0:
-            return default_ttl_hours
-        return ttl_hours
+            continue
+        configured_ttl_hours.append(ttl_hours)
 
-    return default_ttl_hours
+    if not configured_ttl_hours:
+        return default_ttl_hours
+    return max(configured_ttl_hours)
 
 
 def main() -> None:

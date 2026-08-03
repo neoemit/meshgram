@@ -530,5 +530,91 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(attempt_counter["count"], 2)
 
 
+class BridgeChannelMappingIntegrationTests(unittest.TestCase):
+    """App-level wiring: startup validation and shared reply-link TTL across
+    multiple 1:1-mapped bridge instances.
+
+    NOTE: not executable in an environment without python-telegram-bot
+    installed (meshgram.app imports it at module load time) — run locally via
+    `.venv/bin/python -m unittest tests.test_runtime_integration -v` to confirm.
+    """
+
+    def _settings(self, plugins):
+        settings = MeshgramSettings(
+            telegram_bot_token="token",
+            telegram_group_id=-999,
+            config_path="config.yaml",
+            plugins=plugins,
+        )
+        settings.meshtastic.bridge_channel = 0
+        return settings
+
+    def test_app_construction_raises_on_duplicate_channel_mapping(self):
+        settings = self._settings(
+            [
+                PluginConfig(name="bridge", enabled=True, settings={"telegram_chat_id": -111, "channel": 0}),
+                PluginConfig(name="bridge", enabled=True, settings={"telegram_chat_id": -222, "channel": 0}),
+            ]
+        )
+        with self.assertRaises(ValueError):
+            MeshgramApp(settings)
+
+    def test_app_construction_raises_on_duplicate_chat_id_mapping(self):
+        settings = self._settings(
+            [
+                PluginConfig(name="bridge", enabled=True, settings={"telegram_chat_id": -111, "channel": 0}),
+                PluginConfig(name="bridge", enabled=True, settings={"telegram_chat_id": -111, "channel": 3}),
+            ]
+        )
+        with self.assertRaises(ValueError):
+            MeshgramApp(settings)
+
+    def test_app_construction_succeeds_for_valid_1_to_1_mapping(self):
+        settings = self._settings(
+            [
+                PluginConfig(name="bridge", enabled=True, settings={"telegram_chat_id": -111, "channel": 0}),
+                PluginConfig(name="bridge", enabled=True, settings={"telegram_chat_id": -222, "channel": 3}),
+            ]
+        )
+        app = MeshgramApp(settings)
+        self.assertEqual(len(app.plugins), 2)
+
+    def test_reply_link_ttl_uses_max_across_bridge_instances(self):
+        settings = self._settings(
+            [
+                PluginConfig(
+                    name="bridge",
+                    enabled=True,
+                    settings={"telegram_chat_id": -111, "channel": 0, "reply_link_ttl_hours": 6},
+                ),
+                PluginConfig(
+                    name="bridge",
+                    enabled=True,
+                    settings={"telegram_chat_id": -222, "channel": 3, "reply_link_ttl_hours": 48},
+                ),
+            ]
+        )
+        app = MeshgramApp(settings)
+        self.assertEqual(app.reply_links.ttl_seconds, 48 * 60 * 60)
+
+    def test_reply_link_ttl_ignores_disabled_bridge_instance(self):
+        settings = self._settings(
+            [
+                PluginConfig(
+                    name="bridge",
+                    enabled=True,
+                    settings={"telegram_chat_id": -111, "channel": 0, "reply_link_ttl_hours": 6},
+                ),
+                PluginConfig(
+                    name="bridge",
+                    enabled=False,
+                    settings={"telegram_chat_id": -222, "channel": 3, "reply_link_ttl_hours": 999},
+                ),
+            ]
+        )
+        app = MeshgramApp(settings)
+        self.assertEqual(app.reply_links.ttl_seconds, 6 * 60 * 60)
+
+
 if __name__ == "__main__":
     unittest.main()

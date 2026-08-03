@@ -64,7 +64,7 @@ The bridge relays messages, replies (Meshtastic only), and emoji reactions (Mesh
 Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshtasticAction`, `SendMeshtasticReactionAction`). New plugins are registered in `BUILTIN_PLUGINS` and enabled via `config.yaml`.
 
 **Built-in plugins:**
-- `plugins/bridge.py` — core relay with reply linking and reaction sync
+- `plugins/bridge.py` — core relay with reply linking and reaction sync. Supports multiple Telegram chat ↔ mesh channel pairs: declare several `- name: bridge` entries in `config.yaml`, each with its own `telegram_chat_id`/`channel` settings. Mappings are validated at startup (`validate_bridge_channel_mappings`) to enforce a strict 1:1 chat↔channel relationship — a duplicate `telegram_chat_id` or `channel` across enabled bridge instances raises `ValueError` before the app starts. Omitting `telegram_chat_id` on an instance falls back to `TELEGRAM_GROUP_ID`, preserving single-chat behavior.
 - `plugins/ping_pong.py` — keyword-response automation with dedupe and channel filtering
 - `plugins/dm_http_command.py` — DMs that invoke HTTP endpoints and return formatted responses
 
