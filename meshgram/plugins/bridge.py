@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from meshgram.config import MESHCORE_BACKEND
+from meshgram.config import MESHCORE_BACKEND, MeshgramSettings, PluginConfig
 from meshgram.plugin import BasePlugin
 from meshgram.text_utils import split_for_meshtastic, utf8_len
 from meshgram.types import (
@@ -32,18 +32,10 @@ class BridgePlugin(BasePlugin):
     DEFAULT_SAFE_MAX_CHUNK_BYTES = 160
 
     def _bridge_channel(self, context: PluginContext) -> int:
-        configured_channel = self.settings.get("channel")
-        if configured_channel is not None:
-            try:
-                return int(configured_channel)
-            except (TypeError, ValueError):
-                LOGGER.warning(
-                    "bridge.settings.channel must be an integer; falling back to active backend's bridge_channel"
-                )
+        return _resolve_effective_channel(self.settings, context.settings)
 
-        if context.settings.mesh.backend == MESHCORE_BACKEND:
-            return context.settings.meshcore.bridge_channel
-        return context.settings.meshtastic.bridge_channel
+    def _telegram_chat_id(self, context: PluginContext) -> int:
+        return _resolve_effective_chat_id(self.settings, context.settings)
 
     async def on_mesh_message(
         self,
@@ -61,10 +53,12 @@ class BridgePlugin(BasePlugin):
         if not text:
             return []
 
+        telegram_chat_id = self._telegram_chat_id(context)
+
         telegram_reply_to_message_id = None
         if event.reply_id is not None and context.reply_links is not None:
             telegram_reply_to_message_id = context.reply_links.get_telegram_for_meshtastic(
-                context.telegram_group_id,
+                telegram_chat_id,
                 event.reply_id,
             )
             if telegram_reply_to_message_id is None and self._should_emit_missing_target_fallback():
@@ -72,7 +66,7 @@ class BridgePlugin(BasePlugin):
 
         return [
             SendTelegramAction(
-                chat_id=context.telegram_group_id,
+                chat_id=telegram_chat_id,
                 text=f"[{event.sender_label}] {text}",
                 reply_to_message_id=telegram_reply_to_message_id,
                 bridge_source_meshtastic_packet_id=event.packet_id,
@@ -84,7 +78,7 @@ class BridgePlugin(BasePlugin):
         event: TelegramMessageEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
-        if event.chat_id != context.telegram_group_id:
+        if event.chat_id != self._telegram_chat_id(context):
             return []
 
         if event.is_from_bot:
@@ -236,7 +230,7 @@ class BridgePlugin(BasePlugin):
     ) -> list[PluginAction]:
         if not self._reactions_enabled():
             return []
-        if event.chat_id != context.telegram_group_id:
+        if event.chat_id != self._telegram_chat_id(context):
             return []
         if event.is_from_bot:
             return []
@@ -293,10 +287,12 @@ class BridgePlugin(BasePlugin):
         if context.local_node_id and event.from_id == context.local_node_id:
             return []
 
+        telegram_chat_id = self._telegram_chat_id(context)
+
         telegram_message_id = None
         if context.reply_links is not None:
             telegram_message_id = context.reply_links.get_telegram_for_meshtastic(
-                context.telegram_group_id,
+                telegram_chat_id,
                 event.target_packet_id,
             )
 
@@ -304,7 +300,7 @@ class BridgePlugin(BasePlugin):
             if self._should_emit_missing_target_fallback():
                 return [
                     SendTelegramAction(
-                        chat_id=context.telegram_group_id,
+                        chat_id=telegram_chat_id,
                         text=self._reaction_missing_notice(),
                     )
                 ]
@@ -312,7 +308,7 @@ class BridgePlugin(BasePlugin):
 
         return [
             SendTelegramReactionAction(
-                chat_id=context.telegram_group_id,
+                chat_id=telegram_chat_id,
                 message_id=telegram_message_id,
                 emoji=event.emoji,
             )
@@ -367,3 +363,89 @@ def _compact_display_name(sender_display_name: str) -> str:
 def _chunk_sequence_id(event: TelegramMessageEvent) -> str:
     random_suffix = uuid.uuid4().hex[:8]
     return f"tg-{event.chat_id}-{event.message_id}-{random_suffix}"
+
+
+def _resolve_effective_chat_id(plugin_settings: dict, settings: MeshgramSettings) -> int:
+    """Resolve the Telegram chat id a single BridgePlugin instance is bound to.
+
+    Falls back to the global ``telegram_group_id`` when the instance has no
+    explicit ``telegram_chat_id`` override, preserving today's single-chat
+    behavior for deployments that don't opt into multi-mapping.
+    """
+    raw = plugin_settings.get("telegram_chat_id")
+    if raw is None:
+        return settings.telegram_group_id
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "bridge.settings.telegram_chat_id must be an integer; falling back to telegram_group_id"
+        )
+        return settings.telegram_group_id
+
+
+def _resolve_effective_channel(plugin_settings: dict, settings: MeshgramSettings) -> int:
+    """Resolve the mesh channel a single BridgePlugin instance is bound to.
+
+    Falls back to the active backend's global ``bridge_channel`` when the
+    instance has no explicit ``channel`` override.
+    """
+    configured_channel = plugin_settings.get("channel")
+    if configured_channel is not None:
+        try:
+            return int(configured_channel)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "bridge.settings.channel must be an integer; falling back to active backend's bridge_channel"
+            )
+
+    if settings.mesh.backend == MESHCORE_BACKEND:
+        return settings.meshcore.bridge_channel
+    return settings.meshtastic.bridge_channel
+
+
+def validate_bridge_channel_mappings(
+    plugin_configs: list[PluginConfig],
+    settings: MeshgramSettings,
+) -> None:
+    """Fail fast on ambiguous bridge routing.
+
+    Enforces a strict 1:1 mapping across all *enabled* ``bridge`` plugin
+    instances configured in ``config.yaml``: no two instances may resolve to
+    the same effective ``telegram_chat_id``, and no two instances may resolve
+    to the same effective mesh ``channel`` (after applying each instance's own
+    overrides and falling back to the global defaults). Instances with no
+    explicit overrides count against the global defaults too, so a single
+    default bridge plus one more instance that doesn't override anything will
+    correctly collide.
+
+    Raises:
+        ValueError: on the first detected collision, naming both conflicting
+            plugin config indexes so the operator can find the offending
+            ``config.yaml`` entries.
+    """
+    seen_chat_ids: dict[int, int] = {}
+    seen_channels: dict[int, int] = {}
+
+    for index, plugin_config in enumerate(plugin_configs):
+        if plugin_config.name != "bridge" or not plugin_config.enabled:
+            continue
+
+        chat_id = _resolve_effective_chat_id(plugin_config.settings, settings)
+        channel = _resolve_effective_channel(plugin_config.settings, settings)
+
+        if chat_id in seen_chat_ids:
+            raise ValueError(
+                f"bridge plugin config #{index} reuses telegram_chat_id={chat_id}, "
+                f"already used by bridge plugin config #{seen_chat_ids[chat_id]}; "
+                "1:1 mapping requires each Telegram chat to map to exactly one mesh channel"
+            )
+        if channel in seen_channels:
+            raise ValueError(
+                f"bridge plugin config #{index} reuses mesh channel={channel}, "
+                f"already used by bridge plugin config #{seen_channels[channel]}; "
+                "1:1 mapping requires each mesh channel to map to exactly one Telegram chat"
+            )
+
+        seen_chat_ids[chat_id] = index
+        seen_channels[channel] = index
