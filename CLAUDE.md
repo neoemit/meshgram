@@ -60,6 +60,7 @@ The bridge relays messages, replies (Meshtastic only), and emoji reactions (Mesh
 `meshgram/plugin.py` defines `BasePlugin` with async hooks:
 - `on_telegram_message`, `on_meshtastic_message`
 - `on_telegram_reaction`, `on_meshtastic_reaction`
+- Optional lifecycle hooks: `on_startup`, `on_mesh_connected(transport, context)` (after every radio (re)connect), `on_shutdown`
 
 Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshtasticAction`, `SendMeshtasticReactionAction`). New plugins are registered in `BUILTIN_PLUGINS` and enabled via `config.yaml`.
 
@@ -67,6 +68,8 @@ Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshta
 - `plugins/bridge.py` — core relay with reply linking and reaction sync
 - `plugins/ping_pong.py` — keyword-response automation with dedupe and channel filtering
 - `plugins/dm_http_command.py` — DMs that invoke HTTP endpoints and return formatted responses
+- `plugins/trace_me.py` — MeshCore-only route trace responder
+- `plugins/meshmapper.py` — MeshCore-only MeshMapper observer: uploads every RX packet to MeshMapper's MQTT broker (paho-mqtt, device-signed JWT auth). Uses the optional `on_mesh_connected` / `on_shutdown` plugin hooks and `MeshCoreTransport.add_rx_log_listener()` instead of message hooks.
 
 ### Key modules
 

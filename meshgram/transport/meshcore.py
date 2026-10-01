@@ -6,7 +6,7 @@ import hashlib
 import logging
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from ..config import MeshgramSettings
 from ..types import (
@@ -19,6 +19,10 @@ from ..types import (
 from . import MeshReactionCallback, MeshTextCallback, MeshTransport
 
 LOGGER = logging.getLogger(__name__)
+
+# Receives the payload dict of every MeshCore RX_LOG_DATA event (raw RF packet
+# plus SNR/RSSI). Used by observer-style extensions such as MeshMapper uploads.
+RxLogListener = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 DEFAULT_MESHCORE_PAYLOAD_LIMIT = 140
@@ -46,6 +50,7 @@ class MeshCoreTransport(MeshTransport):
         # Optional fallback cache for identity-less echoes:
         # (channel, text) -> monotonic-time-sent.
         self._recent_outbound_texts: dict[tuple[int, str], float] = {}
+        self._rx_log_listeners: list[RxLogListener] = []
 
     # --- Lifecycle ----------------------------------------------------------
 
@@ -133,6 +138,11 @@ class MeshCoreTransport(MeshTransport):
         self._subscriptions.append(
             self._mc.subscribe(EventType.NEW_CONTACT, self._handle_new_contact)
         )
+        rx_log_event = getattr(EventType, "RX_LOG_DATA", None)
+        if rx_log_event is not None:
+            self._subscriptions.append(
+                self._mc.subscribe(rx_log_event, self._handle_rx_log)
+            )
 
         await self._mc.start_auto_message_fetching()
         LOGGER.info("MeshCore transport ready (local_node_id=%s, contacts=%s)", self.local_node_id, len(self._contacts))
@@ -251,7 +261,72 @@ class MeshCoreTransport(MeshTransport):
             return pubkey.hex()[:12]
         return None
 
+    # --- Device access for extensions ---------------------------------------
+
+    @property
+    def device_self_info(self) -> dict[str, Any]:
+        """SELF_INFO reported by the companion radio (name, public key, radio params)."""
+        info = getattr(self._mc, "self_info", None) if self._mc is not None else None
+        return dict(info) if isinstance(info, dict) else {}
+
+    def add_rx_log_listener(self, listener: RxLogListener) -> None:
+        """Register a callback for raw RF packet logs. Survives reconnects."""
+        if listener not in self._rx_log_listeners:
+            self._rx_log_listeners.append(listener)
+
+    def remove_rx_log_listener(self, listener: RxLogListener) -> None:
+        with contextlib.suppress(ValueError):
+            self._rx_log_listeners.remove(listener)
+
+    async def query_device_info(self) -> dict[str, Any]:
+        """Return the DEVICE_INFO payload (model, firmware version) or ``{}``."""
+        commands = getattr(self._mc, "commands", None)
+        send_device_query = getattr(commands, "send_device_query", None)
+        if not callable(send_device_query):
+            return {}
+
+        from meshcore import EventType
+
+        result = await send_device_query()
+        if getattr(result, "type", None) == EventType.ERROR:
+            return {}
+        payload = getattr(result, "payload", None)
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    async def sign_with_device(self, data: bytes) -> bytes:
+        """Sign ``data`` with the radio's identity key (Ed25519) without exporting it."""
+        if self._mc is None:
+            raise RuntimeError("MeshCore client is not connected")
+        sign = getattr(self._mc.commands, "sign", None)
+        if not callable(sign):
+            raise RuntimeError("Installed meshcore SDK does not support on-device signing")
+
+        from meshcore import EventType
+
+        result = await sign(data)
+        if getattr(result, "type", None) == EventType.ERROR:
+            raise RuntimeError(f"MeshCore on-device signing failed: {getattr(result, 'payload', None)}")
+        payload = getattr(result, "payload", None)
+        signature = payload.get("signature") if isinstance(payload, dict) else None
+        if isinstance(signature, str):
+            signature = bytes.fromhex(signature)
+        if not isinstance(signature, (bytes, bytearray)) or len(signature) != 64:
+            raise RuntimeError("MeshCore on-device signing returned no valid signature")
+        return bytes(signature)
+
     # --- Inbound event handlers --------------------------------------------
+
+    async def _handle_rx_log(self, event: Any) -> None:
+        if not self._rx_log_listeners:
+            return
+        payload = getattr(event, "payload", None)
+        if not isinstance(payload, dict):
+            return
+        for listener in list(self._rx_log_listeners):
+            try:
+                await listener(dict(payload))
+            except Exception:
+                LOGGER.exception("MeshCore RX log listener failed")
 
     async def _handle_contact_msg(self, event: Any) -> None:
         payload = getattr(event, "payload", {}) or {}

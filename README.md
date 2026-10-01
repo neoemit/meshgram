@@ -12,7 +12,8 @@ Supports both **Meshtastic** and **MeshCore** radios. Speaks serial, TCP, and BL
 - 🧵 Cross-platform reply linking (Meshtastic)
 - ❤️ Bidirectional emoji reaction sync for linked messages (Meshtastic)
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
-- 🧩 Plugin architecture (`bridge`, `ping_pong`, `dm_http_command`)
+- 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`)
+- 🗺️ Optional MeshMapper observer uploads over MQTT (MeshCore)
 - 🐳 First-class Docker deployment with platform-specific overlays
 - 🛠️ Linux `systemd` service templates included
 
@@ -258,6 +259,8 @@ If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `Environmen
 | `MESHGRAM_CONFIG_PATH` | — | `config.yaml` | Path to YAML config |
 | `LOG_LEVEL` | — | `INFO` | Python logging level |
 | `SOLAR_HOST` / `SOLAR_TOKEN` / `SOLAR_API_KEY` | — | — | Examples for `dm_http_command` URL/auth templating |
+| `MESHMAPPER_IATA` | — | from YAML | MeshMapper region code for the `meshmapper` plugin |
+| `MESHMAPPER_PRIVATE_KEY` | — | — | Optional MeshCore private key (128 hex chars) for `meshmapper` token signing |
 
 Env vars override YAML for the same field.
 
@@ -427,6 +430,61 @@ A node sends a single-word DM (e.g. `BATTERY`), the plugin fetches a configured 
 
 Env templating with `${VAR}` works in `url` and `headers`. Auth currently supports `bearer`.
 
+### `meshmapper` — MeshMapper observer (MQTT packet upload)
+
+MeshCore only. Turns the radio connected to Meshgram into a [MeshMapper](https://meshmapper.net) **observer**: every RF packet the radio hears is uploaded to MeshMapper's MQTT broker so it can be plotted on your region's coverage map. It uses the same broker, topics, payload format and authentication as the observer clients listed in the [MeshMapper MQTT guide](https://wiki.meshmapper.net/mqtt-main/) (meshcoretomqtt, MeshCore-HA, pyMC), so MeshMapper processes it like any other observer.
+
+The plugin runs alongside the bridge without affecting it: it only listens to the radio's raw RF log, sends nothing over the mesh or to Telegram, and if MeshMapper is unreachable the rest of Meshgram keeps working.
+
+**Setup**
+
+1. Find your **region code** on MeshMapper (usually a 3-letter IATA airport code such as `YOW`). It must match your MeshMapper region exactly, or the observer won't show up.
+2. Run Meshgram with the MeshCore backend (`mesh.backend: meshcore` or `MESH_BACKEND=meshcore`).
+3. Enable the plugin in `config.yaml`:
+
+   ```yaml
+   plugins:
+     # ...your other plugins...
+     - name: meshmapper
+       enabled: true
+       settings:
+         iata: "YOW"        # your MeshMapper region code (or set MESHMAPPER_IATA in .env)
+   ```
+
+4. Restart Meshgram. You should see `MeshMapper: connecting to mqtt.meshmapper.net:443 …` and then `MeshMapper: connected; publishing packets to meshcore/YOW/<PUBLIC_KEY>/packets` in the logs.
+5. Once the radio hears a packet, your node shows as **Online** with a MeshMapper broker badge under **Region → Observers** on the map.
+
+The defaults already point at MeshMapper's broker. Everything else is optional:
+
+| Setting | Default | Description |
+|---|---|---|
+| `iata` | — (**required**) | MeshMapper region code. `MESHMAPPER_IATA` overrides it. |
+| `server` / `port` | `mqtt.meshmapper.net` / `443` | MQTT broker. Use these for a regional broker your MeshMapper admin has set up. |
+| `transport` | `websockets` | `websockets` or `tcp` |
+| `websocket_path` | `/` | WebSocket path on the broker |
+| `tls` / `tls_verify` | `true` / `true` | TLS and certificate verification |
+| `keepalive` | `60` | MQTT keepalive, in seconds |
+| `token_audience` | same as `server` | `aud` claim in the auth token |
+| `token_ttl_seconds` | `3600` | Auth token lifetime. Tokens are renewed 5 minutes before they expire. |
+| `status_interval_seconds` | `300` | How often the retained `online` status is republished |
+| `client_id_prefix` | `meshgram_` | MQTT client ID prefix (the public key is appended; max 23 chars) |
+| `topic_status` / `topic_packets` | `meshcore/{IATA}/{PUBLIC_KEY}/status` / `…/packets` | Topic templates |
+| `private_key` | — | Optional. See **Authentication** below. `MESHMAPPER_PRIVATE_KEY` overrides it. |
+
+**Authentication.** MeshMapper uses MeshCore's "device signing": the MQTT username is `v1_<PUBLIC_KEY>` and the password is a short-lived Ed25519-signed JWT (`publicKey`, `iat`, `exp`, `aud=mqtt.meshmapper.net`, `client`). By default Meshgram asks the **radio to sign** the token over the companion protocol, so the private key never leaves the device. If your companion firmware is too old to sign on the device, the log shows `could not create auth token`. You can then either update the firmware or set `MESHMAPPER_PRIVATE_KEY` to the radio's 64-byte private key, written as 128 hex characters. Meshgram checks that the key matches the connected radio before using it. Keep that key in `.env`, never in `config.yaml`.
+
+**What gets published**
+
+- `meshcore/<IATA>/<PUBLIC_KEY>/status` (retained): `{"status": "online", "timestamp", "origin" (radio name), "origin_id" (public key), "model", "firmware_version", "radio" ("freq,bw,sf,cr"), "client_version"}`. An `offline` status is registered as the MQTT last will and is also published on clean shutdown.
+- `meshcore/<IATA>/<PUBLIC_KEY>/packets`: one message per received RF packet: `{"origin", "origin_id", "timestamp", "type": "PACKET", "direction": "rx", "time", "date", "len", "packet_type", "route" ("F" flood / "D" direct), "payload_len", "raw" (full packet hex), "SNR", "RSSI", "hash"}`, plus `"path"` for direct-routed packets. `hash` is computed exactly like the firmware's `Packet::calculatePacketHash`.
+
+Notes:
+
+- Only received packets are uploaded. The packet contents are the over-the-air bytes, so messages stay encrypted. Your radio's name, public key and radio settings are shared with MeshMapper, as with any observer.
+- MeshMapper wants **fixed, always-on** observers. Mobile observers are strongly discouraged and may be dropped at ingest, so don't enable this on a radio that moves around.
+- The plugin is ignored, with an error in the log, on the Meshtastic backend or when `iata` is missing. MeshMapper only accepts MeshCore data.
+- It needs `paho-mqtt`, which is included in `requirements.txt`. If you installed Meshgram before this plugin existed, rerun `pip install -r requirements.txt` or rebuild the Docker image.
+
 ---
 
 ## ⚠️ MeshCore Caveats
@@ -449,7 +507,7 @@ Everything else (channel routing, chunking, plugins, sender labels via `contact_
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library.
+Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client.
 
 ---
 
@@ -488,6 +546,13 @@ Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token f
 - Verify the symlink/device path actually exists: `ls -l /dev/meshcore` (or whatever you set).
 - For udev SYMLINK rules to fire, trigger an `add` action: `sudo udevadm trigger --action=add --sysname-match=ttyACM0`.
 
+### MeshMapper observer not showing up
+- Check the logs for lines starting with `MeshMapper:`. `uploads disabled` explains why the plugin is inactive, for example a missing `iata` or the Meshtastic backend.
+- `MQTT connect refused: Not authorized` means the broker rejected the token. Make sure the system clock is correct (the token has `iat`/`exp` timestamps) and that a configured `MESHMAPPER_PRIVATE_KEY` belongs to this radio.
+- `could not create auth token` means the radio couldn't sign the token. Update the companion firmware or set `MESHMAPPER_PRIVATE_KEY`.
+- The `iata` value must exactly match your MeshMapper region code.
+- The observer only appears after the radio has heard at least one packet. Run with `LOG_LEVEL=DEBUG` to see each `MeshMapper: published packet …` line.
+
 ### Logs appear duplicated
 - Check there's only one container (`docker ps -a`) and one Python process (`docker exec meshgram sh -c 'ls /proc | grep "^[0-9]*$"'`). If output is duplicated only in your terminal but the raw container log (`docker inspect <name> --format '{{.LogPath}}'`) shows one copy per line, it's a transient compose/terminal artifact — restart with `docker compose up -d` and re-attach with `docker compose logs -f`.
 
@@ -523,7 +588,9 @@ meshgram/
 │   └── plugins/
 │       ├── bridge.py
 │       ├── ping_pong.py
-│       └── dm_http_command.py
+│       ├── trace_me.py
+│       ├── dm_http_command.py
+│       └── meshmapper.py         # MeshMapper MQTT observer uploads
 └── tests/
 ```
 

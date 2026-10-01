@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import PluginConfig
 from .types import (
@@ -16,6 +16,9 @@ from .types import (
     TelegramReactionEvent,
 )
 
+if TYPE_CHECKING:
+    from .transport import MeshTransport
+
 LOGGER = logging.getLogger(__name__)
 
 BUILTIN_PLUGINS: dict[str, str] = {
@@ -24,6 +27,7 @@ BUILTIN_PLUGINS: dict[str, str] = {
     "dm_http_command": "meshgram.plugins.dm_http_command:DirectMessageHttpCommandPlugin",
     "trace_me": "meshgram.plugins.trace_me:TraceMePlugin",
     "trace-me": "meshgram.plugins.trace_me:TraceMePlugin",
+    "meshmapper": "meshgram.plugins.meshmapper:MeshMapperPlugin",
 }
 
 
@@ -35,6 +39,16 @@ class BasePlugin:
 
     async def on_startup(self, context: PluginContext) -> list[PluginAction]:
         return []
+
+    async def on_mesh_connected(
+        self,
+        transport: "MeshTransport",
+        context: PluginContext,
+    ) -> None:
+        """Called after every successful (re)connect to the mesh radio."""
+
+    async def on_shutdown(self) -> None:
+        """Called once while the app shuts down; release background resources here."""
 
     async def on_telegram_message(
         self,
