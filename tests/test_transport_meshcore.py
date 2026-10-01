@@ -25,6 +25,8 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
         NEW_CONTACT = "NEW_CONTACT"
         CONTACTS = "CONTACTS"
         CHANNEL_INFO = "CHANNEL_INFO"
+        RX_LOG_DATA = "RX_LOG_DATA"
+        SIGNATURE = "SIGNATURE"
 
     class _Event:
         def __init__(self, type_: str, payload: Any):
@@ -46,6 +48,10 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
 
         async def get_contacts(self, lastmod: int = 0) -> _Event:
             return _Event(_EventType.CONTACTS, {"deadbeefdeadbeef": {"adv_name": "Alice", "public_key": "deadbeefdeadbeef"}})
+
+        async def sign(self, data: bytes) -> _Event:
+            self.signed = data
+            return _Event(_EventType.SIGNATURE, {"signature": b"\x01" * 64})
 
         async def get_channel(self, channel_idx: int) -> _Event:
             self.channel_requests.append(channel_idx)
@@ -339,6 +345,49 @@ class MeshCoreTransportTests(unittest.TestCase):
         self.assertEqual(received[0].raw_packet["path"], "ff2e02")
         self.assertEqual(received[0].raw_packet["path_len"], 3)
         self.assertEqual(received[0].raw_packet["path_hash_mode"], 0)
+
+    def test_rx_log_events_reach_registered_listeners_across_reconnects(self):
+        received: list = []
+
+        async def listener(payload):
+            received.append(payload)
+
+        async def failing_listener(payload):
+            raise RuntimeError("boom")
+
+        transport = self._make_transport()
+        transport.add_rx_log_listener(failing_listener)
+        transport.add_rx_log_listener(listener)
+        transport.add_rx_log_listener(listener)
+        loop = asyncio.new_event_loop()
+        try:
+            for _ in range(2):
+                loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+                rx_callback = next(
+                    cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.RX_LOG_DATA
+                )
+                event = self._stub_event(self._event_cls.RX_LOG_DATA, {"payload": "1500aabb", "snr": 5.0})
+                with self.assertLogs("meshgram.transport.meshcore", level="ERROR"):
+                    loop.run_until_complete(rx_callback(event))
+                transport.invalidate_connection()
+                loop.run_until_complete(asyncio.sleep(0))  # let teardown tasks finish
+        finally:
+            loop.close()
+
+        self.assertEqual(received, [{"payload": "1500aabb", "snr": 5.0}] * 2)
+
+    def test_sign_with_device_returns_signature_bytes(self):
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            signature = loop.run_until_complete(transport.sign_with_device(b"header.payload"))
+        finally:
+            loop.close()
+
+        self.assertEqual(signature, b"\x01" * 64)
+        self.assertEqual(transport._mc.commands.signed, b"header.payload")
+        self.assertEqual(transport.device_self_info["public_key"], "deadbeefdeadbeef0000")
 
     def _stub_event(self, event_type, payload):
         from meshcore import EventType  # noqa: F401 — ensures stub is active

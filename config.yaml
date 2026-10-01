@@ -91,6 +91,22 @@ plugins:
       # Optional allowlist of incoming MeshCore channels that can trigger trace responses.
       # channels: [0]
 
+  - name: meshmapper
+    enabled: false
+    settings:
+      # MeshCore only. Uploads every packet the radio hears to MeshMapper's
+      # MQTT broker (mqtt.meshmapper.net:443, WebSockets + TLS) as an observer.
+      # Required: your MeshMapper region code (or set MESHMAPPER_IATA in .env).
+      iata: "XXX"
+      # Optional overrides (defaults shown):
+      # server: mqtt.meshmapper.net
+      # port: 443
+      # transport: websockets
+      # token_audience: mqtt.meshmapper.net
+      # status_interval_seconds: 300
+      # Auth tokens are signed by the radio itself. Only if your firmware can't
+      # sign on-device, set MESHMAPPER_PRIVATE_KEY in .env (never here).
+
   - name: dm_http_command
     enabled: false
     settings:

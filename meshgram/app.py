@@ -106,6 +106,7 @@ class MeshgramApp:
                 loop = asyncio.get_running_loop()
                 await self.mesh.connect(loop, self._on_mesh_text, self._on_mesh_reaction)
                 LOGGER.info("Mesh connection established (backend=%s)", self.mesh.backend_name)
+                await self._dispatch_mesh_connected()
             except Exception as exc:
                 self.mesh.invalidate_connection()
                 LOGGER.warning(
@@ -126,6 +127,27 @@ class MeshgramApp:
                 continue
 
             await self._execute_actions(actions, loaded_plugin.name)
+
+    async def _dispatch_mesh_connected(self) -> None:
+        context = self._plugin_context()
+        for loaded_plugin in self.plugins:
+            hook = getattr(loaded_plugin.instance, "on_mesh_connected", None)
+            if not callable(hook):
+                continue
+            try:
+                await hook(self.mesh, context)
+            except Exception:
+                LOGGER.exception("Plugin %s failed handling mesh connect", loaded_plugin.name)
+
+    async def _post_shutdown(self, app: Application) -> None:
+        for loaded_plugin in self.plugins:
+            hook = getattr(loaded_plugin.instance, "on_shutdown", None)
+            if not callable(hook):
+                continue
+            try:
+                await hook()
+            except Exception:
+                LOGGER.exception("Plugin %s failed during shutdown", loaded_plugin.name)
 
     def _plugin_context(self) -> PluginContext:
         self.mesh.refresh_local_node_id()
@@ -718,6 +740,7 @@ class MeshgramApp:
             ApplicationBuilder()
             .token(self.settings.telegram_bot_token)
             .post_init(self._post_init)
+            .post_shutdown(self._post_shutdown)
             .build()
         )
 
