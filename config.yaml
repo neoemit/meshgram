@@ -107,6 +107,18 @@ plugins:
       # Auth tokens are signed by the radio itself. Only if your firmware can't
       # sign on-device, set MESHMAPPER_PRIVATE_KEY in .env (never here).
 
+  - name: packet_map
+    enabled: false
+    settings:
+      # MeshCore only. Web app with a live map of nodes/repeaters and every
+      # packet the radio hears. Open http://<host>:<port>/ in a browser.
+      # Use 0.0.0.0 to reach it from other machines (or from outside Docker).
+      host: 127.0.0.1
+      port: 8080
+      # max_packets: 500
+      # Optional HTTP Basic auth; prefer PACKET_MAP_PASSWORD in .env.
+      # password: ""
+
   - name: dm_http_command
     enabled: false
     settings:

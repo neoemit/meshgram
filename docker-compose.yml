@@ -9,3 +9,6 @@ services:
       MESHGRAM_CONFIG_PATH: /app/config.yaml
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+    # Uncomment to reach the packet_map web app (also set PACKET_MAP_HOST=0.0.0.0):
+    # ports:
+    #   - "8080:8080"

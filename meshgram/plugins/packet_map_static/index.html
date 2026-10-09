@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meshgram packet map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  :root {
+    --bg: #0f1419; --panel: #161c23; --card: #1d252e; --card-hover: #242e39; --border: #2b3642;
+    --text: #e6edf3; --muted: #8b98a5; --accent: #4cc2ff;
+    --good: #3fb950; --ok: #d29922; --bad: #f85149;
+    --repeater: #f0883e; --chat: #4cc2ff; --room: #a371f7; --sensor: #3fb950; --unknown: #8b98a5; --self: #ff5c8a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { height: 48px; display: flex; align-items: center; gap: 16px; padding: 0 16px;
+    border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .stats { display: flex; gap: 16px; color: var(--muted); font-size: 13px; }
+  .stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  .status.live .dot { background: var(--good); box-shadow: 0 0 6px var(--good); }
+  main { display: flex; height: calc(100% - 48px); }
+  #map-wrap { flex: 1 1 60%; position: relative; min-width: 0; }
+  #map { position: absolute; inset: 0; background: #1b2026; }
+  aside { flex: 0 0 40%; max-width: 560px; min-width: 340px; display: flex; flex-direction: column;
+    border-left: 1px solid var(--border); background: var(--panel); }
+  .toolbar { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .toolbar input, .toolbar select, .toolbar button { background: var(--card); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; }
+  .toolbar input { flex: 1; min-width: 120px; }
+  .toolbar button { cursor: pointer; }
+  .toolbar button.active { border-color: var(--accent); color: var(--accent); }
+  #packets { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .empty { color: var(--muted); text-align: center; padding: 32px 16px; }
+  .pkt { background: var(--card); border: 1px solid var(--border); border-left: 4px solid var(--type-color, var(--unknown));
+    border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+  .pkt:hover { background: var(--card-hover); }
+  .pkt.selected { border-color: var(--accent); border-left-color: var(--type-color, var(--accent));
+    box-shadow: 0 0 0 1px var(--accent) inset; }
+  .pkt.fresh { animation: fresh 1.5s ease-out; }
+  @keyframes fresh { from { background: #2d4a5e; } to { background: var(--card); } }
+  .pkt .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pkt .row + .row { margin-top: 4px; }
+  .badge { font-size: 11px; font-weight: 700; letter-spacing: .03em; padding: 2px 6px; border-radius: 4px;
+    background: var(--type-color, var(--unknown)); color: #0f1419; }
+  .badge.route { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 600; }
+  .badge.dup { background: transparent; color: var(--ok); border: 1px solid var(--ok); }
+  .who { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+  .time { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .signal { display: flex; gap: 10px; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .signal span b { font-size: 15px; }
+  .q-good { color: var(--good); } .q-ok { color: var(--ok); } .q-bad { color: var(--bad); }
+  .hops { color: var(--muted); font-size: 13px; }
+  .message { margin-top: 4px; padding: 4px 8px; background: #11181f; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }
+  .channel { color: var(--room); font-size: 12px; }
+  .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
+  .path .hop { color: var(--repeater); }
+  .path .hop.unknown { color: var(--muted); }
+  .details { display: none; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 6px; }
+  .pkt.selected .details { display: block; }
+  .details dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 12px; }
+  .details dt { color: var(--muted); }
+  .details dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .legend { position: absolute; z-index: 500; bottom: 18px; left: 10px; background: rgba(22,28,35,.92);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; }
+  .legend div { display: flex; align-items: center; gap: 6px; }
+  .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .legend i.sq { border-radius: 2px; transform: rotate(45deg); }
+  .legend .note { color: var(--muted); margin-top: 4px; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); }
+  .leaflet-popup-content { margin: 10px 12px; font-size: 13px; }
+  .leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
+  .popup-title { font-weight: 700; font-size: 14px; }
+  .popup-meta { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
+  .node-icon { border-radius: 50%; border: 2px solid #0f1419; box-shadow: 0 0 0 1px rgba(255,255,255,.35); }
+  .node-icon.repeater, .node-icon.room { border-radius: 3px; transform: rotate(45deg); }
+  .node-icon.self { box-shadow: 0 0 0 3px var(--self); }
+  .node-icon.pulse { animation: pulse 1.6s ease-out; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(76,194,255,.9); } 100% { box-shadow: 0 0 0 18px rgba(76,194,255,0); } }
+  @media (max-width: 860px) {
+    main { flex-direction: column; }
+    #map-wrap { flex: 0 0 45%; }
+    aside { flex: 1; max-width: none; min-width: 0; border-left: 0; border-top: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Meshgram packet map</h1>
+  <div class="stats">
+    <span>Nodes on map <b id="stat-nodes">0</b></span>
+    <span>Packets <b id="stat-packets">0</b></span>
+    <span>Last minute <b id="stat-rate">0</b></span>
+  </div>
+  <div class="status" id="status"><span class="dot"></span><span id="status-text">Connecting…</span></div>
+</header>
+<main>
+  <div id="map-wrap">
+    <div id="map"></div>
+    <div class="legend">
+      <div><i class="sq" style="background:var(--repeater)"></i>Repeater</div>
+      <div><i class="sq" style="background:var(--room)"></i>Room server</div>
+      <div><i style="background:var(--chat)"></i>Companion</div>
+      <div><i style="background:var(--sensor)"></i>Sensor</div>
+      <div><i style="background:var(--unknown);box-shadow:0 0 0 2px var(--self)"></i>This radio</div>
+      <div class="note" id="unplaced"></div>
+    </div>
+  </div>
+  <aside>
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="Filter by name, hash, message…">
+      <select id="type-filter"><option value="">All types</option></select>
+      <button id="pause" title="Pause the live list">Pause</button>
+    </div>
+    <div id="packets"><div class="empty">Waiting for packets…</div></div>
+  </aside>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+"use strict";
+const CONFIG = /*__MESHGRAM_CONFIG__*/{};
+const TYPE_COLORS = {
+  ADVERT: "#3fb950", GRP_TXT: "#a371f7", GRP_DATA: "#8957e5", TXT_MSG: "#4cc2ff", ACK: "#8b98a5",
+  REQ: "#d29922", RESPONSE: "#e3b341", PATH: "#f0883e", ANON_REQ: "#db6d28", TRACE: "#ff5c8a",
+};
+const NODE_COLORS = { repeater: "#f0883e", room: "#a371f7", chat: "#4cc2ff", sensor: "#3fb950", unknown: "#8b98a5" };
+const MAX_RENDERED = 500;
+
+const state = { selfId: null, nodes: new Map(), packets: [], selectedId: null, paused: false, fitted: false };
+const markers = new Map();
+
+if (CONFIG.title) { document.title = CONFIG.title; document.getElementById("title").textContent = CONFIG.title; }
+
+const map = L.map("map", { worldCopyJump: true }).setView([20, 0], 2);
+L.tileLayer(CONFIG.tile_url || "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: CONFIG.tile_attribution || "&copy; OpenStreetMap contributors",
+}).addTo(map);
+const routeLayer = L.layerGroup().addTo(map);
+const selectedLayer = L.layerGroup().addTo(map);
+
+// --- Helpers -------------------------------------------------------------------
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === undefined || value === null) continue;
+    if (key === "class") node.className = value;
+    else if (key === "style") node.style.cssText = value;
+    else node.setAttribute(key, value);
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+
+const hasPos = (node) => node && node.lat !== null && node.lat !== undefined && node.lon !== null && node.lon !== undefined;
+const shortId = (id) => (id || "").slice(0, 8);
+const nodeLabel = (ref) => (ref && (ref.name || (ref.node_id ? shortId(ref.node_id) : ref.hash))) || "?";
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour12: false });
+function fmtAgo(ts) {
+  if (!ts) return "never";
+  const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+const snrClass = (snr) => (snr >= 5 ? "q-good" : snr >= -5 ? "q-ok" : "q-bad");
+const rssiClass = (rssi) => (rssi >= -90 ? "q-good" : rssi >= -110 ? "q-ok" : "q-bad");
+
+// --- Nodes on the map ------------------------------------------------------------
+
+function nodeIcon(node, pulse) {
+  const type = node.type || "unknown";
+  const relay = type === "repeater" || type === "room";
+  const size = node.is_self ? 18 : relay ? 14 : 12;
+  const classes = ["node-icon", type, node.is_self ? "self" : "", pulse ? "pulse" : ""].join(" ");
+  return L.divIcon({
+    className: "",
+    html: `<div class="${classes}" style="width:${size}px;height:${size}px;background:${NODE_COLORS[type] || NODE_COLORS.unknown}"></div>`,
+    iconSize: [size, size], iconAnchor: [size / 2, size / 2], popupAnchor: [0, -size / 2],
+  });
+}
+
+function nodePopup(node) {
+  const rows = [
+    el("div", { class: "popup-title" }, node.name || shortId(node.id), node.is_self ? " (this radio)" : ""),
+    el("div", {}, `${node.type || "unknown"}`),
+    el("div", { class: "popup-meta" }, node.id),
+    el("div", { class: "popup-meta" }, `${Number(node.lat).toFixed(5)}, ${Number(node.lon).toFixed(5)}`),
+  ];
+  if (node.last_heard) {
+    const signal = [node.last_snr != null ? `SNR ${node.last_snr} dB` : null, node.last_rssi != null ? `RSSI ${node.last_rssi} dBm` : null]
+      .filter(Boolean).join(" · ");
+    rows.push(el("div", {}, `Heard directly ${fmtAgo(node.last_heard)}${signal ? " — " + signal : ""}`));
+  }
+  if (node.last_advert) rows.push(el("div", {}, `Last advert ${fmtAgo(node.last_advert)}`));
+  return el("div", {}, rows);
+}
+
+function upsertNode(node, pulse = false) {
+  state.nodes.set(node.id, { ...(state.nodes.get(node.id) || {}), ...node });
+  const merged = state.nodes.get(node.id);
+  if (node.is_self) state.selfId = node.id;
+  let marker = markers.get(node.id);
+  if (!hasPos(merged)) {
+    if (marker) { marker.remove(); markers.delete(node.id); }
+    return;
+  }
+  if (!marker) {
+    marker = L.marker([merged.lat, merged.lon], { icon: nodeIcon(merged, pulse), zIndexOffset: merged.is_self ? 1000 : 0 });
+    marker.bindPopup(() => nodePopup(state.nodes.get(node.id)));
+    marker.bindTooltip(() => { const n = state.nodes.get(node.id); return n.name || shortId(n.id); }, { direction: "top", offset: [0, -8] });
+    marker.addTo(map);
+    markers.set(node.id, marker);
+  } else {
+    marker.setLatLng([merged.lat, merged.lon]);
+    marker.setIcon(nodeIcon(merged, pulse));
+  }
+}
+
+function pulseNode(nodeId) {
+  const node = state.nodes.get(nodeId);
+  const marker = markers.get(nodeId);
+  if (node && marker) marker.setIcon(nodeIcon(node, true));
+}
+
+function updateNodeStats() {
+  let placed = 0, unplacedRelays = 0;
+  for (const node of state.nodes.values()) {
+    if (hasPos(node)) placed++;
+    else if (node.type === "repeater" || node.type === "room") unplacedRelays++;
+  }
+  document.getElementById("stat-nodes").textContent = placed;
+  document.getElementById("unplaced").textContent = unplacedRelays ? `${unplacedRelays} repeater(s) without position` : "";
+}
+
+function fitToNodes() {
+  const points = [...state.nodes.values()].filter(hasPos).map((n) => [n.lat, n.lon]);
+  if (!points.length) return;
+  state.fitted = true;
+  if (points.length === 1) map.setView(points[0], 11);
+  else map.fitBounds(points, { padding: [40, 40], maxZoom: 13 });
+}
+
+// --- Packet routes ---------------------------------------------------------------
+
+// Points (in travel order) for a packet: originator → relays → this radio.
+function routePoints(packet) {
+  const points = [];
+  const push = (nodeId) => {
+    const node = nodeId && state.nodes.get(nodeId);
+    if (hasPos(node)) points.push([node.lat, node.lon]);
+  };
+  const flood = packet.route === "flood";
+  if (flood && packet.origin) push(packet.origin.node_id);
+  for (const hop of packet.path_nodes || []) push(hop.node_id);
+  if (flood) push(state.selfId);
+  return points.filter((p, i) => i === 0 || p[0] !== points[i - 1][0] || p[1] !== points[i - 1][1]);
+}
+
+function drawRoute(layer, packet, opts) {
+  const points = routePoints(packet);
+  if (points.length < 2) return null;
+  const color = TYPE_COLORS[packet.payload_type_name] || "#8b98a5";
+  const line = L.polyline(points, {
+    color, weight: opts.weight, opacity: opts.opacity, dashArray: packet.route === "direct" ? "6 6" : null,
+  }).addTo(layer);
+  return line;
+}
+
+function flashRoute(packet) {
+  const line = drawRoute(routeLayer, packet, { weight: 3, opacity: 0.9 });
+  const heard = packet.heard_from && packet.heard_from.node_id;
+  if (heard) pulseNode(heard);
+  if (packet.origin && packet.origin.node_id) pulseNode(packet.origin.node_id);
+  if (!line) return;
+  let opacity = 0.9;
+  const timer = setInterval(() => {
+    opacity -= 0.06;
+    if (opacity <= 0) { clearInterval(timer); routeLayer.removeLayer(line); return; }
+    line.setStyle({ opacity });
+  }, 250);
+}
+
+function showSelectedRoute() {
+  selectedLayer.clearLayers();
+  const packet = state.packets.find((p) => p.id === state.selectedId);
+  if (!packet) return;
+  const line = drawRoute(selectedLayer, packet, { weight: 5, opacity: 1 });
+  if (line) map.fitBounds(line.getBounds(), { padding: [60, 60], maxZoom: 14 });
+  else {
+    const focus = [packet.origin, packet.heard_from].find((ref) => ref && hasPos(state.nodes.get(ref.node_id)));
+    if (focus) {
+      const node = state.nodes.get(focus.node_id);
+      map.panTo([node.lat, node.lon]);
+      markers.get(node.id)?.openPopup();
+    }
+  }
+}
+
+// --- Packet list -------------------------------------------------------------------
+
+function packetTitle(packet) {
+  if (packet.advert) return packet.advert.name || shortId(packet.advert.public_key);
+  if (packet.sender_name) return packet.sender_name;
+  if (packet.origin && (packet.origin.name || packet.origin.node_id)) return nodeLabel(packet.origin);
+  if (packet.src_hash) return `from ${packet.src_hash}`;
+  if (packet.channel_hash) return `channel ${packet.channel_hash}`;
+  return packet.payload_type_name;
+}
+
+function pathView(packet) {
+  const hops = packet.path_nodes || [];
+  if (!hops.length) return null;
+  const parts = [];
+  hops.forEach((hop, i) => {
+    if (i) parts.push(" → ");
+    parts.push(el("span", { class: hop.node_id ? "hop" : "hop unknown", title: hop.node_id || `${hop.candidates} candidate(s)` },
+      hop.name ? `${hop.name} (${hop.hash})` : hop.hash));
+  });
+  return el("div", { class: "path" }, packet.route === "direct" ? "route: " : "via: ", parts);
+}
+
+function detailRows(packet) {
+  const rows = [
+    ["Received", new Date(packet.received_at * 1000).toLocaleString()],
+    ["Type", `${packet.payload_type_name} (${packet.payload_type}) v${packet.payload_version}`],
+    ["Route", `${packet.route_type_name} (${packet.route_type})`],
+    ["Packet hash", packet.hash],
+    ["Heard", `${packet.seen_count}×`],
+    ["Length", `${packet.len} B (payload ${packet.payload_len} B)`],
+    ["Hops", `${packet.hops} (${packet.path_hash_size}-byte hashes)`],
+    ["Path", (packet.path || []).join(" → ") || "—"],
+    ["Heard from", packet.heard_from ? `${nodeLabel(packet.heard_from)}${packet.heard_from.node_id ? " " + shortId(packet.heard_from.node_id) : ""}` : "—"],
+    ["Origin", packet.origin ? `${nodeLabel(packet.origin)}${packet.origin.node_id ? " " + packet.origin.node_id : ""}` : "—"],
+  ];
+  if (packet.transport_codes) rows.push(["Transport codes", packet.transport_codes.join(" ")]);
+  if (packet.advert) {
+    const a = packet.advert;
+    rows.push(["Advert key", a.public_key], ["Node type", a.node_type],
+      ["Advert time", new Date(a.advert_timestamp * 1000).toLocaleString()],
+      ["Position", a.lat != null ? `${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}` : "not shared"]);
+  }
+  if (packet.dest_hash) rows.push(["Destination hash", packet.dest_hash]);
+  if (packet.src_hash) rows.push(["Source hash", packet.src_hash]);
+  if (packet.src_public_key) rows.push(["Source key", packet.src_public_key]);
+  if (packet.channel_hash) rows.push(["Channel hash", packet.channel_hash]);
+  if (packet.ack_crc) rows.push(["ACK checksum", packet.ack_crc]);
+  if (packet.trace_tag) rows.push(["Trace tag", packet.trace_tag], ["Trace SNRs", (packet.trace_snrs || []).map((s) => `${s} dB`).join(", ") || "—"]);
+  rows.push(["Raw", packet.raw]);
+  return el("dl", {}, rows.map(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
+}
+
+function packetCard(packet, fresh) {
+  const color = TYPE_COLORS[packet.payload_type_name] || "#8b98a5";
+  const signal = el("div", { class: "signal" },
+    packet.snr != null ? el("span", {}, "SNR ", el("b", { class: snrClass(packet.snr) }, packet.snr), " dB") : null,
+    packet.rssi != null ? el("span", {}, "RSSI ", el("b", { class: rssiClass(packet.rssi) }, packet.rssi), " dBm") : null);
+  const hopsText = packet.payload_type_name === "TRACE" ? `${packet.hops} hop(s) traced`
+    : packet.hops === 0 ? "0 hops (no relay)" : `${packet.hops} hop${packet.hops === 1 ? "" : "s"}`;
+  const card = el("div", { class: `pkt${fresh ? " fresh" : ""}${packet.id === state.selectedId ? " selected" : ""}`, style: `--type-color:${color}`, "data-id": packet.id },
+    el("div", { class: "row" },
+      el("span", { class: "badge" }, packet.payload_type_name),
+      el("span", { class: "who" }, packetTitle(packet)),
+      packet.channel_name ? el("span", { class: "channel" }, `#${packet.channel_name}`) : null,
+      el("span", { class: "time" }, fmtTime(packet.received_at))),
+    el("div", { class: "row" },
+      signal,
+      el("span", { class: "hops" }, hopsText),
+      el("span", { class: "badge route" }, packet.route),
+      packet.advert && packet.advert.lat != null ? el("span", { class: "badge route" }, "GPS") : null,
+      packet.seen_count > 1 ? el("span", { class: "badge dup", title: "Same packet heard via several paths" }, `heard ${packet.seen_count}×`) : null),
+    packet.message ? el("div", { class: "message" }, packet.message) : null,
+    pathView(packet),
+    el("div", { class: "details" }, detailRows(packet)));
+  return card;
+}
+
+function matchesFilter(packet) {
+  const type = document.getElementById("type-filter").value;
+  if (type && packet.payload_type_name !== type) return false;
+  const query = document.getElementById("filter").value.trim().toLowerCase();
+  if (!query) return true;
+  const haystack = [packetTitle(packet), packet.hash, packet.message, packet.channel_name, packet.raw,
+    ...(packet.path || []), ...(packet.path_nodes || []).map((h) => h.name)].filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(query);
+}
+
+function renderList() {
+  const list = document.getElementById("packets");
+  const visible = state.packets.filter(matchesFilter).slice(-MAX_RENDERED).reverse();
+  list.replaceChildren(...(visible.length ? visible.map((p) => packetCard(p, false)) : [el("div", { class: "empty" }, state.packets.length ? "No packets match the filter" : "Waiting for packets…")]));
+}
+
+function prependPacket(packet) {
+  if (state.paused || !matchesFilter(packet)) return;
+  const list = document.getElementById("packets");
+  const empty = list.querySelector(".empty");
+  if (empty) empty.remove();
+  list.prepend(packetCard(packet, true));
+  while (list.children.length > MAX_RENDERED) list.lastChild.remove();
+}
+
+function refreshTypeFilter() {
+  const select = document.getElementById("type-filter");
+  const known = new Set([...select.options].map((o) => o.value));
+  for (const packet of state.packets) {
+    if (!known.has(packet.payload_type_name)) {
+      known.add(packet.payload_type_name);
+      select.append(el("option", { value: packet.payload_type_name }, packet.payload_type_name));
+    }
+  }
+}
+
+function updatePacketStats() {
+  const cutoff = Date.now() / 1000 - 60;
+  document.getElementById("stat-packets").textContent = state.packets.length;
+  document.getElementById("stat-rate").textContent = state.packets.filter((p) => p.received_at >= cutoff).length;
+}
+
+document.getElementById("packets").addEventListener("click", (event) => {
+  if (event.target.closest(".details")) return;  // let people select text in details
+  const card = event.target.closest(".pkt");
+  if (!card) return;
+  const id = Number(card.dataset.id);
+  state.selectedId = state.selectedId === id ? null : id;
+  document.querySelectorAll(".pkt.selected").forEach((n) => n.classList.remove("selected"));
+  if (state.selectedId !== null) card.classList.add("selected");
+  showSelectedRoute();
+});
+document.getElementById("filter").addEventListener("input", renderList);
+document.getElementById("type-filter").addEventListener("change", renderList);
+document.getElementById("pause").addEventListener("click", (event) => {
+  state.paused = !state.paused;
+  event.target.classList.toggle("active", state.paused);
+  event.target.textContent = state.paused ? "Resume" : "Pause";
+  if (!state.paused) renderList();
+});
+
+// --- Live updates ---------------------------------------------------------------
+
+function handleEvent(event) {
+  if (event.type === "snapshot") {
+    state.selfId = event.self_id;
+    for (const marker of markers.values()) marker.remove();
+    markers.clear();
+    state.nodes.clear();
+    event.nodes.forEach((n) => upsertNode(n));
+    state.packets = event.packets;
+    refreshTypeFilter();
+    renderList();
+    showSelectedRoute();
+    if (!state.fitted) fitToNodes();
+  } else if (event.type === "nodes" || event.type === "self") {
+    if (event.self_id) state.selfId = event.self_id;
+    (event.nodes || []).forEach((n) => upsertNode(n));
+    if (!state.fitted) fitToNodes();
+  } else if (event.type === "packet") {
+    (event.nodes || []).forEach((n) => upsertNode(n));
+    state.packets.push(event.packet);
+    if (state.packets.length > 5000) state.packets.splice(0, state.packets.length - 5000);
+    refreshTypeFilter();
+    prependPacket(event.packet);
+    flashRoute(event.packet);
+    if (!state.fitted) fitToNodes();
+  }
+  updateNodeStats();
+  updatePacketStats();
+}
+
+function setStatus(live, text) {
+  document.getElementById("status").classList.toggle("live", live);
+  document.getElementById("status-text").textContent = text;
+}
+
+function connect() {
+  const source = new EventSource("api/events");
+  source.onopen = () => setStatus(true, "Live");
+  source.onerror = () => setStatus(false, "Reconnecting…");
+  source.onmessage = (message) => {
+    try { handleEvent(JSON.parse(message.data)); } catch (err) { console.error(err); }
+  };
+}
+
+setInterval(updatePacketStats, 5000);
+connect();
+</script>
+</body>
+</html>

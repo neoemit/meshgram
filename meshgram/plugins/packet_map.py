@@ -1,0 +1,588 @@
+"""Live web map of MeshCore packet propagation.
+
+Serves a small web app (stdlib asyncio HTTP server, no extra dependencies) with
+a map of every node that shares a position (adverts and radio contacts,
+repeaters highlighted) next to a live list of every RF packet the radio hears.
+Repeater hashes in each packet's path are resolved to known nodes so the route
+a packet took can be drawn on the map.
+
+The plugin never emits bridge actions; it only listens to raw RF logs.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import hmac
+import json
+import logging
+import math
+import os
+import re
+import time
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urlsplit
+
+from meshgram.config import MESHCORE_BACKEND
+from meshgram.meshcore_packets import (
+    NODE_TYPE_NAMES,
+    PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_ANON_REQ,
+    PAYLOAD_TYPE_GRP_TXT,
+    decode_packet,
+    is_valid_position,
+)
+from meshgram.plugin import BasePlugin
+from meshgram.types import PluginAction, PluginContext
+
+LOGGER = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).with_name("packet_map_static")
+DEFAULT_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+DEFAULT_TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
+# Node types that relay packets and therefore appear in packet paths.
+RELAY_NODE_TYPES = {"repeater", "room"}
+SSE_KEEPALIVE_SECONDS = 15.0
+SSE_QUEUE_SIZE = 500
+CONTACT_REFRESH_SECONDS = 30.0
+MAX_REQUEST_HEAD_BYTES = 16 * 1024
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass(slots=True)
+class PacketMapConfig:
+    host: str = "127.0.0.1"
+    port: int = 8080
+    max_packets: int = 500
+    password: str = ""
+    title: str = "Meshgram packet map"
+    tile_url: str = DEFAULT_TILE_URL
+    tile_attribution: str = DEFAULT_TILE_ATTRIBUTION
+
+    @classmethod
+    def from_settings(cls, settings: dict[str, Any]) -> "PacketMapConfig":
+        host = os.getenv("PACKET_MAP_HOST") or settings.get("host") or "127.0.0.1"
+        port = os.getenv("PACKET_MAP_PORT") or settings.get("port")
+        password = os.getenv("PACKET_MAP_PASSWORD") or settings.get("password") or ""
+        return cls(
+            host=str(host).strip(),
+            port=_as_int(port, 8080),
+            max_packets=max(10, _as_int(settings.get("max_packets"), 500)),
+            password=str(password),
+            title=str(settings.get("title") or "Meshgram packet map"),
+            tile_url=str(settings.get("tile_url") or DEFAULT_TILE_URL),
+            tile_attribution=str(settings.get("tile_attribution") or DEFAULT_TILE_ATTRIBUTION),
+        )
+
+    def client_config(self) -> dict[str, Any]:
+        return {"title": self.title, "tile_url": self.tile_url, "tile_attribution": self.tile_attribution}
+
+
+# --- State -------------------------------------------------------------------
+
+
+def _clean_key(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex().upper()
+    text = "".join(str(value or "").split()).upper()
+    return text if HEX_RE.match(text) else ""
+
+
+def _node_type_name(value: Any) -> str:
+    if isinstance(value, str) and value in NODE_TYPE_NAMES.values():
+        return value
+    return NODE_TYPE_NAMES.get(_as_int(value, 0), "unknown")
+
+
+def _distance_km(a: dict[str, Any], b: dict[str, Any]) -> float:
+    lat1, lon1, lat2, lon2 = map(math.radians, (a["lat"], a["lon"], b["lat"], b["lon"]))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 6371.0 * 2 * math.asin(math.sqrt(min(1.0, h)))
+
+
+def _has_position(node: Optional[dict[str, Any]]) -> bool:
+    return node is not None and node.get("lat") is not None and node.get("lon") is not None
+
+
+class PacketMapState:
+    """Node registry and packet ring buffer backing the web app."""
+
+    def __init__(self, max_packets: int = 500):
+        self.nodes: dict[str, dict[str, Any]] = {}
+        self.packets: deque[dict[str, Any]] = deque(maxlen=max_packets)
+        self.self_id: Optional[str] = None
+        self._hash_counts: dict[str, int] = {}
+        self._next_packet_id = 1
+        self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+
+    # Subscribers ------------------------------------------------------------
+
+    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=SSE_QUEUE_SIZE)
+        self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self._subscribers.discard(queue)
+
+    def _publish(self, event: dict[str, Any]) -> None:
+        for queue in list(self._subscribers):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # A client that can't keep up gets disconnected and re-syncs on reconnect.
+                self._subscribers.discard(queue)
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.get_nowait()
+                    queue.put_nowait({"type": "overflow"})
+
+    # Nodes ------------------------------------------------------------------
+
+    def _upsert_node(self, node_id: str, **fields: Any) -> tuple[dict[str, Any], bool]:
+        node = self.nodes.get(node_id)
+        created = node is None
+        if node is None:
+            node = {"id": node_id, "name": None, "type": "unknown", "lat": None, "lon": None}
+            self.nodes[node_id] = node
+        before = dict(node)
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if key == "type" and value == "unknown" and node.get("type") != "unknown":
+                continue
+            node[key] = value
+        return node, created or node != before
+
+    def update_self(self, info: dict[str, Any]) -> list[dict[str, Any]]:
+        node_id = _clean_key(info.get("public_key"))
+        if not node_id:
+            return []
+        if self.self_id and self.self_id != node_id and self.self_id in self.nodes:
+            self.nodes[self.self_id]["is_self"] = False
+        self.self_id = node_id
+        lat, lon = info.get("adv_lat"), info.get("adv_lon")
+        position = {"lat": float(lat), "lon": float(lon)} if is_valid_position(lat, lon) else {}
+        node, changed = self._upsert_node(
+            node_id,
+            name=str(info.get("name") or "").strip() or None,
+            type=_node_type_name(info.get("adv_type", info.get("type"))),
+            is_self=True,
+            **position,
+        )
+        return [dict(node)] if changed else []
+
+    def update_contacts(self, contacts: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        changed_nodes = []
+        for key, contact in contacts.items():
+            node_id = _clean_key(contact.get("public_key") or key)
+            if len(node_id) != 64:
+                continue
+            lat, lon = contact.get("adv_lat"), contact.get("adv_lon")
+            position = {"lat": float(lat), "lon": float(lon)} if is_valid_position(lat, lon) else {}
+            last_advert = _as_int(contact.get("last_advert"), 0)
+            known_advert = (self.nodes.get(node_id) or {}).get("last_advert") or 0
+            # An advert we heard ourselves may be newer than the radio's contact entry.
+            newer = last_advert >= known_advert
+            node, changed = self._upsert_node(
+                node_id,
+                name=(str(contact.get("adv_name") or "").strip() or None) if newer else None,
+                type=_node_type_name(contact.get("type")),
+                last_advert=(last_advert or None) if newer else None,
+                is_contact=True,
+                **(position if newer else {}),
+            )
+            if changed:
+                changed_nodes.append(dict(node))
+        return changed_nodes
+
+    def apply_contacts(self, contacts: dict[str, dict[str, Any]]) -> None:
+        changed = self.update_contacts(contacts)
+        if changed:
+            self._publish({"type": "nodes", "nodes": changed})
+
+    def apply_self(self, info: dict[str, Any]) -> None:
+        changed = self.update_self(info)
+        self._publish({"type": "self", "self_id": self.self_id, "nodes": changed})
+
+    def _candidates(self, hash_hex: str) -> list[dict[str, Any]]:
+        return [node for node_id, node in self.nodes.items() if node_id.startswith(hash_hex)]
+
+    def _pick(self, candidates: list[dict[str, Any]], anchor: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        if not candidates:
+            return None
+        relays = [node for node in candidates if node.get("type") in RELAY_NODE_TYPES]
+        pool = relays or candidates
+        if len(pool) == 1:
+            return pool[0]
+        placed = [node for node in pool if _has_position(node)]
+        if _has_position(anchor) and placed:
+            # Radio range is limited: the nearest candidate is the likeliest hop.
+            return min(placed, key=lambda node: _distance_km(node, anchor))  # type: ignore[arg-type]
+        return placed[0] if len(placed) == 1 else None
+
+    def _node_ref(self, node: Optional[dict[str, Any]], hash_hex: str, candidates: int) -> dict[str, Any]:
+        return {
+            "hash": hash_hex,
+            "node_id": node["id"] if node else None,
+            "name": node.get("name") if node else None,
+            "candidates": candidates,
+        }
+
+    def _resolve_path(self, path: list[str]) -> list[dict[str, Any]]:
+        # Walk backwards from our own radio: each hop is picked relative to the next one.
+        anchor = self.nodes.get(self.self_id) if self.self_id else None
+        resolved: list[dict[str, Any]] = []
+        for hash_hex in reversed(path):
+            candidates = self._candidates(hash_hex)
+            node = self._pick(candidates, anchor)
+            resolved.append(self._node_ref(node, hash_hex, len(candidates)))
+            if _has_position(node):
+                anchor = node
+        resolved.reverse()
+        return resolved
+
+    def _resolve_origin(self, packet: dict[str, Any]) -> Optional[dict[str, Any]]:
+        key = (packet.get("advert") or {}).get("public_key") or packet.get("src_public_key")
+        if key and key in self.nodes:
+            node = self.nodes[key]
+            return self._node_ref(node, key[:2], 1)
+        if packet.get("src_hash"):
+            candidates = self._candidates(packet["src_hash"])
+            node = candidates[0] if len(candidates) == 1 else None
+            return self._node_ref(node, packet["src_hash"], len(candidates))
+        sender = packet.get("sender_name")
+        if sender:
+            matches = [node for node in self.nodes.values() if node.get("name") == sender]
+            if len(matches) == 1:
+                return self._node_ref(matches[0], matches[0]["id"][:2], 1)
+        return None
+
+    # Packets ----------------------------------------------------------------
+
+    def ingest_rx_log(self, rx_log: dict[str, Any], now: Optional[float] = None) -> Optional[dict[str, Any]]:
+        raw_hex = str(rx_log.get("payload") or "").strip()
+        if not raw_hex:
+            # ``raw_hex`` is the whole log frame: SNR byte, RSSI byte, then the packet.
+            raw_hex = str(rx_log.get("raw_hex") or "").strip()[4:]
+        if not raw_hex or len(raw_hex) % 2 or not HEX_RE.match(raw_hex):
+            return None
+        decoded = decode_packet(bytes.fromhex(raw_hex))
+        if decoded is None:
+            return None
+
+        now = time.time() if now is None else now
+        packet: dict[str, Any] = {"id": self._next_packet_id, "received_at": now, **decoded, "raw": raw_hex.upper()}
+        self._next_packet_id += 1
+        for key in ("snr", "rssi"):
+            if isinstance(rx_log.get(key), (int, float)):
+                packet[key] = rx_log[key]
+
+        # Extras that meshcore_py adds when it can decrypt a channel message.
+        if packet["payload_type"] == PAYLOAD_TYPE_GRP_TXT:
+            if rx_log.get("chan_name"):
+                packet["channel_name"] = str(rx_log["chan_name"])
+            message = rx_log.get("message")
+            if isinstance(message, str) and message:
+                sender, sep, body = message.partition(": ")
+                if sep and 0 < len(sender) <= 32:
+                    packet["sender_name"] = sender
+                    packet["message"] = body
+                else:
+                    packet["message"] = message
+
+        changed_nodes: list[dict[str, Any]] = []
+        advert = packet.get("advert")
+        if packet["payload_type"] == PAYLOAD_TYPE_ADVERT and advert:
+            existing = self.nodes.get(advert["public_key"])
+            if not existing or (existing.get("last_advert") or 0) <= advert["advert_timestamp"]:
+                node, changed = self._upsert_node(
+                    advert["public_key"],
+                    name=advert.get("name"),
+                    type=advert["node_type"],
+                    lat=advert.get("lat"),
+                    lon=advert.get("lon"),
+                    last_advert=advert["advert_timestamp"],
+                )
+                if changed:
+                    changed_nodes.append(node)
+        elif packet["payload_type"] == PAYLOAD_TYPE_ANON_REQ and packet.get("src_public_key"):
+            node, created = self._upsert_node(packet["src_public_key"])
+            if created:
+                changed_nodes.append(node)
+
+        packet["path_nodes"] = self._resolve_path(packet["path"])
+        packet["origin"] = self._resolve_origin(packet)
+        if packet["route"] == "flood":
+            # The last relay (or the originator, for zero-hop packets) is who we heard.
+            packet["heard_from"] = packet["path_nodes"][-1] if packet["path_nodes"] else packet["origin"]
+        else:
+            packet["heard_from"] = None
+
+        heard_id = (packet.get("heard_from") or {}).get("node_id")
+        if heard_id and heard_id in self.nodes:
+            node, _ = self._upsert_node(heard_id, last_heard=now, last_snr=packet.get("snr"), last_rssi=packet.get("rssi"))
+            if node not in changed_nodes:
+                changed_nodes.append(node)
+        origin_id = (packet.get("origin") or {}).get("node_id")
+        if origin_id and origin_id in self.nodes:
+            node, _ = self._upsert_node(origin_id, last_seen=now)
+            if node not in changed_nodes:
+                changed_nodes.append(node)
+
+        if len(self.packets) == self.packets.maxlen:
+            dropped = self.packets[0]["hash"]
+            remaining = self._hash_counts.get(dropped, 1) - 1
+            if remaining > 0:
+                self._hash_counts[dropped] = remaining
+            else:
+                self._hash_counts.pop(dropped, None)
+        self._hash_counts[packet["hash"]] = self._hash_counts.get(packet["hash"], 0) + 1
+        packet["seen_count"] = self._hash_counts[packet["hash"]]
+        self.packets.append(packet)
+
+        self._publish({"type": "packet", "packet": packet, "nodes": [dict(node) for node in changed_nodes]})
+        return packet
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "type": "snapshot",
+            "self_id": self.self_id,
+            "nodes": [dict(node) for node in self.nodes.values()],
+            "packets": list(self.packets),
+        }
+
+
+# --- HTTP server ---------------------------------------------------------------
+
+
+_STATUS_TEXT = {200: "OK", 401: "Unauthorized", 404: "Not Found", 405: "Method Not Allowed", 400: "Bad Request"}
+
+
+class PacketMapServer:
+    def __init__(self, config: PacketMapConfig, state: PacketMapState):
+        self.config = config
+        self.state = state
+        self._server: Optional[asyncio.AbstractServer] = None
+        self._index_html = b""
+        self._stream_tasks: set[asyncio.Task[Any]] = set()
+
+    @property
+    def port(self) -> Optional[int]:
+        if self._server is None or not self._server.sockets:
+            return None
+        return self._server.sockets[0].getsockname()[1]
+
+    async def start(self) -> None:
+        template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        config_json = json.dumps(self.config.client_config()).replace("</", "<\\/")
+        self._index_html = template.replace("/*__MESHGRAM_CONFIG__*/{}", config_json).encode("utf-8")
+        self._server = await asyncio.start_server(self._handle_client, self.config.host, self.config.port)
+        LOGGER.info("Packet map: serving on http://%s:%s/", self.config.host, self.port)
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+        for task in list(self._stream_tasks):
+            task.cancel()
+        for task in list(self._stream_tasks):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        if self._server is not None:
+            with contextlib.suppress(Exception):
+                await self._server.wait_closed()
+            self._server = None
+
+    def _authorized(self, headers: dict[str, str]) -> bool:
+        if not self.config.password:
+            return True
+        scheme, _, credentials = headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "basic":
+            return False
+        try:
+            decoded = base64.b64decode(credentials.strip(), validate=True).decode("utf-8")
+        except Exception:
+            return False
+        _, _, password = decoded.partition(":")
+        return hmac.compare_digest(password.encode("utf-8"), self.config.password.encode("utf-8"))
+
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._stream_tasks.add(task)
+        try:
+            await self._serve_request(reader, writer)
+        except (ConnectionError, asyncio.IncompleteReadError, asyncio.TimeoutError, asyncio.LimitOverrunError):
+            pass
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            LOGGER.exception("Packet map: request failed")
+        finally:
+            if task is not None:
+                self._stream_tasks.discard(task)
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    async def _serve_request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10.0)
+        if len(head) > MAX_REQUEST_HEAD_BYTES:
+            await self._respond(writer, 400, b"request too large")
+            return
+        lines = head.decode("latin-1").split("\r\n")
+        parts = lines[0].split(" ")
+        if len(parts) != 3:
+            await self._respond(writer, 400, b"bad request")
+            return
+        method, target, _ = parts
+        headers = {}
+        for line in lines[1:]:
+            name, sep, value = line.partition(":")
+            if sep:
+                headers[name.strip().lower()] = value.strip()
+
+        if method not in {"GET", "HEAD"}:
+            await self._respond(writer, 405, b"method not allowed")
+            return
+        if not self._authorized(headers):
+            await self._respond(
+                writer, 401, b"authentication required", extra_headers={"WWW-Authenticate": 'Basic realm="meshgram"'}
+            )
+            return
+
+        path = urlsplit(target).path
+        body_only = method == "GET"
+        if path in {"/", "/index.html"}:
+            await self._respond(writer, 200, self._index_html, "text/html; charset=utf-8", body_only)
+        elif path == "/api/state":
+            await self._respond(writer, 200, json.dumps(self.state.snapshot()).encode("utf-8"), "application/json", body_only)
+        elif path == "/healthz":
+            await self._respond(writer, 200, b"ok", "text/plain", body_only)
+        elif path == "/api/events" and body_only:
+            await self._stream_events(writer)
+        else:
+            await self._respond(writer, 404, b"not found")
+
+    async def _respond(
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        body: bytes,
+        content_type: str = "text/plain; charset=utf-8",
+        include_body: bool = True,
+        extra_headers: Optional[dict[str, str]] = None,
+    ) -> None:
+        headers = {
+            "Content-Type": content_type,
+            "Content-Length": str(len(body)),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Connection": "close",
+            **(extra_headers or {}),
+        }
+        head = f"HTTP/1.1 {status} {_STATUS_TEXT.get(status, 'OK')}\r\n"
+        head += "".join(f"{name}: {value}\r\n" for name, value in headers.items()) + "\r\n"
+        writer.write(head.encode("latin-1") + (body if include_body else b""))
+        await writer.drain()
+
+    async def _stream_events(self, writer: asyncio.StreamWriter) -> None:
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/event-stream\r\n"
+            b"Cache-Control: no-store\r\n"
+            b"Connection: close\r\n"
+            b"X-Accel-Buffering: no\r\n\r\n"
+            b"retry: 3000\n\n"
+        )
+        queue = self.state.subscribe()
+        try:
+            await self._send_event(writer, self.state.snapshot())
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    writer.write(b": keepalive\n\n")
+                    await writer.drain()
+                    continue
+                if event.get("type") == "overflow":
+                    return
+                await self._send_event(writer, event)
+        finally:
+            self.state.unsubscribe(queue)
+
+    @staticmethod
+    async def _send_event(writer: asyncio.StreamWriter, event: dict[str, Any]) -> None:
+        writer.write(b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n")
+        await writer.drain()
+
+
+# --- Plugin --------------------------------------------------------------------
+
+
+class PacketMapPlugin(BasePlugin):
+    name = "packet_map"
+
+    def __init__(self, settings: Optional[dict[str, Any]] = None):
+        super().__init__(settings)
+        self.config = PacketMapConfig.from_settings(self.settings)
+        self.state = PacketMapState(max_packets=self.config.max_packets)
+        self.server = PacketMapServer(self.config, self.state)
+        self._transport: Any = None
+        self._refresh_task: Optional[asyncio.Task[None]] = None
+        self._enabled = False
+
+    async def on_startup(self, context: PluginContext) -> list[PluginAction]:
+        if context.settings.mesh.backend != MESHCORE_BACKEND:
+            LOGGER.error("Packet map disabled: it needs MeshCore RF logs (set mesh.backend to meshcore)")
+            return []
+        try:
+            await self.server.start()
+        except OSError as exc:
+            LOGGER.error("Packet map disabled: cannot listen on %s:%s (%s)", self.config.host, self.config.port, exc)
+            return []
+        self._enabled = True
+        return []
+
+    async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
+        if not self._enabled:
+            return
+        self._transport = transport
+        transport.add_rx_log_listener(self.handle_rx_log)
+        self.state.apply_self(transport.device_self_info)
+        self._refresh_contacts()
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(self._contact_refresh_loop(), name="packet-map-contacts")
+
+    def _refresh_contacts(self) -> None:
+        contacts = getattr(self._transport, "contacts", None)
+        if isinstance(contacts, dict):
+            self.state.apply_contacts(contacts)
+
+    async def _contact_refresh_loop(self) -> None:
+        while True:
+            await asyncio.sleep(CONTACT_REFRESH_SECONDS)
+            self._refresh_contacts()
+
+    async def handle_rx_log(self, rx_log: dict[str, Any]) -> None:
+        packet = self.state.ingest_rx_log(rx_log)
+        if packet is None:
+            LOGGER.debug("Packet map: skipping undecodable RX log: %s", rx_log.get("raw_hex"))
+
+    async def on_shutdown(self) -> None:
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._refresh_task
+            self._refresh_task = None
+        if self._enabled:
+            await self.server.stop()
+            self._enabled = False
