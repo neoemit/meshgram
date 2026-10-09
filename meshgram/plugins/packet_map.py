@@ -53,6 +53,7 @@ from meshgram.plugins.packet_map_store import (
     SavedState,
     encode,
 )
+from meshgram.status import StatusRegistry
 from meshgram.types import PluginAction, PluginContext
 
 LOGGER = logging.getLogger(__name__)
@@ -162,6 +163,8 @@ class PacketMapState:
         # meshes fill with adverts and ACKs within minutes.
         self.messages: deque[dict[str, Any]] = deque(maxlen=max_messages)
         self.self_id: Optional[str] = None
+        # Connection status of the radio, Telegram, MQTT, ... (shown in the page header).
+        self.status: Optional[StatusRegistry] = None
         self._hash_counts: dict[str, int] = {}
         self._remote_hash_counts: dict[str, int] = {}
         self._next_packet_id = 1
@@ -240,6 +243,9 @@ class PacketMapState:
                 with contextlib.suppress(asyncio.QueueFull):
                     queue.get_nowait()
                     queue.put_nowait({"type": "overflow"})
+
+    def apply_status(self, entry: dict[str, Any]) -> None:
+        self._publish({"type": "connection", "connection": entry})
 
     # Nodes ------------------------------------------------------------------
 
@@ -520,6 +526,7 @@ class PacketMapState:
             "packets": list(self.packets),
             "remote_packets": list(self.remote_packets),
             "messages": [message for message in self.messages if message["id"] not in buffered],
+            "connections": self.status.snapshot() if self.status is not None else [],
         }
 
 
@@ -719,6 +726,10 @@ class PacketMapPlugin(BasePlugin):
             await self._close_store()
             return []
         self._enabled = True
+        status = getattr(context, "status", None)
+        if status is not None:
+            self.state.status = status
+            status.add_listener(self.state.apply_status)
         return []
 
     async def _open_store(self) -> None:
@@ -815,6 +826,8 @@ class PacketMapPlugin(BasePlugin):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._refresh_task
             self._refresh_task = None
+        if self.state.status is not None:
+            self.state.status.remove_listener(self.state.apply_status)
         if self._enabled:
             await self.server.stop()
             self._enabled = False

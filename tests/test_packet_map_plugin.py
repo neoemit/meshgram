@@ -21,6 +21,7 @@ from meshgram.plugins.packet_map_store import (
     PacketMapStoreError,
     RetentionLimits,
 )
+from meshgram.status import StatusRegistry
 
 SELF_KEY = "AA" * 32
 REPEATER_KEY = "B1" + "11" * 31
@@ -392,6 +393,27 @@ class PluginTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
 
         await plugin.on_shutdown()
         self.assertIsNone(plugin.server.port)
+
+    async def test_connection_status_is_streamed(self):
+        status = StatusRegistry()
+        status.set_state("radio", "connected", "meshcore serial", label="Radio")
+        context = _context()
+        context.status = status
+        plugin = PacketMapPlugin({"port": 0})
+        await plugin.on_startup(context)
+        self.addAsyncCleanup(plugin.on_shutdown)
+        self.assertEqual([entry["key"] for entry in plugin.state.snapshot()["connections"]], ["radio"])
+
+        queue = plugin.state.subscribe()
+        status.set_state("mqtt_publish", "disconnected", "refused", label="MQTT")
+        event = await asyncio.wait_for(queue.get(), timeout=1)
+        self.assertEqual(event["type"], "connection")
+        self.assertEqual((event["connection"]["key"], event["connection"]["state"]), ("mqtt_publish", "disconnected"))
+
+        await plugin.on_shutdown()
+        status.set_state("radio", "disconnected")
+        await asyncio.sleep(0)
+        self.assertTrue(queue.empty())
 
 
 class StoreTests(_DataDirMixin, unittest.TestCase):

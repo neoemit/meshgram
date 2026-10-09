@@ -15,11 +15,13 @@ from meshgram.plugins.meshmapper import (
     CLIENT_VERSION,
     MeshMapperConfig,
     MeshMapperPlugin,
+    MeshMapperSubscriber,
     MeshMapperUploader,
     build_packet_message,
     packet_hash,
     parse_observer_packet,
 )
+from meshgram.status import StatusRegistry
 from meshgram.types import PluginContext
 
 # RFC 8032 test vector 1, converted to MeshCore's 64-byte (scalar || prefix) key format.
@@ -161,6 +163,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.iata, "SEA")
         self.assertEqual(config.private_key, RFC_PRIVATE_KEY.hex().upper())
 
+    def test_subscriber_settings(self):
+        config = MeshMapperConfig.from_settings({"iata": "YOW", "port": 8883, "transport": "tcp"})
+        self.assertEqual(
+            (config.subscribe_server, config.subscribe_port, config.subscribe_transport, config.subscribe_tls),
+            ("mqtt.meshmapper.net", 8883, "tcp", True),
+        )
+        self.assertIsNotNone(config.subscriber_disabled_reason())
+        env = {"MESHMAPPER_SUBSCRIBE_USERNAME": "viewer", "MESHMAPPER_SUBSCRIBE_PASSWORD": "secret"}
+        with mock.patch.dict(os.environ, env):
+            config = MeshMapperConfig.from_settings(
+                {"iata": "YOW", "subscribe_server": "broker.example.org", "subscribe_port": 9001, "subscribe_tls": False}
+            )
+        self.assertEqual((config.subscribe_username, config.subscribe_password), ("viewer", "secret"))
+        self.assertEqual((config.subscribe_server, config.subscribe_port, config.subscribe_tls), ("broker.example.org", 9001, False))
+        self.assertIsNone(config.subscriber_disabled_reason())
+        config.subscribe = False
+        self.assertIsNotNone(config.subscriber_disabled_reason())
+
     def test_invalid_private_key_is_rejected(self):
         self.assertIsNotNone(MeshMapperConfig.from_settings({"iata": "YOW", "private_key": "abcd"}).validation_error())
 
@@ -189,6 +209,7 @@ class _FakeMqttClient:
         self.disconnected = False
         self.on_connect = None
         self.on_disconnect = None
+        self.on_connect_fail = None
         self.on_subscribe = None
         self.on_message = None
 
@@ -298,6 +319,7 @@ class UploaderTests(unittest.TestCase):
 
         self.plugin = MeshMapperPlugin({"iata": "yow"})
         self.plugin.uploader = MeshMapperUploader(self.plugin.config, client_factory=factory)
+        self.plugin.subscriber = MeshMapperSubscriber(self.plugin.config, client_factory=factory)
         self.transport = _FakeTransport()
 
     async def _connect(self) -> _FakeMqttClient:
@@ -367,13 +389,50 @@ class UploaderTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_subscribes_to_region_and_forwards_other_observers(self):
+    def _enable_subscriber(self) -> None:
+        self.plugin.config.subscribe_username = "viewer"
+        self.plugin.config.subscribe_password = "secret"
+
+    def _subscriber_client(self) -> _FakeMqttClient:
+        return next(client for client in self.clients if "sub_" in client.client_id)
+
+    def _uploader_client(self) -> _FakeMqttClient:
+        return next(client for client in self.clients if "sub_" not in client.client_id)
+
+    def test_device_signed_session_never_subscribes(self):
+        # MeshMapper's broker disconnects device-authenticated clients that subscribe.
         async def scenario():
-            client = await self._connect()
+            self._enable_subscriber()
+            await self._connect_all()
+            self.assertEqual(self._uploader_client().subscriptions, [])
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    async def _connect_all(self) -> None:
+        await self.plugin.on_mesh_connected(self.transport, _make_context())
+        for _ in range(20):
+            if len(self.clients) == 2:
+                break
+            await asyncio.sleep(0)
+        for client in self.clients:
+            client.on_connect(client, None, None, _ReasonCode(0), None)
+
+    def test_subscriber_account_receives_other_observers(self):
+        async def scenario():
+            self._enable_subscriber()
+            self.plugin.config.subscribe_server = "regional.example.org"
+            self.plugin.config.subscribe_port = 8883
+            await self._connect_all()
+            client = self._subscriber_client()
+            self.assertEqual(client.credentials, [("viewer", "secret")])
+            self.assertEqual(client.connect_args, ("regional.example.org", 8883, 60))
+            self.assertEqual(client.client_id, f"meshgram_sub_{PUBKEY_HEX}"[:23])
             topic = "meshcore/YOW/+/packets"
             self.assertEqual(client.subscriptions, [(topic, 0)])
             with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
                 client.on_subscribe(client, None, 1, [_ReasonCode(0)], None)
+            self.assertTrue(self.plugin.subscriber.is_subscribed)
 
             other = "AB" * 32
             packet = {"origin": "Hilltop obs", "type": "PACKET", "direction": "rx", "raw": "1500AABB", "SNR": "4"}
@@ -385,40 +444,124 @@ class UploaderTests(unittest.TestCase):
                 self.transport.remote,
                 [{"payload": "1500AABB", "observer_id": other, "observer_name": "Hilltop obs", "snr": 4.0}],
             )
+
+            # A radio reconnect keeps the existing subscriber session.
+            await self.plugin.on_mesh_connected(self.transport, _make_context())
+            self.assertEqual(len(self.clients), 2)
+
+            await self.plugin.on_shutdown()
+            self.assertTrue(client.disconnected)
+            self.assertFalse(client.loop_started)
+
+        asyncio.run(scenario())
+
+    def test_subscriber_defaults_to_upload_broker(self):
+        async def scenario():
+            self._enable_subscriber()
+            await self._connect_all()
+            client = self._subscriber_client()
+            self.assertEqual(client.connect_args, ("mqtt.meshmapper.net", 443, 60))
+            self.assertEqual(client.transport, "websockets")
+            self.assertEqual(client.ws_options, {"path": "/"})
             await self.plugin.on_shutdown()
 
         asyncio.run(scenario())
 
     def test_refused_subscription_is_not_retried(self):
         async def scenario():
-            client = await self._connect()
-            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING") as logs:
+            self._enable_subscriber()
+            await self._connect_all()
+            client = self._subscriber_client()
+            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
                 client.on_subscribe(client, None, 1, [_ReasonCode(0x80)], None)
-            self.assertIn("Uploads are unaffected", logs.output[0])
             client.on_connect(client, None, None, _ReasonCode(0), None)  # reconnect
             self.assertEqual(len(client.subscriptions), 1)
-            self.assertEqual(client.published[-1][1]["status"], "online")  # uploads carry on
+            self.assertEqual(self._uploader_client().published[-1][1]["status"], "online")  # uploads carry on
             await self.plugin.on_shutdown()
 
         asyncio.run(scenario())
 
-    def test_disconnect_right_after_subscribing_stops_subscribing(self):
+    def test_no_subscriber_without_credentials(self):
         async def scenario():
-            client = await self._connect()
-            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
-                client.on_disconnect(client, None, None, _ReasonCode(135), None)
-            client.on_connect(client, None, None, _ReasonCode(0), None)
-            self.assertEqual(len(client.subscriptions), 1)
+            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO") as logs:
+                await self._connect()
+            self.assertTrue(any("MESHMAPPER_SUBSCRIBE_USERNAME" in line for line in logs.output))
+            self.assertEqual(len(self.clients), 1)
+            self.assertEqual(self.clients[0].subscriptions, [])
             await self.plugin.on_shutdown()
 
         asyncio.run(scenario())
 
     def test_subscribing_can_be_turned_off(self):
         async def scenario():
+            self._enable_subscriber()
             self.plugin.config.subscribe = False
             client = await self._connect()
+            self.assertEqual(len(self.clients), 1)
             self.assertEqual(client.subscriptions, [])
             await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_reports_connection_status(self):
+        async def scenario():
+            self._enable_subscriber()
+            status = StatusRegistry()
+            context = _make_context()
+            context.status = status
+            await self.plugin.on_startup(context)
+            self.assertEqual(status.get("mqtt_publish")["state"], "connecting")
+            self.assertEqual(status.get("mqtt_subscribe")["state"], "connecting")
+
+            await self.plugin.on_mesh_connected(self.transport, context)
+            for _ in range(20):
+                if len(self.clients) == 2:
+                    break
+                await asyncio.sleep(0)
+            uploader, subscriber = self._uploader_client(), self._subscriber_client()
+            uploader.on_connect(uploader, None, None, _ReasonCode(0), None)
+            self.assertEqual(status.get("mqtt_publish")["state"], "connected")
+            subscriber.on_connect(subscriber, None, None, _ReasonCode(0), None)
+            self.assertEqual(status.get("mqtt_subscribe")["state"], "connecting")
+            subscriber.on_subscribe(subscriber, None, 1, [_ReasonCode(0)], None)
+            self.assertEqual(status.get("mqtt_subscribe")["state"], "connected")
+
+            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+                uploader.on_disconnect(uploader, None, None, _ReasonCode(7), None)
+            self.assertEqual(status.get("mqtt_publish")["state"], "disconnected")
+            uploader.on_connect(uploader, None, None, _ReasonCode(0), None)
+            uploader.on_connect_fail(uploader, None)
+            self.assertEqual(status.get("mqtt_publish")["state"], "disconnected")
+            self.assertIn("Can't reach", status.get("mqtt_publish")["detail"])
+            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
+                subscriber.on_connect(subscriber, None, None, _ReasonCode(135), None)
+            self.assertEqual(status.get("mqtt_subscribe")["state"], "disconnected")
+            self.assertIn("credentials", status.get("mqtt_subscribe")["detail"])
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_status_without_subscriber_credentials_is_disabled(self):
+        async def scenario():
+            status = StatusRegistry()
+            context = _make_context()
+            context.status = status
+            await self.plugin.on_startup(context)
+            entry = status.get("mqtt_subscribe")
+            self.assertEqual(entry["state"], "disabled")
+            self.assertIn("subscriber account", entry["detail"])
+
+        asyncio.run(scenario())
+
+    def test_status_disabled_on_wrong_backend(self):
+        async def scenario():
+            status = StatusRegistry()
+            context = _make_context(MESHTASTIC_BACKEND)
+            context.status = status
+            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
+                await self.plugin.on_startup(context)
+            self.assertEqual(status.get("mqtt_publish")["state"], "disabled")
+            self.assertEqual(status.get("mqtt_subscribe")["state"], "disabled")
 
         asyncio.run(scenario())
 
