@@ -32,7 +32,8 @@ meshcore:
   outbound_echo_text_fallback_ttl_seconds: 2.0
   connection:
     mode: serial               # serial | tcp | ble
-    serial_device: /dev/ttyUSB0
+    # serial_device: /dev/ttyUSB0
+    serial_device: /dev/ttyACM0
     baudrate: 115200
     tcp_host: localhost
     tcp_port: 5000
@@ -82,22 +83,22 @@ plugins:
       channels: [1, 2]
 
   - name: trace_me  # "trace-me" also works
-    enabled: false
+    enabled: true
     settings:
       # MeshCore only. Reply when a MeshCore channel message is exactly "trace".
       keywords: ["trace"]
       # Omit or set to "same" to reply on the incoming MeshCore channel.
       response_channel: same
       # Optional allowlist of incoming MeshCore channels that can trigger trace responses.
-      # channels: [0]
+      channels: [1, 2]
 
   - name: meshmapper
-    enabled: false
+    enabled: true
     settings:
       # MeshCore only. Uploads every packet the radio hears to MeshMapper's
       # MQTT broker (mqtt.meshmapper.net:443, WebSockets + TLS) as an observer.
       # Required: your MeshMapper region code (or set MESHMAPPER_IATA in .env).
-      iata: "XXX"
+      iata: "CPT"
       # Optional overrides (defaults shown):
       # server: mqtt.meshmapper.net
       # port: 443
@@ -108,14 +109,14 @@ plugins:
       # observer logins are publish-only, so this needs a subscriber account from
       # the broker operator: set MESHMAPPER_SUBSCRIBE_USERNAME and
       # MESHMAPPER_SUBSCRIBE_PASSWORD in .env. Defaults to the upload broker.
-      # subscribe: true
-      # subscribe_server: mqtt.meshmapper.net
-      # subscribe_port: 443
+      subscribe: true
+      subscribe_server: mqtt.meshmapper.net
+      subscribe_port: 443
       # Auth tokens are signed by the radio itself. Only if your firmware can't
-      # sign on-device, set MESHMAPPER_PRIVATE_KEY in .env (never here).
+      # sign on-device, set MESHMAPPER_PRIVATE_KEY in .env (never here).      
 
   - name: packet_map
-    enabled: false
+    enabled: true
     settings:
       # MeshCore only. Web app with a live map of nodes/repeaters and every
       # packet the radio hears. Open http://<host>:<port>/ in a browser.
@@ -123,14 +124,10 @@ plugins:
       host: 127.0.0.1
       port: 8080
       # max_packets: 500
-      # max_remote_packets: 1000   # packets from other MeshMapper observers
-      # max_messages: 1000
-      # Nodes and packet history are saved to an SQLite database and restored
-      # on restart (inside MESHGRAM_DATA_DIR, default ./data; /app/data in Docker).
-      # persist: true
-      # db_path: packet_map.sqlite3
+      # max_remote_packets: 1000 # packets from other MeshMapper observers
       # Optional HTTP Basic auth; prefer PACKET_MAP_PASSWORD in .env.
       # password: ""
+
 
   - name: dm_http_command
     enabled: false
