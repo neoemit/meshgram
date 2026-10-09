@@ -70,6 +70,7 @@ Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshta
 - `plugins/dm_http_command.py` — DMs that invoke HTTP endpoints and return formatted responses
 - `plugins/trace_me.py` — MeshCore-only route trace responder
 - `plugins/meshmapper.py` — MeshCore-only MeshMapper observer: uploads every RX packet to MeshMapper's MQTT broker (paho-mqtt, device-signed JWT auth). Uses the optional `on_mesh_connected` / `on_shutdown` plugin hooks and `MeshCoreTransport.add_rx_log_listener()` instead of message hooks.
+- `plugins/packet_map.py` — MeshCore-only web app (stdlib asyncio HTTP server + Server-Sent Events) showing a Leaflet map of positioned nodes/repeaters and a live list of every RX packet. The page is `plugins/packet_map_static/index.html` (single file, no build step). Node positions come from adverts and `MeshCoreTransport.contacts`.
 
 ### Key modules
 
@@ -79,6 +80,7 @@ Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshta
 | `meshgram/transport/__init__.py` | `MeshTransport` ABC + `create_transport()` factory |
 | `meshgram/transport/meshtastic.py` | `MeshtasticTransport` (also exported as `MeshtasticClient` for back-compat) |
 | `meshgram/transport/meshcore.py` | `MeshCoreTransport` |
+| `meshgram/meshcore_packets.py` | Raw MeshCore RF packet decoding (header, path, packet hash, advert contents); shared by `meshmapper` and `packet_map` |
 | `meshgram/_mesh_helpers.py` | Shared helpers (node-id normalization, emoji extraction, port-num check) |
 | `meshgram/config.py` | Settings dataclasses; `load_settings()` with env-over-YAML precedence |
 | `meshgram/types.py` | All event and action dataclasses; `Plugin` protocol; `PluginContext`. Type names use the `Mesh*` prefix; the older `Meshtastic*` names are kept as aliases. |

@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import hashlib
 import json
 import logging
 import os
@@ -33,6 +32,7 @@ from typing import Any, Callable, Optional
 from meshgram import __version__
 from meshgram._ed25519 import public_key_from_expanded, sign_with_expanded_key
 from meshgram.config import MESHCORE_BACKEND
+from meshgram.meshcore_packets import DIRECT_ROUTE_TYPES, packet_hash, parse_packet
 from meshgram.plugin import BasePlugin
 from meshgram.types import PluginContext
 
@@ -44,10 +44,6 @@ DEFAULT_TOPIC_PACKETS = "meshcore/{IATA}/{PUBLIC_KEY}/packets"
 PLACEHOLDER_IATA_CODES = {"", "XXX", "XYZ"}
 CLIENT_VERSION = f"meshgram/{__version__}"
 
-PAYLOAD_TYPE_TRACE = 9
-ROUTE_TYPE_TRANSPORT_FLOOD = 0x00
-ROUTE_TYPE_TRANSPORT_DIRECT = 0x03
-DIRECT_ROUTE_TYPES = {0x02, ROUTE_TYPE_TRANSPORT_DIRECT}
 MQTT_AUTH_FAILURE_CODES = {4, 5, 134, 135}
 
 HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
@@ -128,45 +124,6 @@ class MeshMapperConfig:
 
 
 # --- Packet formatting -------------------------------------------------------
-
-
-def parse_packet(raw: bytes) -> Optional[dict[str, Any]]:
-    """Decode the MeshCore packet header. Returns ``None`` for truncated packets."""
-    if len(raw) < 2:
-        return None
-    header = raw[0]
-    route_type = header & 0x03
-    payload_type = (header >> 2) & 0x0F
-    offset = 1
-    if route_type in (ROUTE_TYPE_TRANSPORT_FLOOD, ROUTE_TYPE_TRANSPORT_DIRECT):
-        offset += 4  # two 16-bit transport codes
-    if len(raw) <= offset:
-        return None
-    path_len_byte = raw[offset]
-    offset += 1
-    hash_size = (path_len_byte >> 6) + 1
-    hop_count = path_len_byte & 0x3F
-    path_end = offset + hop_count * hash_size
-    if path_end > len(raw):
-        return None
-    path = raw[offset:path_end]
-    return {
-        "route_type": route_type,
-        "payload_type": payload_type,
-        "path_len_byte": path_len_byte,
-        "path_hashes": [path[i : i + hash_size].hex().upper() for i in range(0, len(path), hash_size)],
-        "payload": raw[path_end:],
-    }
-
-
-def packet_hash(payload_type: int, path_len_byte: int, payload: bytes) -> str:
-    """Same as MeshCore ``Packet::calculatePacketHash`` (first 8 bytes of SHA-256)."""
-    digest = hashlib.sha256()
-    digest.update(bytes([payload_type]))
-    if payload_type == PAYLOAD_TYPE_TRACE:
-        digest.update(path_len_byte.to_bytes(2, "little"))
-    digest.update(payload)
-    return digest.hexdigest()[:16].upper()
 
 
 def build_packet_message(

@@ -269,6 +269,11 @@ class MeshCoreTransport(MeshTransport):
         info = getattr(self._mc, "self_info", None) if self._mc is not None else None
         return dict(info) if isinstance(info, dict) else {}
 
+    @property
+    def contacts(self) -> dict[str, dict[str, Any]]:
+        """Contacts known to the companion radio, keyed by public key (hex)."""
+        return {key: dict(value) for key, value in self._contacts.items() if isinstance(value, dict)}
+
     def add_rx_log_listener(self, listener: RxLogListener) -> None:
         """Register a callback for raw RF packet logs. Survives reconnects."""
         if listener not in self._rx_log_listeners:

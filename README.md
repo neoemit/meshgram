@@ -12,8 +12,9 @@ Supports both **Meshtastic** and **MeshCore** radios. Speaks serial, TCP, and BL
 - 🧵 Cross-platform reply linking (Meshtastic)
 - ❤️ Bidirectional emoji reaction sync for linked messages (Meshtastic)
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
-- 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`)
+- 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `packet_map`)
 - 🗺️ Optional MeshMapper observer uploads over MQTT (MeshCore)
+- 📡 Optional live web map of packet propagation with a packet inspector (MeshCore)
 - 🐳 First-class Docker deployment with platform-specific overlays
 - 🛠️ Linux `systemd` service templates included
 
@@ -261,6 +262,8 @@ If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `Environmen
 | `SOLAR_HOST` / `SOLAR_TOKEN` / `SOLAR_API_KEY` | — | — | Examples for `dm_http_command` URL/auth templating |
 | `MESHMAPPER_IATA` | — | from YAML | MeshMapper region code for the `meshmapper` plugin |
 | `MESHMAPPER_PRIVATE_KEY` | — | — | Optional MeshCore private key (128 hex chars) for `meshmapper` token signing |
+| `PACKET_MAP_HOST` / `PACKET_MAP_PORT` | — | from YAML | Listen address/port for the `packet_map` web app |
+| `PACKET_MAP_PASSWORD` | — | — | Optional HTTP Basic auth password for the `packet_map` web app |
 
 Env vars override YAML for the same field.
 
@@ -485,6 +488,44 @@ Notes:
 - The plugin is ignored, with an error in the log, on the Meshtastic backend or when `iata` is missing. MeshMapper only accepts MeshCore data.
 - It needs `paho-mqtt`, which is included in `requirements.txt`. If you installed Meshgram before this plugin existed, rerun `pip install -r requirements.txt` or rebuild the Docker image.
 
+### `packet_map` — live packet propagation map (web app)
+
+MeshCore only. Serves a small web app showing what your radio hears in real time:
+
+- **Map (left):** every node that shares a GPS position, from adverts the radio hears and from its contact list. Repeaters and room servers are drawn as diamonds, companions as dots, and your own radio has a pink ring. When a packet arrives, its route (originator → repeaters → your radio) flashes on the map, and the node you heard it from pulses.
+- **Packet list (right):** every received RF packet, newest first. Each card shows the packet type, the sender, SNR/RSSI (colour-coded), hop count, the repeater path resolved to names, the channel and decrypted text for channel messages Meshgram has the key for, and a "heard N×" badge when the same packet arrives over several paths. Click a card to see all decoded metadata (hash, route type, transport codes, advert key/position, source/destination hashes, raw hex) and draw its route on the map. You can filter by text or packet type, and pause the list.
+
+It only listens to the radio's raw RF log. It sends nothing over the mesh or to Telegram, and needs no extra Python packages. The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access.
+
+```yaml
+plugins:
+  - name: packet_map
+    enabled: true
+    settings:
+      host: 127.0.0.1   # use 0.0.0.0 to reach it from other machines / Docker
+      port: 8080
+```
+
+Then open `http://<host>:8080/`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `host` | `127.0.0.1` | Listen address. `PACKET_MAP_HOST` overrides it. |
+| `port` | `8080` | Listen port. `PACKET_MAP_PORT` overrides it. |
+| `password` | — | If set, the page requires HTTP Basic auth with this password (any username). Prefer `PACKET_MAP_PASSWORD` in `.env`. |
+| `max_packets` | `500` | Packets kept in memory and sent to newly opened pages |
+| `title` | `Meshgram packet map` | Page title |
+| `tile_url` / `tile_attribution` | OpenStreetMap | Leaflet tile layer URL template and attribution |
+
+Notes:
+
+- **Docker:** set `host: 0.0.0.0` (or `PACKET_MAP_HOST=0.0.0.0`) and publish the port, e.g. add `ports: ["8080:8080"]` to the `meshgram` service.
+- The page shows decrypted channel messages and node positions. Don't expose it on an untrusted network without `password` and, ideally, a TLS reverse proxy.
+- Path hops are 1–3 byte public-key prefixes, so a hop is matched to a known node by prefix. If several repeaters share the prefix, the one closest to the next hop is picked. Unknown hops are listed by their hash and skipped on the map.
+- For direct-routed packets the path is the remaining route, so it is drawn dashed and isn't connected to your radio.
+- Nodes appear on the map once they share a position (in an advert or in the radio's contact list). The legend shows how many repeaters have no position.
+- History is kept in memory only and is lost on restart.
+
 ---
 
 ## ⚠️ MeshCore Caveats
@@ -507,7 +548,7 @@ Everything else (channel routing, chunking, plugins, sender labels via `contact_
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client.
+Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / HTTP + event stream.
 
 ---
 
@@ -581,6 +622,7 @@ meshgram/
 │   ├── text_utils.py
 │   ├── types.py
 │   ├── _mesh_helpers.py
+│   ├── meshcore_packets.py       # raw MeshCore RF packet decoding
 │   ├── transport/
 │   │   ├── __init__.py           # MeshTransport ABC + create_transport()
 │   │   ├── meshtastic.py
@@ -590,7 +632,9 @@ meshgram/
 │       ├── ping_pong.py
 │       ├── trace_me.py
 │       ├── dm_http_command.py
-│       └── meshmapper.py         # MeshMapper MQTT observer uploads
+│       ├── meshmapper.py         # MeshMapper MQTT observer uploads
+│       ├── packet_map.py         # live packet map web app (server)
+│       └── packet_map_static/    # packet map web app (page)
 └── tests/
 ```
 
