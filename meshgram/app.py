@@ -14,13 +14,14 @@ from telegram import (
     ReactionTypeEmoji,
     Update,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
     MessageReactionHandler,
+    TypeHandler,
     filters,
 )
 
@@ -34,6 +35,7 @@ from ._mesh_helpers import (
 from .config import MESHTASTIC_BACKEND, MeshgramSettings, load_settings
 from .plugin import LoadedPlugin, load_plugins
 from .reply_links import ReplyLinkRegistry
+from .status import CONNECTED, CONNECTING, DISCONNECTED, StatusRegistry
 from .transport import MeshTransport, create_transport
 from .types import (
     MeshPacketRef,
@@ -59,6 +61,7 @@ MESHTASTIC_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 TELEGRAM_REACTION_WRITE_DEDUPE_TTL_SECONDS = 12.0
 DEFAULT_TELEGRAM_REACTION_FALLBACK_EMOJI = "👍"
 TELEGRAM_REACTION_INVALID_ERROR_TOKEN = "reaction_invalid"
+TELEGRAM_HEALTH_CHECK_SECONDS = 60.0
 
 
 class MeshgramApp:
@@ -71,7 +74,11 @@ class MeshgramApp:
         self.reply_links = ReplyLinkRegistry(
             ttl_hours=_get_bridge_reply_ttl_hours(settings),
         )
+        self.status = StatusRegistry()
+        self.status.set_state("radio", CONNECTING, self._mesh_description(), label="Radio")
+        self.status.set_state("telegram", CONNECTING, "Starting bot", label="Telegram")
         self._mesh_connect_task: Optional[asyncio.Task[None]] = None
+        self._telegram_health_task: Optional[asyncio.Task[None]] = None
         self._seen_meshtastic_packet_ids: dict[MeshPacketRef, float] = {}
         self._meshtastic_send_lock = asyncio.Lock()
         self._telegram_reaction_counts: dict[tuple[int, int], dict[str, int]] = {}
@@ -89,6 +96,8 @@ class MeshgramApp:
     async def _post_init(self, app: Application) -> None:
         self.loop = asyncio.get_running_loop()
         self._mesh_connect_task = asyncio.create_task(self._ensure_mesh_connected())
+        self._set_telegram_connected(app.bot.username)
+        self._telegram_health_task = asyncio.create_task(self._monitor_telegram())
 
         await self._dispatch_startup()
         LOGGER.info("Meshgram runtime initialized (backend=%s)", self.mesh.backend_name)
@@ -102,13 +111,17 @@ class MeshgramApp:
                 await asyncio.sleep(healthy_poll_seconds)
                 continue
 
+            if self.status.get("radio")["state"] == CONNECTED:
+                self.status.set_state("radio", DISCONNECTED, f"Connection lost; reconnecting ({self._mesh_description()})")
             try:
                 loop = asyncio.get_running_loop()
                 await self.mesh.connect(loop, self._on_mesh_text, self._on_mesh_reaction)
                 LOGGER.info("Mesh connection established (backend=%s)", self.mesh.backend_name)
+                self.status.set_state("radio", CONNECTED, self._mesh_description())
                 await self._dispatch_mesh_connected()
             except Exception as exc:
                 self.mesh.invalidate_connection()
+                self.status.set_state("radio", DISCONNECTED, f"{exc}; retrying in {retry_delay_seconds}s")
                 LOGGER.warning(
                     "Mesh connection failed (backend=%s, error=%s). Retrying in %ss.",
                     self.mesh.backend_name,
@@ -140,6 +153,11 @@ class MeshgramApp:
                 LOGGER.exception("Plugin %s failed handling mesh connect", loaded_plugin.name)
 
     async def _post_shutdown(self, app: Application) -> None:
+        if self._telegram_health_task is not None:
+            self._telegram_health_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._telegram_health_task
+            self._telegram_health_task = None
         for loaded_plugin in self.plugins:
             hook = getattr(loaded_plugin.instance, "on_shutdown", None)
             if not callable(hook):
@@ -157,7 +175,54 @@ class MeshgramApp:
             mesh_payload_limit=self.mesh.payload_limit,
             local_node_id=self.mesh.local_node_id,
             reply_links=self.reply_links,
+            status=self.status,
         )
+
+    # --- Connection status ----------------------------------------------------
+
+    def _mesh_description(self) -> str:
+        backend = self.settings.mesh.backend
+        connection = getattr(getattr(self.settings, backend, None), "connection", None)
+        mode = str(getattr(connection, "mode", "") or "")
+        if mode == "tcp":
+            target = f"{connection.tcp_host}:{connection.tcp_port}"
+        elif mode == "ble":
+            target = str(getattr(connection, "ble_address", "") or "")
+        else:
+            target = str(getattr(connection, "serial_device", "") or "")
+        return " ".join(part for part in (backend, mode, target) if part)
+
+    def _set_telegram_connected(self, username: Optional[str]) -> None:
+        self.status.set_state("telegram", CONNECTED, f"@{username}" if username else "Bot API reachable")
+
+    async def _monitor_telegram(self) -> None:
+        # Polling errors mark the bot disconnected (_on_telegram_error); this notices recovery.
+        while True:
+            await asyncio.sleep(TELEGRAM_HEALTH_CHECK_SECONDS)
+            if self.bot_app is None:
+                continue
+            try:
+                me = await self.bot_app.bot.get_me()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.status.set_state("telegram", DISCONNECTED, f"Bot API unreachable: {exc}")
+                continue
+            self._set_telegram_connected(me.username)
+
+    async def _on_telegram_update(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # Receiving an update proves polling works again after an outage.
+        self._set_telegram_connected(context.bot.username)
+
+    async def _on_telegram_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        error = context.error
+        if isinstance(error, NetworkError):
+            if update is None:
+                # Raised while fetching updates: the bot can't reach Telegram right now.
+                self.status.set_state("telegram", DISCONNECTED, f"Polling failed: {error}")
+            LOGGER.warning("Telegram network error: %s", error)
+            return
+        LOGGER.error("Unhandled error while processing Telegram update", exc_info=error)
 
     # --- Telegram handlers --------------------------------------------------
 
@@ -753,6 +818,9 @@ class MeshgramApp:
                 message_reaction_types=_message_reaction_handler_types(),
             )
         )
+
+        self.bot_app.add_handler(TypeHandler(Update, self._on_telegram_update), group=-1)
+        self.bot_app.add_error_handler(self._on_telegram_error)
 
         LOGGER.info("Starting Meshgram polling loop (backend=%s)", self.mesh.backend_name)
         try:
