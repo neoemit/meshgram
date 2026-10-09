@@ -7,9 +7,15 @@ services:
       - .env
     environment:
       MESHGRAM_CONFIG_PATH: /app/config.yaml
+      MESHGRAM_DATA_DIR: /app/data
       PACKET_MAP_HOST: 0.0.0.0
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      # Persistent state (packet_map history), kept across rebuilds and redeploys.
+      - meshgram-data:/app/data
     # Uncomment to reach the packet_map web app (also set PACKET_MAP_HOST=0.0.0.0):
     ports:
       - "8080:8080"
+
+volumes:
+  meshgram-data:

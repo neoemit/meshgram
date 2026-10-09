@@ -105,13 +105,17 @@ plugins:
       # transport: websockets
       # token_audience: mqtt.meshmapper.net
       # status_interval_seconds: 300
+      # Also receive other observers' packets for packet_map. Device-signed
+      # observer logins are publish-only, so this needs a subscriber account from
+      # the broker operator: set MESHMAPPER_SUBSCRIBE_USERNAME and
+      # MESHMAPPER_SUBSCRIBE_PASSWORD in .env. Defaults to the upload broker.
       # Also receive other observers' packets for packet_map. They come from
       # MeshMapper's public live feed (no account; metadata only, no packet
       # bytes). With a subscriber account from the broker operator
       # (MESHMAPPER_SUBSCRIBE_USERNAME / _PASSWORD in .env) they also come over
       # MQTT with their bytes; the live feed stands by while MQTT is subscribed.
       subscribe: true
-      # live_feed: true
+      live_feed: true
       subscribe_server: mqtt.meshmapper.net
       subscribe_port: 443
       # Auth tokens are signed by the radio itself. Only if your firmware can't
@@ -127,6 +131,11 @@ plugins:
       port: 8080
       # max_packets: 500
       # max_remote_packets: 1000 # packets from other MeshMapper observers
+      max_messages: 1000
+      # Nodes and packet history are saved to an SQLite database and restored
+      # on restart (inside MESHGRAM_DATA_DIR, default ./data; /app/data in Docker).
+      persist: true
+      db_path: packet_map.sqlite3
       # Optional HTTP Basic auth; prefer PACKET_MAP_PASSWORD in .env.
       # password: ""
 
