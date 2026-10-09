@@ -14,11 +14,14 @@ from meshgram.plugin import load_plugins
 from meshgram.plugins.meshmapper import (
     CLIENT_VERSION,
     MeshMapperConfig,
+    MeshMapperLiveFeed,
     MeshMapperPlugin,
     MeshMapperSubscriber,
     MeshMapperUploader,
     build_packet_message,
+    feed_backoff_seconds,
     packet_hash,
+    parse_feed_observation,
     parse_observer_packet,
 )
 from meshgram.status import StatusRegistry
@@ -144,6 +147,80 @@ class ObserverPacketTests(unittest.TestCase):
         self.assertIsNone(parse_observer_packet(topic, b"not json", PUBKEY_HEX))
 
 
+def _feed_data(observer_key: str, payload_type: int = 4, **observation) -> dict:
+    """A live feed ``packetObservation`` payload, as MeshMapper sends it."""
+    data = {
+        "packetHash": "73408c45e49bd15f",
+        "packet": {"payloadType": payload_type, "payloadTypeName": "ADVERT", "routeType": 1, "routeTypeName": "FLOOD"},
+        "observation": {
+            "observerName": "Hilltop obs",
+            "observerPublicKey": observer_key.lower(),
+            "iata": "YOW",
+            "rssi": -97,
+            "snr": 6.25,
+            "pathBytes": "b2be3dc8",
+            "pathLength": {"raw": "42", "hashSize": 2, "hopCount": 2},
+            "resolvedSource": {
+                "confidence": "high",
+                "nodes": [{"name": "Solar", "publicKey": "cd" * 32, "latitude": 45.5, "longitude": -75.5}],
+            },
+        },
+    }
+    data["observation"].update(observation)
+    return data
+
+
+class FeedObservationTests(unittest.TestCase):
+    OTHER = "AB" * 32
+
+    def test_observation_becomes_decoded_rx_log(self):
+        self.assertEqual(
+            parse_feed_observation(_feed_data(self.OTHER), PUBKEY_HEX),
+            {
+                "decoded": {
+                    "hash": "73408C45E49BD15F",
+                    "payload_type": 4,
+                    "payload_type_name": "ADVERT",
+                    "route_type": 1,
+                    "route_type_name": "FLOOD",
+                    "route": "flood",
+                    "path": ["B2BE", "3DC8"],
+                    "path_hash_size": 2,
+                    "hops": 2,
+                },
+                "observer_id": self.OTHER,
+                "observer_name": "Hilltop obs",
+                "snr": 6.25,
+                "rssi": -97.0,
+                "source_node": {"public_key": "CD" * 32, "name": "Solar", "lat": 45.5, "lon": -75.5},
+            },
+        )
+
+    def test_unreported_signal_and_unsure_source_are_left_out(self):
+        unsure = {"confidence": "ambiguous", "nodes": [{"publicKey": "CD" * 32}, {"publicKey": "CE" * 32}]}
+        observation = parse_feed_observation(_feed_data(self.OTHER, snr=0, rssi=0, resolvedSource=unsure), PUBKEY_HEX)
+        for key in ("snr", "rssi", "source_node"):
+            self.assertNotIn(key, observation)
+
+    def test_trace_path_is_snr_list(self):
+        data = _feed_data(self.OTHER, payload_type=9, pathBytes="14f0", pathLength={"hashSize": 1})
+        decoded = parse_feed_observation(data, PUBKEY_HEX)["decoded"]
+        self.assertEqual((decoded["payload_type_name"], decoded["path"], decoded["trace_snrs"], decoded["hops"]),
+                         ("TRACE", [], [5.0, -4.0], 2))
+
+    def test_skips_own_uploads_and_garbage(self):
+        self.assertIsNone(parse_feed_observation(_feed_data(PUBKEY_HEX), PUBKEY_HEX))
+        self.assertIsNone(parse_feed_observation(_feed_data(self.OTHER, pathBytes="b2be3d"), PUBKEY_HEX))
+        self.assertIsNone(parse_feed_observation({**_feed_data(self.OTHER), "packetHash": "xyz"}, PUBKEY_HEX))
+        self.assertIsNone(parse_feed_observation(_feed_data(self.OTHER, payload_type=16), PUBKEY_HEX))
+        self.assertIsNone(parse_feed_observation({"packet": {}}, PUBKEY_HEX))
+        self.assertIsNone(parse_feed_observation(None, PUBKEY_HEX))
+
+    def test_reconnect_backoff(self):
+        self.assertEqual([feed_backoff_seconds(attempt, 0.0) for attempt in (0, 1, 3, 4, 5, 9)], [1, 2, 8, 16, 30, 30])
+        self.assertEqual((feed_backoff_seconds(0, 1.0), feed_backoff_seconds(0, -1.0)), (1.25, 0.75))
+
+
 class ConfigTests(unittest.TestCase):
     def test_defaults_target_meshmapper_broker(self):
         config = MeshMapperConfig.from_settings({"iata": "yow"})
@@ -180,6 +257,13 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNone(config.subscriber_disabled_reason())
         config.subscribe = False
         self.assertIsNotNone(config.subscriber_disabled_reason())
+
+    def test_live_feed_settings(self):
+        config = MeshMapperConfig.from_settings({"iata": "YOW"})
+        self.assertEqual((config.live_feed, config.live_feed_url), (True, "wss://analyzer.meshmapper.net/ws"))
+        self.assertIsNone(config.live_feed_disabled_reason())  # needs no account
+        self.assertIsNotNone(MeshMapperConfig.from_settings({"iata": "YOW", "live_feed": False}).live_feed_disabled_reason())
+        self.assertIsNotNone(MeshMapperConfig.from_settings({"iata": "YOW", "subscribe": False}).live_feed_disabled_reason())
 
     def test_invalid_private_key_is_rejected(self):
         self.assertIsNotNone(MeshMapperConfig.from_settings({"iata": "YOW", "private_key": "abcd"}).validation_error())
@@ -297,6 +381,41 @@ class _FakeTransport:
         self.remote.append(rx_log)
 
 
+class _FakeFeedSocket:
+    def __init__(self, url: str):
+        self.url = url
+        self.incoming: asyncio.Queue = asyncio.Queue()
+        self.sent: list[dict] = []
+        self.closed = False
+        self.close_code = None
+
+    async def recv(self):
+        item = await self.incoming.get()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def send(self, text):
+        self.sent.append(json.loads(text))
+
+    async def close(self):
+        self.closed = True
+
+    async def deliver(self, message):
+        """Hand the feed client a message (or an exception for ``recv`` to raise) and let it run."""
+        self.incoming.put_nowait(message if isinstance(message, BaseException) else json.dumps(message))
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    async def open_subscription(self):
+        await self.deliver({"v": 1, "type": "hello", "connectionId": "c1"})
+        await self.deliver({"v": 1, "type": "subscribed", "id": "subscribe", "subscriptionId": "s1"})
+
+
+def _feed_event(observer_key: str) -> dict:
+    return {"v": 1, "type": "event", "event": "packetObservation", "data": _feed_data(observer_key)}
+
+
 def _make_context(backend=MESHCORE_BACKEND) -> PluginContext:
     settings = MeshgramSettings(
         telegram_bot_token="token",
@@ -317,10 +436,25 @@ class UploaderTests(unittest.TestCase):
             self.clients.append(client)
             return client
 
+        self.feed_sockets: list[_FakeFeedSocket] = []
+
+        async def feed_connect(url):
+            socket = _FakeFeedSocket(url)
+            self.feed_sockets.append(socket)
+            return socket
+
         self.plugin = MeshMapperPlugin({"iata": "yow"})
         self.plugin.uploader = MeshMapperUploader(self.plugin.config, client_factory=factory)
         self.plugin.subscriber = MeshMapperSubscriber(self.plugin.config, client_factory=factory)
+        self.plugin.live_feed = MeshMapperLiveFeed(self.plugin.config, connect=feed_connect)
         self.transport = _FakeTransport()
+
+    async def _feed_socket(self, count: int = 1) -> _FakeFeedSocket:
+        for _ in range(20):
+            if len(self.feed_sockets) >= count:
+                break
+            await asyncio.sleep(0)
+        return self.feed_sockets[count - 1]
 
     async def _connect(self) -> _FakeMqttClient:
         await self.plugin.on_mesh_connected(self.transport, _make_context())
@@ -482,12 +616,24 @@ class UploaderTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_no_subscriber_without_credentials(self):
+        # Other observers' packets then come from the live feed alone.
         async def scenario():
+            await self._connect()
+            await self._feed_socket()
+            self.assertEqual(len(self.clients), 1)
+            self.assertEqual(self.clients[0].subscriptions, [])
+            self.assertEqual(len(self.feed_sockets), 1)
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_explains_when_nothing_receives_other_observers(self):
+        async def scenario():
+            self.plugin.config.live_feed = False
             with self.assertLogs("meshgram.plugins.meshmapper", level="INFO") as logs:
                 await self._connect()
             self.assertTrue(any("MESHMAPPER_SUBSCRIBE_USERNAME" in line for line in logs.output))
-            self.assertEqual(len(self.clients), 1)
-            self.assertEqual(self.clients[0].subscriptions, [])
+            self.assertEqual(self.feed_sockets, [])
             await self.plugin.on_shutdown()
 
         asyncio.run(scenario())
@@ -499,6 +645,112 @@ class UploaderTests(unittest.TestCase):
             client = await self._connect()
             self.assertEqual(len(self.clients), 1)
             self.assertEqual(client.subscriptions, [])
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertEqual(self.feed_sockets, [])
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_live_feed_receives_other_observers_without_an_account(self):
+        async def scenario():
+            status = StatusRegistry()
+            context = _make_context()
+            context.status = status
+            await self.plugin.on_startup(context)
+            self.assertEqual(status.get("meshmapper_feed")["state"], "connecting")
+
+            await self.plugin.on_mesh_connected(self.transport, context)
+            socket = await self._feed_socket()
+            self.assertEqual(socket.url, "wss://analyzer.meshmapper.net/ws")
+            await socket.deliver({"v": 1, "type": "hello", "connectionId": "c1"})
+            configure, subscribe = socket.sent
+            self.assertEqual(
+                {key: configure[key] for key in ("type", "resolvePath", "includeObserverKey", "includeRepeats")},
+                {"type": "configure", "resolvePath": False, "includeObserverKey": True, "includeRepeats": True},
+            )
+            self.assertEqual((subscribe["type"], subscribe["scope"]), ("subscribe", {"events": ["packetObservation"], "iatas": ["YOW"]}))
+            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                await socket.deliver({"v": 1, "type": "subscribed", "id": "subscribe", "subscriptionId": "s1"})
+            self.assertEqual(status.get("meshmapper_feed")["state"], "connected")
+            self.assertTrue(self.plugin.live_feed.is_subscribed)
+
+            other = "AB" * 32
+            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                await socket.deliver(_feed_event(other))
+            await socket.deliver(_feed_event(PUBKEY_HEX))  # our own upload
+            await socket.deliver({"v": 1, "type": "pong", "id": "ping-1"})
+            self.assertEqual([rx["observer_id"] for rx in self.transport.remote], [other])
+            self.assertEqual(self.transport.remote[0]["decoded"]["hash"], "73408C45E49BD15F")
+
+            # A radio reconnect keeps the feed session.
+            await self.plugin.on_mesh_connected(self.transport, context)
+            await asyncio.sleep(0)
+            self.assertEqual(len(self.feed_sockets), 1)
+
+            await self.plugin.on_shutdown()
+            self.assertTrue(socket.closed)
+            self.assertEqual(status.get("meshmapper_feed")["state"], "disconnected")
+
+        asyncio.run(scenario())
+
+    def test_live_feed_stands_by_while_mqtt_subscription_is_up(self):
+        # The MQTT subscription carries the full packets, so it wins; no duplicates.
+        async def scenario():
+            self._enable_subscriber()
+            await self._connect_all()
+            client = self._subscriber_client()
+            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                client.on_subscribe(client, None, 1, [_ReasonCode(0)], None)
+            socket = await self._feed_socket()
+            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                await socket.open_subscription()
+            other = "AB" * 32
+            await socket.deliver(_feed_event(other))
+            self.assertEqual(self.transport.remote, [])
+
+            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+                client.on_disconnect(client, None, None, _ReasonCode(7), None)
+            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                await socket.deliver(_feed_event(other))
+            self.assertEqual([rx["observer_id"] for rx in self.transport.remote], [other])
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_live_feed_reconnects_with_backoff(self):
+        async def scenario():
+            attempts: list[int] = []
+            failures = [OSError("unreachable")]
+            fake_connect = self.plugin.live_feed._connect
+
+            async def flaky_connect(url):
+                if failures:
+                    raise failures.pop()
+                return await fake_connect(url)
+
+            self.plugin.live_feed._connect = flaky_connect
+            backoff = mock.patch(
+                "meshgram.plugins.meshmapper.feed_backoff_seconds",
+                side_effect=lambda attempt, jitter: attempts.append(attempt) or 0,
+            )
+            with backoff, self.assertLogs("meshgram.plugins.meshmapper", level="WARNING") as logs:
+                await self._connect()
+                socket = await self._feed_socket()
+            self.assertIn("unreachable", logs.output[0])
+            self.assertEqual(attempts, [0])
+
+            with backoff:
+                with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                    await socket.open_subscription()
+                # The feed sheds load: the next attempt waits the longest.
+                socket.close_code = 1013
+                with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+                    await socket.deliver(ConnectionError("going away"))
+                await self._feed_socket(2)
+            self.assertTrue(socket.closed)
+            self.assertEqual(attempts, [0, 5])
+            self.assertEqual(len(self.feed_sockets), 2)
             await self.plugin.on_shutdown()
 
         asyncio.run(scenario())
@@ -550,6 +802,7 @@ class UploaderTests(unittest.TestCase):
             entry = status.get("mqtt_subscribe")
             self.assertEqual(entry["state"], "disabled")
             self.assertIn("subscriber account", entry["detail"])
+            self.assertEqual(status.get("meshmapper_feed")["state"], "connecting")
 
         asyncio.run(scenario())
 
@@ -560,8 +813,8 @@ class UploaderTests(unittest.TestCase):
             context.status = status
             with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
                 await self.plugin.on_startup(context)
-            self.assertEqual(status.get("mqtt_publish")["state"], "disabled")
-            self.assertEqual(status.get("mqtt_subscribe")["state"], "disabled")
+            for key in ("mqtt_publish", "mqtt_subscribe", "meshmapper_feed"):
+                self.assertEqual(status.get(key)["state"], "disabled")
 
         asyncio.run(scenario())
 

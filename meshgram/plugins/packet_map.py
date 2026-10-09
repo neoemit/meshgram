@@ -8,7 +8,8 @@ a packet took can be drawn on the map.
 
 Packets heard by other MeshMapper observers (relayed by the meshmapper plugin
 through the transport's remote RX log listeners) are shown too, routed to the
-observer that heard them, in a buffer of their own.
+observer that heard them, in a buffer of their own. Those from MeshMapper's
+live feed arrive as metadata only (no bytes), so they can't be decrypted.
 
 Nodes and packet history are saved to SQLite (see ``packet_map_store``) and
 restored on startup, so the map survives restarts and redeploys.
@@ -360,7 +361,11 @@ class PacketMapState:
         return resolved
 
     def _resolve_origin(self, packet: dict[str, Any]) -> Optional[dict[str, Any]]:
-        key = (packet.get("advert") or {}).get("public_key") or packet.get("src_public_key")
+        key = (
+            (packet.get("advert") or {}).get("public_key")
+            or packet.get("src_public_key")
+            or packet.get("source_public_key")
+        )
         if key and key in self.nodes:
             node = self.nodes[key]
             return self._node_ref(node, key[:2], 1)
@@ -419,18 +424,25 @@ class PacketMapState:
     def _ingest(
         self, rx_log: dict[str, Any], now: Optional[float], observer_id: Optional[str]
     ) -> Optional[dict[str, Any]]:
-        raw_hex = str(rx_log.get("payload") or "").strip()
-        if not raw_hex:
-            # ``raw_hex`` is the whole log frame: SNR byte, RSSI byte, then the packet.
-            raw_hex = str(rx_log.get("raw_hex") or "").strip()[4:]
-        if not raw_hex or len(raw_hex) % 2 or not HEX_RE.match(raw_hex):
-            return None
-        decoded = decode_packet(bytes.fromhex(raw_hex))
-        if decoded is None:
-            return None
+        decoded = rx_log.get("decoded") if observer_id else None
+        if isinstance(decoded, dict) and decoded.get("hash"):
+            # Another observer's packet known only by its metadata (MeshMapper's live feed).
+            raw_hex = ""
+        else:
+            raw_hex = str(rx_log.get("payload") or "").strip()
+            if not raw_hex:
+                # ``raw_hex`` is the whole log frame: SNR byte, RSSI byte, then the packet.
+                raw_hex = str(rx_log.get("raw_hex") or "").strip()[4:]
+            if not raw_hex or len(raw_hex) % 2 or not HEX_RE.match(raw_hex):
+                return None
+            decoded = decode_packet(bytes.fromhex(raw_hex))
+            if decoded is None:
+                return None
 
         now = time.time() if now is None else now
-        packet: dict[str, Any] = {"id": self._next_packet_id, "received_at": now, **decoded, "raw": raw_hex.upper()}
+        packet: dict[str, Any] = {"id": self._next_packet_id, "received_at": now, **decoded}
+        if raw_hex:
+            packet["raw"] = raw_hex.upper()
         self._next_packet_id += 1
         for key in ("snr", "rssi"):
             if isinstance(rx_log.get(key), (int, float)):
@@ -451,7 +463,7 @@ class PacketMapState:
         # a local packet; anything else is decrypted here with the radio's channel keys.
         if packet["payload_type"] == PAYLOAD_TYPE_GRP_TXT:
             channel_name, message = rx_log.get("chan_name"), rx_log.get("message")
-            if not message:
+            if not message and raw_hex:
                 decrypted = self._decrypt_channel_message(bytes.fromhex(raw_hex))
                 if decrypted:
                     channel_name, message = decrypted["channel_name"], decrypted["message"]
@@ -483,6 +495,23 @@ class PacketMapState:
             node, created = self._upsert_node(packet["src_public_key"])
             if created:
                 changed_nodes.append(node)
+
+        # The sender as MeshMapper resolved it (live feed): fills in only what isn't known
+        # yet, since adverts heard over the air are more current.
+        source = rx_log.get("source_node") if observer_id else None
+        source_key = _clean_key(source.get("public_key")) if isinstance(source, dict) else ""
+        if len(source_key) == 64:
+            known = self.nodes.get(source_key) or {}
+            placed = not _has_position(known) and is_valid_position(source.get("lat"), source.get("lon"))
+            node, changed = self._upsert_node(
+                source_key,
+                name=None if known.get("name") else (source.get("name") or None),
+                lat=float(source["lat"]) if placed else None,
+                lon=float(source["lon"]) if placed else None,
+            )
+            if changed and node not in changed_nodes:
+                changed_nodes.append(node)
+            packet["source_public_key"] = source_key
 
         packet["path_nodes"] = self._resolve_path(packet["path"], observer_id)
         packet["origin"] = self._resolve_origin(packet)

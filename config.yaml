@@ -105,11 +105,13 @@ plugins:
       # transport: websockets
       # token_audience: mqtt.meshmapper.net
       # status_interval_seconds: 300
-      # Also receive other observers' packets for packet_map. Device-signed
-      # observer logins are publish-only, so this needs a subscriber account from
-      # the broker operator: set MESHMAPPER_SUBSCRIBE_USERNAME and
-      # MESHMAPPER_SUBSCRIBE_PASSWORD in .env. Defaults to the upload broker.
+      # Also receive other observers' packets for packet_map. They come from
+      # MeshMapper's public live feed (no account; metadata only, no packet
+      # bytes). With a subscriber account from the broker operator
+      # (MESHMAPPER_SUBSCRIBE_USERNAME / _PASSWORD in .env) they also come over
+      # MQTT with their bytes; the live feed stands by while MQTT is subscribed.
       subscribe: true
+      # live_feed: true
       subscribe_server: mqtt.meshmapper.net
       subscribe_port: 443
       # Auth tokens are signed by the radio itself. Only if your firmware can't

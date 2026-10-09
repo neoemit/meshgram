@@ -304,10 +304,13 @@ class MeshCoreTransport(MeshTransport):
         with contextlib.suppress(ValueError):
             self._rx_log_listeners.remove(listener)
 
-    # Packets heard by *other* observers (e.g. relayed from MeshMapper's MQTT broker by the
-    # meshmapper plugin) are shared with plugins through the transport, like local RF logs.
-    # Each dict looks like an RF log (``payload``, ``snr``, ``rssi``) plus ``observer_id`` and
-    # ``observer_name``.
+    # Packets heard by *other* observers (e.g. relayed from MeshMapper by the meshmapper
+    # plugin) are shared with plugins through the transport, like local RF logs. Each dict
+    # looks like an RF log (``payload``, ``snr``, ``rssi``) plus ``observer_id`` and
+    # ``observer_name``; when only packet metadata is known (MeshMapper's live feed), it has
+    # ``decoded`` (header fields and path, as ``meshcore_packets.decode_packet`` returns them)
+    # instead of ``payload``, and optionally ``source_node`` (``public_key``, ``name``,
+    # ``lat``, ``lon``) when the sender is known.
 
     def add_remote_rx_log_listener(self, listener: RxLogListener) -> None:
         if listener not in self._remote_rx_log_listeners:
