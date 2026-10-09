@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 if TYPE_CHECKING:
     from .reply_links import ReplyLinkRegistry
+    from .status import StatusRegistry
 
 
 MeshPacketRef = Union[int, str]
@@ -130,6 +131,8 @@ class PluginContext:
     mesh_payload_limit: int
     local_node_id: Optional[str]
     reply_links: Optional["ReplyLinkRegistry"] = None
+    # Connection status of the radio, Telegram and plugin services (see meshgram.status).
+    status: Optional["StatusRegistry"] = None
 
     @property
     def meshtastic_payload_limit(self) -> int:

@@ -11,8 +11,12 @@ Authentication uses a MeshCore auth token: an Ed25519-signed JWT whose
 token itself (no private key ever leaves the device); a private key can be
 configured as an alternative.
 
-The plugin also subscribes to the region's ``packets`` topics, if the broker
-allows it, and hands packets heard by *other* observers to the transport's
+Device-signed accounts are publish-only: MeshMapper's broker
+(meshcore-mqtt-broker) closes the connection of a device-authenticated client
+that tries to subscribe. To also receive the packets *other* observers upload,
+configure a subscriber account (username/password issued by the broker
+operator); the plugin then opens a second, read-only MQTT connection, subscribes
+to the region's ``packets`` topics and hands those packets to the transport's
 remote RX log listeners (the packet_map plugin shows them).
 
 The plugin never emits bridge actions and only listens to raw RF logs, so it
@@ -38,7 +42,8 @@ from meshgram._ed25519 import public_key_from_expanded, sign_with_expanded_key
 from meshgram.config import MESHCORE_BACKEND
 from meshgram.meshcore_packets import DIRECT_ROUTE_TYPES, packet_hash, parse_packet
 from meshgram.plugin import BasePlugin
-from meshgram.types import PluginContext
+from meshgram.status import CONNECTED, CONNECTING, DISABLED, DISCONNECTED, StatusRegistry
+from meshgram.types import PluginAction, PluginContext
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,8 +55,10 @@ PLACEHOLDER_IATA_CODES = {"", "XXX", "XYZ"}
 CLIENT_VERSION = f"meshgram/{__version__}"
 
 MQTT_AUTH_FAILURE_CODES = {4, 5, 134, 135}
-# A broker that rejects a subscription by dropping the connection does so right away.
-SUBSCRIBE_GRACE_SECONDS = 10.0
+
+STATUS_PUBLISH = "mqtt_publish"
+STATUS_SUBSCRIBE = "mqtt_subscribe"
+STATUS_LABELS = {STATUS_PUBLISH: "MeshMapper MQTT (publish)", STATUS_SUBSCRIBE: "MeshMapper MQTT (subscribe)"}
 
 HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
 
@@ -103,6 +110,13 @@ class MeshMapperConfig:
     topic_packets: str = DEFAULT_TOPIC_PACKETS
     subscribe: bool = True
     topic_subscribe: str = DEFAULT_TOPIC_SUBSCRIBE
+    # Subscriber account for other observers' packets (device-signed accounts can't subscribe).
+    subscribe_username: str = ""
+    subscribe_password: str = ""
+    subscribe_server: str = DEFAULT_SERVER
+    subscribe_port: int = 443
+    subscribe_transport: str = "websockets"
+    subscribe_tls: bool = True
     private_key: str = ""
 
     @classmethod
@@ -111,13 +125,19 @@ class MeshMapperConfig:
         private_key = os.getenv("MESHMAPPER_PRIVATE_KEY") or settings.get("private_key") or ""
         server = str(settings.get("server") or DEFAULT_SERVER).strip()
         transport = str(settings.get("transport") or "websockets").strip().lower()
+        transport = transport if transport in {"websockets", "tcp"} else "websockets"
+        port = _as_int(settings.get("port"), 443)
+        tls = _as_bool(settings.get("tls"), True)
+        subscribe_transport = str(settings.get("subscribe_transport") or transport).strip().lower()
+        subscribe_username = os.getenv("MESHMAPPER_SUBSCRIBE_USERNAME") or settings.get("subscribe_username") or ""
+        subscribe_password = os.getenv("MESHMAPPER_SUBSCRIBE_PASSWORD") or settings.get("subscribe_password") or ""
         return cls(
             iata=str(iata).strip().upper(),
             server=server,
-            port=_as_int(settings.get("port"), 443),
-            transport=transport if transport in {"websockets", "tcp"} else "websockets",
+            port=port,
+            transport=transport,
             websocket_path=str(settings.get("websocket_path") or "/"),
-            tls=_as_bool(settings.get("tls"), True),
+            tls=tls,
             tls_verify=_as_bool(settings.get("tls_verify"), True),
             keepalive=max(10, _as_int(settings.get("keepalive"), 60)),
             token_audience=str(settings.get("token_audience", server) or "").strip(),
@@ -128,6 +148,12 @@ class MeshMapperConfig:
             topic_packets=str(settings.get("topic_packets") or DEFAULT_TOPIC_PACKETS),
             subscribe=_as_bool(settings.get("subscribe"), True),
             topic_subscribe=str(settings.get("topic_subscribe") or DEFAULT_TOPIC_SUBSCRIBE),
+            subscribe_username=str(subscribe_username).strip(),
+            subscribe_password=str(subscribe_password),
+            subscribe_server=str(settings.get("subscribe_server") or server).strip(),
+            subscribe_port=_as_int(settings.get("subscribe_port"), port),
+            subscribe_transport=subscribe_transport if subscribe_transport in {"websockets", "tcp"} else transport,
+            subscribe_tls=_as_bool(settings.get("subscribe_tls"), tls),
             private_key=_clean_hex(private_key),
         )
 
@@ -138,6 +164,17 @@ class MeshMapperConfig:
             return "settings.server must not be empty"
         if self.private_key and (len(self.private_key) != 128 or not HEX_RE.match(self.private_key)):
             return "private_key must be 128 hex characters (64-byte MeshCore private key)"
+        return None
+
+    def subscriber_disabled_reason(self) -> Optional[str]:
+        """Why other observers' packets won't be received, or ``None`` if the subscriber should run."""
+        if not self.subscribe:
+            return "Turned off (subscribe: false)"
+        if not self.subscribe_username or not self.subscribe_password:
+            return (
+                "Needs a subscriber account: device-signed observers can only publish. "
+                "Set MESHMAPPER_SUBSCRIBE_USERNAME and MESHMAPPER_SUBSCRIBE_PASSWORD"
+            )
         return None
 
 
@@ -275,14 +312,38 @@ def _sanitize_client_id(prefix: str, public_key: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "", f"{prefix}{public_key}")[:23]
 
 
+def _configure_client(client: Any, transport: str, tls: bool, tls_verify: bool, websocket_path: str) -> None:
+    if tls:
+        if tls_verify:
+            client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+            client.tls_insecure_set(False)
+        else:
+            client.tls_set(cert_reqs=ssl.CERT_NONE)
+            client.tls_insecure_set(True)
+            LOGGER.warning("MeshMapper: TLS certificate verification is disabled")
+    if transport == "websockets":
+        client.ws_set_options(path=websocket_path)
+
+
+def _is_failure(reason_code: Any) -> bool:
+    return bool(getattr(reason_code, "is_failure", _reason_code_value(reason_code) != 0))
+
+
+def _set_status(status: Optional[StatusRegistry], key: str, state: str, detail: str) -> None:
+    if status is not None:
+        status.set_state(key, state, detail, label=STATUS_LABELS[key])
+
+
 class MeshMapperUploader:
     def __init__(
         self,
         config: MeshMapperConfig,
         client_factory: Callable[[str, str], Any] = _default_client_factory,
+        status: Optional[StatusRegistry] = None,
     ):
         self.config = config
         self._client_factory = client_factory
+        self.status = status
         self._transport: Any = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._client: Any = None
@@ -297,17 +358,19 @@ class MeshMapperUploader:
         self._token_task: Optional[asyncio.Task[None]] = None
         self._status_task: Optional[asyncio.Task[None]] = None
         self._refresh_now: Optional[asyncio.Event] = None
-        # Subscribing to other observers is best effort: once the broker refuses it, stop asking.
-        self._subscribe_denied = False
-        self._subscribe_sent_at: Optional[float] = None
-        self._subscribe_confirmed = False
-        self._remote_seen = False
 
     # Identity ----------------------------------------------------------------
 
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def public_key(self) -> str:
+        return self._public_key
+
+    def _set_status(self, state: str, detail: str) -> None:
+        _set_status(self.status, STATUS_PUBLISH, state, detail)
 
     def _topic(self, template: str) -> str:
         return template.replace("{IATA}", self.config.iata).replace("{PUBLIC_KEY}", self._public_key)
@@ -320,6 +383,7 @@ class MeshMapperUploader:
         public_key = _clean_hex(info.get("public_key"))
         if len(public_key) != 64:
             LOGGER.error("MeshMapper: radio did not report a public key; uploads disabled until next connect")
+            self._set_status(DISCONNECTED, "Radio did not report a public key")
             return
 
         if self._client is not None and public_key != self._public_key:
@@ -408,6 +472,8 @@ class MeshMapperUploader:
                 raise
             except Exception as exc:
                 LOGGER.warning("MeshMapper: could not create auth token (%s); retrying in 60s", exc)
+                if not self._connected:
+                    self._set_status(DISCONNECTED, f"Could not create auth token: {exc}")
                 await asyncio.sleep(60)
                 continue
 
@@ -415,8 +481,9 @@ class MeshMapperUploader:
             if self._client is None:
                 try:
                     self._start_client(username, token)
-                except Exception:
+                except Exception as exc:
                     LOGGER.exception("MeshMapper: MQTT client setup failed; uploads disabled")
+                    self._set_status(DISABLED, f"MQTT client setup failed: {exc}")
                     return
             else:
                 self._client.username_pw_set(username, token)
@@ -433,16 +500,7 @@ class MeshMapperUploader:
         client_id = _sanitize_client_id(cfg.client_id_prefix, self._public_key)
         client = self._client_factory(client_id, cfg.transport)
         client.username_pw_set(username, token)
-        if cfg.tls:
-            if cfg.tls_verify:
-                client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
-                client.tls_insecure_set(False)
-            else:
-                client.tls_set(cert_reqs=ssl.CERT_NONE)
-                client.tls_insecure_set(True)
-                LOGGER.warning("MeshMapper: TLS certificate verification is disabled")
-        if cfg.transport == "websockets":
-            client.ws_set_options(path=cfg.websocket_path)
+        _configure_client(client, cfg.transport, cfg.tls, cfg.tls_verify, cfg.websocket_path)
         client.will_set(
             self._topic(cfg.topic_status),
             json.dumps(self.build_status("offline")),
@@ -451,12 +509,12 @@ class MeshMapperUploader:
         )
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
-        client.on_subscribe = self._on_subscribe
-        client.on_message = self._on_message
+        client.on_connect_fail = self._on_connect_fail
         client.reconnect_delay_set(min_delay=1, max_delay=120)
         client.connect_async(cfg.server, cfg.port, keepalive=cfg.keepalive)
         client.loop_start()
         self._client = client
+        self._set_status(CONNECTING, f"Connecting to {cfg.server}:{cfg.port}")
         LOGGER.info(
             "MeshMapper: connecting to %s:%s (transport=%s, tls=%s, iata=%s, observer=%s)",
             cfg.server,
@@ -469,83 +527,35 @@ class MeshMapperUploader:
 
     # paho callbacks run on paho's network thread.
     def _on_connect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any = None) -> None:
-        if getattr(reason_code, "is_failure", _reason_code_value(reason_code) != 0):
+        if _is_failure(reason_code):
             self._connected = False
             LOGGER.error("MeshMapper: MQTT connect refused: %s", reason_code)
+            self._set_status(DISCONNECTED, f"Connect refused: {reason_code}")
             if _reason_code_value(reason_code) in MQTT_AUTH_FAILURE_CODES:
                 self._request_token_refresh()
             return
         self._connected = True
-        LOGGER.info("MeshMapper: connected; publishing packets to %s", self._topic(self.config.topic_packets))
+        topic = self._topic(self.config.topic_packets)
+        LOGGER.info("MeshMapper: connected; publishing packets to %s", topic)
+        self._set_status(CONNECTED, f"{self.config.server} → {topic}")
         self._publish_status("online")
-        self._subscribe()
+
+    def _on_connect_fail(self, client: Any, userdata: Any) -> None:
+        # The broker couldn't be reached at all (DNS, network, TLS); paho keeps retrying.
+        self._set_status(DISCONNECTED, f"Can't reach {self.config.server}:{self.config.port}; retrying")
 
     def _on_disconnect(
         self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any = None
     ) -> None:
-        self._connected = False
-        sent_at = self._subscribe_sent_at
-        if (
-            sent_at is not None
-            and not self._subscribe_confirmed
-            and time.monotonic() - sent_at < SUBSCRIBE_GRACE_SECONDS
-            and _reason_code_value(reason_code) != 0
-        ):
-            self._deny_subscription(f"the broker closed the connection right after it ({reason_code})")
-        self._subscribe_sent_at = None
+        was_connected, self._connected = self._connected, False
+        # A refused or failed connect has already reported a more useful reason.
+        if self._client is None or not was_connected:
+            return
+        self._set_status(DISCONNECTED, f"Disconnected ({reason_code}); reconnecting")
         if _reason_code_value(reason_code) != 0:
             LOGGER.warning("MeshMapper: MQTT disconnected (%s); paho will reconnect", reason_code)
             if _reason_code_value(reason_code) in MQTT_AUTH_FAILURE_CODES:
                 self._request_token_refresh()
-
-    # Other observers' packets ------------------------------------------------------
-
-    def _subscribe(self) -> None:
-        if not self.config.subscribe or self._subscribe_denied or self._client is None:
-            return
-        topic = self._topic(self.config.topic_subscribe)
-        try:
-            self._client.subscribe(topic, qos=0)
-        except Exception as exc:
-            LOGGER.warning("MeshMapper: could not subscribe to %s: %s", topic, exc)
-            return
-        self._subscribe_sent_at = time.monotonic()
-        self._subscribe_confirmed = False
-
-    def _deny_subscription(self, reason: str) -> None:
-        if self._subscribe_denied:
-            return
-        self._subscribe_denied = True
-        LOGGER.warning(
-            "MeshMapper: can't receive other observers' packets from %s: %s. "
-            "Uploads are unaffected; not retrying until restart.",
-            self._topic(self.config.topic_subscribe),
-            reason,
-        )
-
-    def _on_subscribe(self, client: Any, userdata: Any, mid: Any, reason_codes: Any, properties: Any = None) -> None:
-        codes = reason_codes if isinstance(reason_codes, (list, tuple)) else [reason_codes]
-        failed = [code for code in codes if getattr(code, "is_failure", _reason_code_value(code) >= 0x80)]
-        if failed:
-            self._deny_subscription(f"the broker refused the subscription ({failed[0]})")
-            return
-        self._subscribe_confirmed = True
-        LOGGER.info("MeshMapper: subscribed to %s for other observers' packets", self._topic(self.config.topic_subscribe))
-
-    def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
-        observation = parse_observer_packet(str(message.topic), message.payload, self._public_key)
-        if observation is None:
-            return
-        dispatch = getattr(self._transport, "dispatch_remote_rx_log", None)
-        if self._loop is None or self._loop.is_closed() or not callable(dispatch):
-            return
-        if not self._remote_seen:
-            self._remote_seen = True
-            LOGGER.info(
-                "MeshMapper: receiving other observers' packets (first from %s)",
-                observation.get("observer_name") or observation["observer_id"][:12],
-            )
-        asyncio.run_coroutine_threadsafe(dispatch(observation), self._loop)
 
     def _request_token_refresh(self) -> None:
         if self._loop is None or self._refresh_now is None or self._loop.is_closed():
@@ -618,6 +628,7 @@ class MeshMapperUploader:
         info = self._publish_status("offline")
         self._client = None
         self._connected = False
+        self._set_status(DISCONNECTED, "Stopped")
         if info is not None:
             with contextlib.suppress(Exception):
                 await asyncio.get_running_loop().run_in_executor(None, info.wait_for_publish, 2.0)
@@ -625,6 +636,169 @@ class MeshMapperUploader:
             client.disconnect()
         with contextlib.suppress(Exception):
             client.loop_stop()
+
+
+# --- Subscriber ----------------------------------------------------------------
+
+
+class MeshMapperSubscriber:
+    """Read-only MQTT session that relays other observers' packets to the transport.
+
+    It logs in with a subscriber account (username/password) because the broker
+    only lets those subscribe; device-signed observer accounts are publish-only.
+    """
+
+    def __init__(
+        self,
+        config: MeshMapperConfig,
+        client_factory: Callable[[str, str], Any] = _default_client_factory,
+        status: Optional[StatusRegistry] = None,
+    ):
+        self.config = config
+        self._client_factory = client_factory
+        self.status = status
+        self._transport: Any = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._client: Any = None
+        self._own_public_key = ""
+        self._topic = ""
+        self._connected = False
+        self._subscribed = False
+        self._denied = False
+        self._remote_seen = False
+        self.received = 0
+
+    @property
+    def is_subscribed(self) -> bool:
+        return self._subscribed
+
+    def _set_status(self, state: str, detail: str) -> None:
+        _set_status(self.status, STATUS_SUBSCRIBE, state, detail)
+
+    def start(self, transport: Any, own_public_key: str) -> None:
+        """Start the session (once); later calls only update the transport and our own key."""
+        self._transport = transport
+        self._loop = asyncio.get_running_loop()
+        self._own_public_key = own_public_key
+        if self._client is not None:
+            return
+        cfg = self.config
+        self._topic = cfg.topic_subscribe.replace("{IATA}", cfg.iata).replace("{PUBLIC_KEY}", "+")
+        client_id = _sanitize_client_id(f"{cfg.client_id_prefix}sub_", own_public_key)
+        try:
+            client = self._client_factory(client_id, cfg.subscribe_transport)
+            client.username_pw_set(cfg.subscribe_username, cfg.subscribe_password)
+            _configure_client(client, cfg.subscribe_transport, cfg.subscribe_tls, cfg.tls_verify, cfg.websocket_path)
+            client.on_connect = self._on_connect
+            client.on_disconnect = self._on_disconnect
+            client.on_connect_fail = self._on_connect_fail
+            client.on_subscribe = self._on_subscribe
+            client.on_message = self._on_message
+            client.reconnect_delay_set(min_delay=1, max_delay=120)
+            client.connect_async(cfg.subscribe_server, cfg.subscribe_port, keepalive=cfg.keepalive)
+            client.loop_start()
+        except Exception as exc:
+            LOGGER.exception("MeshMapper: subscriber MQTT client setup failed")
+            self._set_status(DISABLED, f"MQTT client setup failed: {exc}")
+            return
+        self._client = client
+        self._set_status(CONNECTING, f"Connecting to {cfg.subscribe_server}:{cfg.subscribe_port}")
+        LOGGER.info(
+            "MeshMapper: connecting to %s:%s as %s to receive other observers' packets (%s)",
+            cfg.subscribe_server,
+            cfg.subscribe_port,
+            cfg.subscribe_username,
+            self._topic,
+        )
+
+    # paho callbacks run on paho's network thread.
+    def _on_connect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any = None) -> None:
+        if _is_failure(reason_code):
+            self._connected = False
+            if _reason_code_value(reason_code) in MQTT_AUTH_FAILURE_CODES:
+                LOGGER.error(
+                    "MeshMapper: subscriber login refused (%s); check MESHMAPPER_SUBSCRIBE_USERNAME/PASSWORD",
+                    reason_code,
+                )
+                self._set_status(DISCONNECTED, f"Login refused ({reason_code}); check subscriber credentials")
+            else:
+                LOGGER.error("MeshMapper: subscriber connect refused: %s", reason_code)
+                self._set_status(DISCONNECTED, f"Connect refused: {reason_code}")
+            return
+        self._connected = True
+        if self._denied:
+            return
+        try:
+            client.subscribe(self._topic, qos=0)
+        except Exception as exc:
+            LOGGER.warning("MeshMapper: could not subscribe to %s: %s", self._topic, exc)
+            self._set_status(DISCONNECTED, f"Subscribe failed: {exc}")
+            return
+        self._set_status(CONNECTING, f"Connected; subscribing to {self._topic}")
+
+    def _on_connect_fail(self, client: Any, userdata: Any) -> None:
+        cfg = self.config
+        self._set_status(DISCONNECTED, f"Can't reach {cfg.subscribe_server}:{cfg.subscribe_port}; retrying")
+
+    def _on_disconnect(
+        self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any = None
+    ) -> None:
+        was_connected, self._connected = self._connected, False
+        self._subscribed = False
+        if self._client is None or self._denied or not was_connected:
+            return
+        if _reason_code_value(reason_code) != 0:
+            LOGGER.warning("MeshMapper: subscriber MQTT disconnected (%s); paho will reconnect", reason_code)
+        self._set_status(DISCONNECTED, f"Disconnected ({reason_code}); reconnecting")
+
+    def _on_subscribe(self, client: Any, userdata: Any, mid: Any, reason_codes: Any, properties: Any = None) -> None:
+        codes = reason_codes if isinstance(reason_codes, (list, tuple)) else [reason_codes]
+        failed = [code for code in codes if getattr(code, "is_failure", _reason_code_value(code) >= 0x80)]
+        if failed:
+            # Retrying won't help until the account's permissions change.
+            self._denied = True
+            LOGGER.warning(
+                "MeshMapper: the broker refused the subscription to %s (%s); not retrying until restart",
+                self._topic,
+                failed[0],
+            )
+            self._set_status(DISABLED, f"Broker refused the subscription to {self._topic} ({failed[0]})")
+            with contextlib.suppress(Exception):
+                client.disconnect()
+            return
+        self._subscribed = True
+        LOGGER.info("MeshMapper: subscribed to %s for other observers' packets", self._topic)
+        self._set_status(CONNECTED, f"{self.config.subscribe_server} ← {self._topic}")
+
+    def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
+        observation = parse_observer_packet(str(message.topic), message.payload, self._own_public_key)
+        if observation is None:
+            return
+        dispatch = getattr(self._transport, "dispatch_remote_rx_log", None)
+        if self._loop is None or self._loop.is_closed() or not callable(dispatch):
+            return
+        self.received += 1
+        if not self._remote_seen:
+            self._remote_seen = True
+            LOGGER.info(
+                "MeshMapper: receiving other observers' packets (first from %s)",
+                observation.get("observer_name") or observation["observer_id"][:12],
+            )
+        asyncio.run_coroutine_threadsafe(dispatch(observation), self._loop)
+
+    async def stop(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        self._client = None
+        self._connected = False
+        self._subscribed = False
+        with contextlib.suppress(Exception):
+            client.disconnect()
+        with contextlib.suppress(Exception):
+            client.loop_stop()
+        if not self._denied:
+            self._set_status(DISCONNECTED, "Stopped")
 
 
 # --- Plugin ------------------------------------------------------------------
@@ -637,24 +811,62 @@ class MeshMapperPlugin(BasePlugin):
         super().__init__(settings)
         self.config = MeshMapperConfig.from_settings(self.settings)
         self.uploader = MeshMapperUploader(self.config)
-        self._disabled_reason_logged = False
+        self.subscriber = MeshMapperSubscriber(self.config)
+        self._disabled_reason: Optional[str] = None
+        self._subscriber_hint_logged = False
 
-    def _disable(self, reason: str) -> None:
-        if not self._disabled_reason_logged:
+    def _bind_status(self, context: PluginContext) -> None:
+        self.uploader.status = context.status
+        self.subscriber.status = context.status
+
+    def _disable(self, reason: str, context: PluginContext) -> None:
+        if self._disabled_reason is None:
             LOGGER.error("MeshMapper uploads disabled: %s", reason)
-            self._disabled_reason_logged = True
+            self._disabled_reason = reason
+        _set_status(context.status, STATUS_PUBLISH, DISABLED, reason)
+        _set_status(context.status, STATUS_SUBSCRIBE, DISABLED, reason)
+
+    def _startup_error(self, context: PluginContext) -> Optional[str]:
+        if context.settings.mesh.backend != MESHCORE_BACKEND:
+            return "MeshMapper only accepts MeshCore packets (set mesh.backend to meshcore)"
+        return self.config.validation_error()
+
+    async def on_startup(self, context: PluginContext) -> list[PluginAction]:
+        self._bind_status(context)
+        error = self._startup_error(context)
+        if error is not None:
+            self._disable(error, context)
+            return []
+        _set_status(context.status, STATUS_PUBLISH, CONNECTING, "Waiting for the radio")
+        subscriber_off = self.config.subscriber_disabled_reason()
+        if subscriber_off is None:
+            _set_status(context.status, STATUS_SUBSCRIBE, CONNECTING, "Waiting for the radio")
+        else:
+            _set_status(context.status, STATUS_SUBSCRIBE, DISABLED, subscriber_off)
+        return []
 
     async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
-        if context.settings.mesh.backend != MESHCORE_BACKEND:
-            self._disable("MeshMapper only accepts MeshCore packets (set mesh.backend to meshcore)")
-            return
-        error = self.config.validation_error()
+        self._bind_status(context)
+        error = self._startup_error(context)
         if error is not None:
-            self._disable(error)
+            self._disable(error, context)
             return
 
         transport.add_rx_log_listener(self.uploader.handle_rx_log)
         await self.uploader.on_device_connected(transport)
 
+        subscriber_off = self.config.subscriber_disabled_reason()
+        if subscriber_off is not None:
+            if self.config.subscribe and not self._subscriber_hint_logged:
+                self._subscriber_hint_logged = True
+                LOGGER.info(
+                    "MeshMapper: not receiving other observers' packets: %s. Uploads are unaffected.",
+                    subscriber_off,
+                )
+            return
+        if self.uploader.public_key:
+            self.subscriber.start(transport, self.uploader.public_key)
+
     async def on_shutdown(self) -> None:
+        await self.subscriber.stop()
         await self.uploader.stop()

@@ -10,6 +10,7 @@ from meshgram.config import MESHCORE_BACKEND, MESHTASTIC_BACKEND, PluginConfig
 from meshgram.meshcore_packets import decode_advert, decode_packet, decrypt_group_text
 from meshgram.plugin import load_plugins
 from meshgram.plugins.packet_map import PacketMapConfig, PacketMapPlugin, PacketMapServer, PacketMapState
+from meshgram.status import StatusRegistry
 
 SELF_KEY = "AA" * 32
 REPEATER_KEY = "B1" + "11" * 31
@@ -368,6 +369,27 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         await plugin.on_shutdown()
         self.assertIsNone(plugin.server.port)
+
+    async def test_connection_status_is_streamed(self):
+        status = StatusRegistry()
+        status.set_state("radio", "connected", "meshcore serial", label="Radio")
+        context = _context()
+        context.status = status
+        plugin = PacketMapPlugin({"port": 0})
+        await plugin.on_startup(context)
+        self.addAsyncCleanup(plugin.on_shutdown)
+        self.assertEqual([entry["key"] for entry in plugin.state.snapshot()["connections"]], ["radio"])
+
+        queue = plugin.state.subscribe()
+        status.set_state("mqtt_publish", "disconnected", "refused", label="MQTT")
+        event = await asyncio.wait_for(queue.get(), timeout=1)
+        self.assertEqual(event["type"], "connection")
+        self.assertEqual((event["connection"]["key"], event["connection"]["state"]), ("mqtt_publish", "disconnected"))
+
+        await plugin.on_shutdown()
+        status.set_state("radio", "disconnected")
+        await asyncio.sleep(0)
+        self.assertTrue(queue.empty())
 
 
 if __name__ == "__main__":

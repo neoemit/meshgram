@@ -116,6 +116,29 @@
     border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2); }
   .icon-btn:hover { background: var(--surface-3); color: var(--text); }
 
+  /* --- Connections (radio, Telegram, MQTT) -------------------------------- */
+  .conns-wrap { position: relative; }
+  .conns { display: inline-flex; align-items: center; gap: 10px; height: 30px; padding: 0 11px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface-2); font-size: 12.5px; font-weight: 600; color: var(--text-2); white-space: nowrap; }
+  .conns:hover, .conns[aria-expanded="true"] { background: var(--surface-3); color: var(--text); }
+  .conn { display: inline-flex; align-items: center; gap: 6px; }
+  .conn, .conn-row { --c: var(--text-3); }
+  .conn[data-state="connected"], .conn-row[data-state="connected"] { --c: var(--good); }
+  .conn[data-state="connecting"], .conn-row[data-state="connecting"] { --c: var(--ok); }
+  .conn[data-state="disconnected"], .conn-row[data-state="disconnected"] { --c: var(--bad); }
+  .conn .dot, .conn-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; }
+  /* Hollow dot: turned off or unknown, as opposed to failing. */
+  .conn:is([data-state="disabled"], [data-state="unknown"]) .dot,
+  .conn-row:is([data-state="disabled"], [data-state="unknown"]) .dot { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
+  .conns-panel { position: absolute; z-index: 1100; right: 0; top: calc(100% + 8px); width: min(380px, calc(100vw - 24px));
+    padding: 12px 14px 14px; border-radius: 14px; }
+  .conns-panel h2 { margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); }
+  .conns-panel ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+  .conn-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; }
+  .conn-row .name { font-weight: 650; }
+  .conn-row .state { font-size: 12px; font-weight: 650; color: var(--c); white-space: nowrap; }
+  .conn-row .detail { grid-column: 2 / -1; font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }
+
   /* --- Layout ------------------------------------------------------------- */
   .app-main { flex: 1 1 auto; min-height: 0; display: flex; }
   .map-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
@@ -454,6 +477,8 @@
     .app-header { gap: 10px; padding: 0 12px; }
     .stats { display: none; }
     .status { padding: 0 10px; }
+    .conns { gap: 6px; padding: 0 10px; }
+    .conn-label { display: none; }
     #status-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .sidebar-head { padding: 10px 12px 8px; }
     .btn .btn-text { display: none; }
@@ -486,6 +511,15 @@
     <span class="stat optional"><b id="stat-rate">0</b> / min</span>
   </div>
   <div class="header-actions">
+    <div class="conns-wrap" id="conns-wrap" hidden>
+      <button class="conns" id="conns-toggle" type="button" aria-expanded="false" aria-controls="conns-panel">
+        <span class="sr-only">Connections: </span><span class="conn-pills" id="conn-pills"></span>
+      </button>
+      <div class="conns-panel glass" id="conns-panel" hidden>
+        <h2>Connections</h2>
+        <ul id="conns-list"></ul>
+      </div>
+    </div>
     <button class="icon-btn" id="theme-toggle" type="button"></button>
     <div class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Connecting…</span></div>
   </div>
@@ -1979,6 +2013,67 @@ $("skip-link").addEventListener("click", (event) => {
   target.focus();
 });
 
+// --- Connections -------------------------------------------------------------------------------
+
+// Short header labels; the panel shows the server's full labels.
+const CONN_LABELS = { radio: "Radio", telegram: "Telegram", mqtt_publish: "MQTT ↑", mqtt_subscribe: "MQTT ↓" };
+const CONN_STATES = { connected: "Connected", connecting: "Connecting…", disconnected: "Disconnected", disabled: "Off", unknown: "Unknown" };
+const connections = { list: [], stale: false };
+
+function connState(conn) {
+  return connections.stale ? "unknown" : conn.state;
+}
+
+function renderConnections() {
+  const wrap = $("conns-wrap");
+  wrap.hidden = connections.list.length === 0;
+  const pills = connections.list.map((conn) => {
+    const s = connState(conn);
+    return el("span", { class: "conn", "data-state": s },
+      el("span", { class: "dot", "aria-hidden": "true" }),
+      el("span", { class: "conn-label", "aria-hidden": "true" }, CONN_LABELS[conn.key] || conn.label),
+      el("span", { class: "sr-only" }, `${conn.label} ${CONN_STATES[s] || s}`));
+  });
+  $("conn-pills").replaceChildren(...pills);
+  const summary = connections.list.map((conn) => `${conn.label}: ${CONN_STATES[connState(conn)]}`).join("\n");
+  $("conns-toggle").title = connections.stale ? `${summary}\n(web app disconnected; status may be out of date)` : summary;
+  $("conns-list").replaceChildren(...connections.list.map((conn) => {
+    const s = connState(conn);
+    const detail = connections.stale ? "Web app disconnected; status may be out of date" : conn.detail;
+    return el("li", { class: "conn-row", "data-state": s },
+      el("span", { class: "dot", "aria-hidden": "true" }),
+      el("span", { class: "name" }, conn.label),
+      el("span", { class: "state" }, CONN_STATES[s] || s, s === "unknown" ? null : ` · since ${fmtAgo(conn.since)}`),
+      detail ? el("span", { class: "detail" }, detail) : null);
+  }));
+}
+
+function updateConnection(conn) {
+  const index = connections.list.findIndex((existing) => existing.key === conn.key);
+  if (index >= 0) connections.list[index] = conn;
+  else connections.list.push(conn);
+  renderConnections();
+}
+
+function setConnectionsPanel(open) {
+  $("conns-panel").hidden = !open;
+  $("conns-toggle").setAttribute("aria-expanded", String(open));
+  if (open) renderConnections();
+}
+
+$("conns-toggle").addEventListener("click", () => setConnectionsPanel($("conns-panel").hidden));
+document.addEventListener("click", (event) => {
+  if (!$("conns-panel").hidden && !event.target.closest("#conns-wrap")) setConnectionsPanel(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("conns-panel").hidden) {
+    setConnectionsPanel(false);
+    $("conns-toggle").focus();
+  }
+});
+// Keeps the "… ago" times in the open panel current.
+setInterval(() => { if (!$("conns-panel").hidden) renderConnections(); }, 15000);
+
 // --- Live updates ------------------------------------------------------------------------------
 
 function handleEvent(event) {
@@ -1996,6 +2091,11 @@ function handleEvent(event) {
     renderList();
     renderMessages();
     showSelectedRoute(false);
+    connections.list = event.connections || [];
+    connections.stale = false;
+    renderConnections();
+  } else if (event.type === "connection") {
+    updateConnection(event.connection);
   } else if (event.type === "nodes" || event.type === "self") {
     if (event.self_id) state.selfId = event.self_id;
     (event.nodes || []).forEach(upsertNode);
@@ -2022,7 +2122,11 @@ function setStatus(live, text) {
 function connect() {
   const source = new EventSource("api/events");
   source.onopen = () => setStatus(true, "Live");
-  source.onerror = () => setStatus(false, "Reconnecting…");
+  source.onerror = () => {
+    setStatus(false, "Reconnecting…");
+    connections.stale = true;
+    renderConnections();
+  };
   source.onmessage = (message) => {
     try { handleEvent(JSON.parse(message.data)); } catch (err) { console.error(err); }
   };
