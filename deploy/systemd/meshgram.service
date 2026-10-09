@@ -9,6 +9,9 @@ User=meshgram
 Group=meshgram
 WorkingDirectory=/opt/meshgram
 EnvironmentFile=/opt/meshgram/.env
+# Persistent state (packet_map history) lives in /var/lib/meshgram.
+StateDirectory=meshgram
+Environment=MESHGRAM_DATA_DIR=/var/lib/meshgram
 ExecStart=/opt/meshgram/.venv/bin/python /opt/meshgram/main.py
 Restart=on-failure
 RestartSec=5

@@ -124,6 +124,11 @@ plugins:
       port: 8080
       # max_packets: 500
       # max_remote_packets: 1000   # packets from other MeshMapper observers
+      # max_messages: 1000
+      # Nodes and packet history are saved to an SQLite database and restored
+      # on restart (inside MESHGRAM_DATA_DIR, default ./data; /app/data in Docker).
+      # persist: true
+      # db_path: packet_map.sqlite3
       # Optional HTTP Basic auth; prefer PACKET_MAP_PASSWORD in .env.
       # password: ""
 

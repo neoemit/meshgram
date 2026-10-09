@@ -1,0 +1,7 @@
+.git
+.venv
+__pycache__/
+.pytest_cache/
+.DS_Store
+# Local runtime state; the container keeps its own in the /app/data volume.
+data/

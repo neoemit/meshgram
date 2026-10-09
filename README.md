@@ -259,12 +259,14 @@ If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `Environmen
 | `MESH_NO_NODES` | — | `false` | Skip Meshtastic node DB download — improves resilience on proxied links |
 | `MESHGRAM_CONFIG_PATH` | — | `config.yaml` | Path to YAML config |
 | `LOG_LEVEL` | — | `INFO` | Python logging level |
+| `MESHGRAM_DATA_DIR` | — | `data` (`/app/data` in Docker) | Directory for persistent state (`packet_map` history) |
 | `SOLAR_HOST` / `SOLAR_TOKEN` / `SOLAR_API_KEY` | — | — | Examples for `dm_http_command` URL/auth templating |
 | `MESHMAPPER_IATA` | — | from YAML | MeshMapper region code for the `meshmapper` plugin |
 | `MESHMAPPER_PRIVATE_KEY` | — | — | Optional MeshCore private key (128 hex chars) for `meshmapper` token signing |
 | `MESHMAPPER_SUBSCRIBE_USERNAME` / `MESHMAPPER_SUBSCRIBE_PASSWORD` | — | — | Optional MQTT subscriber account, so `meshmapper` can receive other observers' packets |
 | `PACKET_MAP_HOST` / `PACKET_MAP_PORT` | — | from YAML | Listen address/port for the `packet_map` web app |
 | `PACKET_MAP_PASSWORD` | — | — | Optional HTTP Basic auth password for the `packet_map` web app |
+| `PACKET_MAP_DB_PATH` | — | from YAML | `packet_map` history database (relative to `MESHGRAM_DATA_DIR`) |
 
 Env vars override YAML for the same field.
 
@@ -535,6 +537,8 @@ Then open `http://<host>:8080/`.
 | `max_packets` | `500` | Packets kept in memory and sent to newly opened pages |
 | `max_remote_packets` | `1000` | Packets from other MeshMapper observers kept in memory (see above) |
 | `max_messages` | `1000` | Decrypted messages kept for the Messages tab. They're kept separately from `max_packets`, so they survive busy periods of adverts and ACKs. |
+| `persist` | `true` | Save nodes and packet history to disk and restore them on restart (see **Persistence** below). Set `false` to keep everything in memory only. |
+| `db_path` | `packet_map.sqlite3` | History database. A relative path is inside `MESHGRAM_DATA_DIR`. `PACKET_MAP_DB_PATH` overrides it. |
 | `title` | `Meshgram` | Page title |
 | `tile_url` / `tile_attribution` | OpenStreetMap | Leaflet tile layer URL template and attribution. When unset, OpenStreetMap tiles are restyled to match the light or dark theme; a custom tile server is shown as-is. |
 
@@ -545,7 +549,17 @@ Notes:
 - Path hops are 1–3 byte public-key prefixes, so a hop is matched to a known node by prefix. If several repeaters share the prefix, the one closest to the next hop is picked. Unknown hops are listed by their hash and skipped on the map.
 - For direct-routed packets the path is the remaining route, so it is drawn dashed and isn't connected to your radio.
 - Nodes appear on the map once they share a position (in an advert or in the radio's contact list). The **Nodes on map** panel shows how many repeaters have no position.
-- History is kept in memory only and is lost on restart.
+
+**Persistence.** Nodes (names, types, positions, last heard/seen and signal), packets, other observers' packets and decrypted messages are saved to an SQLite database and restored on startup, so the map and lists come back after a restart, redeploy or reboot. Details:
+
+- The database is `packet_map.sqlite3` in `MESHGRAM_DATA_DIR` (default `./data` next to `main.py`). It uses Python's built-in `sqlite3`, so there's nothing to install.
+- Changes are written every 5 seconds in the background and once more on shutdown, in a single transaction each (WAL mode). A crash loses at most the last few seconds; the file is never left half written.
+- The database holds what the page shows: `max_packets`, `max_remote_packets` and `max_messages` set how much history is kept on disk too. Older packets are deleted as new ones arrive, and lowering a limit trims the database on the next start. Nodes are kept.
+- **Docker:** `docker-compose.yml` mounts a named volume, `meshgram-data`, at `/app/data`. It survives `docker compose up --build`, `down` and image rebuilds; only `docker compose down -v` (or `docker volume rm`) deletes it. To keep the file in a host folder instead, replace the volume with a bind mount such as `./data:/app/data`.
+- **systemd:** the unit uses `StateDirectory=meshgram`, so the database is in `/var/lib/meshgram`.
+- Back up the database with `sqlite3 packet_map.sqlite3 ".backup backup.sqlite3"` (safe while Meshgram is running). To start over, stop Meshgram and delete `packet_map.sqlite3*`.
+- If the file is unreadable (for example corrupt), it's renamed to `packet_map.sqlite3.corrupt-<timestamp>` and a new one is started. If the directory isn't writable, the error is logged and the map runs without persistence.
+- The database contains decrypted channel messages and node positions, like the page itself, so protect the data directory accordingly.
 
 ---
 
@@ -656,6 +670,7 @@ meshgram/
 │       ├── dm_http_command.py
 │       ├── meshmapper.py         # MeshMapper MQTT observer uploads
 │       ├── packet_map.py         # live packet map web app (server)
+│       ├── packet_map_store.py   # packet map SQLite persistence
 │       └── packet_map_static/    # packet map web app (page)
 └── tests/
 ```
