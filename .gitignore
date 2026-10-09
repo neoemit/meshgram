@@ -3,4 +3,5 @@
 __pycache__/
 .pytest_cache/
 .DS_Store
+data/
 docker-compose.override.yml

@@ -10,6 +10,9 @@ Packets heard by other MeshMapper observers (relayed by the meshmapper plugin
 through the transport's remote RX log listeners) are shown too, routed to the
 observer that heard them, in a buffer of their own.
 
+Nodes and packet history are saved to SQLite (see ``packet_map_store``) and
+restored on startup, so the map survives restarts and redeploys.
+
 The plugin never emits bridge actions; it only listens to raw RF logs.
 """
 from __future__ import annotations
@@ -30,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
-from meshgram.config import MESHCORE_BACKEND
+from meshgram.config import MESHCORE_BACKEND, _as_bool
 from meshgram.meshcore_packets import (
     NODE_TYPE_NAMES,
     PAYLOAD_TYPE_ADVERT,
@@ -42,6 +45,14 @@ from meshgram.meshcore_packets import (
     parse_packet,
 )
 from meshgram.plugin import BasePlugin
+from meshgram.plugins.packet_map_store import (
+    PacketMapStore,
+    PacketMapStoreError,
+    PendingChanges,
+    RetentionLimits,
+    SavedState,
+    encode,
+)
 from meshgram.types import PluginAction, PluginContext
 
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +66,9 @@ SSE_KEEPALIVE_SECONDS = 15.0
 SSE_QUEUE_SIZE = 500
 CONTACT_REFRESH_SECONDS = 30.0
 MAX_REQUEST_HEAD_BYTES = 16 * 1024
+PERSIST_INTERVAL_SECONDS = 5.0
+DEFAULT_DATA_DIR = "data"
+DEFAULT_DB_FILE = "packet_map.sqlite3"
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -76,12 +90,19 @@ class PacketMapConfig:
     # Empty: the page restyles OpenStreetMap tiles to match its light or dark theme.
     tile_url: str = ""
     tile_attribution: str = ""
+    # Where nodes and packet history are kept across restarts; None keeps them in memory only.
+    db_path: Optional[Path] = None
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "PacketMapConfig":
         host = os.getenv("PACKET_MAP_HOST") or settings.get("host") or "127.0.0.1"
         port = os.getenv("PACKET_MAP_PORT") or settings.get("port")
         password = os.getenv("PACKET_MAP_PASSWORD") or settings.get("password") or ""
+        db_path = None
+        if _as_bool(settings.get("persist"), True):
+            # A relative path is relative to MESHGRAM_DATA_DIR (an absolute one is used as-is).
+            data_dir = Path(os.getenv("MESHGRAM_DATA_DIR") or DEFAULT_DATA_DIR)
+            db_path = data_dir / str(os.getenv("PACKET_MAP_DB_PATH") or settings.get("db_path") or DEFAULT_DB_FILE)
         return cls(
             host=str(host).strip(),
             port=_as_int(port, 8080),
@@ -92,6 +113,7 @@ class PacketMapConfig:
             title=str(settings.get("title") or DEFAULT_TITLE),
             tile_url=str(settings.get("tile_url") or ""),
             tile_attribution=str(settings.get("tile_attribution") or ""),
+            db_path=db_path,
         )
 
     def client_config(self) -> dict[str, Any]:
@@ -144,6 +166,59 @@ class PacketMapState:
         self._remote_hash_counts: dict[str, int] = {}
         self._next_packet_id = 1
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+        # Changes not yet persisted (an ordered set, so nodes keep their order on
+        # disk); None until track_changes(), i.e. when persistence is off.
+        self._dirty_node_ids: Optional[dict[str, None]] = None
+        self._unsaved_packets: list[dict[str, Any]] = []
+
+    # Persistence ------------------------------------------------------------
+
+    def restore(self, saved: SavedState) -> None:
+        """Load nodes and packets (oldest first) saved by a previous run."""
+        for node in saved.nodes:
+            if isinstance(node, dict) and node.get("id"):
+                self.nodes[node["id"]] = node
+        self.self_id = saved.self_id
+        for packet in saved.packets:
+            # Keep the "heard N×" count the packet had when it arrived.
+            seen_count = packet.get("seen_count")
+            if packet.get("source") == "meshmapper":
+                self._track(self.remote_packets, self._remote_hash_counts, packet)
+            else:
+                self._track(self.packets, self._hash_counts, packet)
+            if seen_count:
+                packet["seen_count"] = seen_count
+            if packet.get("message"):
+                self.messages.append(packet)
+            self._next_packet_id = max(self._next_packet_id, _as_int(packet.get("id"), 0) + 1)
+
+    def track_changes(self) -> None:
+        if self._dirty_node_ids is None:
+            self._dirty_node_ids = {}
+
+    def drain_changes(self) -> Optional[PendingChanges]:
+        """Serialize and clear what changed since the last call (None if nothing did)."""
+        if not self._dirty_node_ids and not self._unsaved_packets:
+            return None
+        node_ids = self._dirty_node_ids or {}
+        nodes = [(node_id, encode(self.nodes[node_id])) for node_id in node_ids if node_id in self.nodes]
+        packets = [
+            (
+                packet["id"],
+                packet["received_at"],
+                int(packet.get("source") == "meshmapper"),
+                int(bool(packet.get("message"))),
+                encode(packet),
+            )
+            for packet in self._unsaved_packets
+        ]
+        self._dirty_node_ids = {}
+        self._unsaved_packets = []
+        return PendingChanges(self_id=self.self_id, nodes=nodes, packets=packets)
+
+    def _mark_dirty(self, node_id: str) -> None:
+        if self._dirty_node_ids is not None:
+            self._dirty_node_ids[node_id] = None
 
     # Subscribers ------------------------------------------------------------
 
@@ -181,7 +256,10 @@ class PacketMapState:
             if key == "type" and value == "unknown" and node.get("type") != "unknown":
                 continue
             node[key] = value
-        return node, created or node != before
+        changed = created or node != before
+        if changed:
+            self._mark_dirty(node_id)
+        return node, changed
 
     def update_self(self, info: dict[str, Any]) -> list[dict[str, Any]]:
         node_id = _clean_key(info.get("public_key"))
@@ -189,6 +267,7 @@ class PacketMapState:
             return []
         if self.self_id and self.self_id != node_id and self.self_id in self.nodes:
             self.nodes[self.self_id]["is_self"] = False
+            self._mark_dirty(self.self_id)
         self.self_id = node_id
         lat, lon = info.get("adv_lat"), info.get("adv_lon")
         position = {"lat": float(lat), "lon": float(lon)} if is_valid_position(lat, lon) else {}
@@ -425,6 +504,8 @@ class PacketMapState:
             self._track(self.packets, self._hash_counts, packet)
         if packet.get("message"):
             self.messages.append(packet)
+        if self._dirty_node_ids is not None:
+            self._unsaved_packets.append(packet)
 
         self._publish({"type": "packet", "packet": packet, "nodes": [dict(node) for node in changed_nodes]})
         return packet
@@ -622,19 +703,73 @@ class PacketMapPlugin(BasePlugin):
         self.server = PacketMapServer(self.config, self.state)
         self._transport: Any = None
         self._refresh_task: Optional[asyncio.Task[None]] = None
+        self._store: Optional[PacketMapStore] = None
+        self._persist_task: Optional[asyncio.Task[None]] = None
         self._enabled = False
 
     async def on_startup(self, context: PluginContext) -> list[PluginAction]:
         if context.settings.mesh.backend != MESHCORE_BACKEND:
             LOGGER.error("Packet map disabled: it needs MeshCore RF logs (set mesh.backend to meshcore)")
             return []
+        await self._open_store()
         try:
             await self.server.start()
         except OSError as exc:
             LOGGER.error("Packet map disabled: cannot listen on %s:%s (%s)", self.config.host, self.config.port, exc)
+            await self._close_store()
             return []
         self._enabled = True
         return []
+
+    async def _open_store(self) -> None:
+        if self.config.db_path is None:
+            LOGGER.info("Packet map: persistence off; history is lost on restart")
+            return
+        store = PacketMapStore(
+            self.config.db_path,
+            RetentionLimits(
+                max_packets=self.config.max_packets,
+                max_remote_packets=self.config.max_remote_packets,
+                max_messages=self.config.max_messages,
+            ),
+        )
+        try:
+            saved = await asyncio.to_thread(store.open)
+        except PacketMapStoreError as exc:
+            LOGGER.error("Packet map: persistence off, history is lost on restart (%s)", exc)
+            return
+        self.state.restore(saved)
+        self.state.track_changes()
+        self._store = store
+        self._persist_task = asyncio.create_task(self._persist_loop(), name="packet-map-persist")
+        LOGGER.info(
+            "Packet map: restored %d nodes and %d packets from %s", len(saved.nodes), len(saved.packets), store.path
+        )
+
+    async def _persist_loop(self) -> None:
+        while True:
+            await asyncio.sleep(PERSIST_INTERVAL_SECONDS)
+            await self._persist()
+
+    async def _persist(self) -> None:
+        changes = self.state.drain_changes()
+        if changes is None or self._store is None:
+            return
+        try:
+            await asyncio.to_thread(self._store.write, changes)
+        except Exception:
+            LOGGER.exception("Packet map: failed to save %d packets to %s", len(changes.packets), self._store.path)
+
+    async def _close_store(self) -> None:
+        if self._persist_task is not None:
+            self._persist_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._persist_task
+            self._persist_task = None
+        if self._store is not None:
+            await self._persist()
+            await asyncio.to_thread(self._store.close)
+            self._store = None
 
     async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
         if not self._enabled:
@@ -683,3 +818,4 @@ class PacketMapPlugin(BasePlugin):
         if self._enabled:
             await self.server.stop()
             self._enabled = False
+        await self._close_store()
