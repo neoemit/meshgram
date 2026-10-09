@@ -257,6 +257,37 @@ class StateTests(unittest.TestCase):
         self.assertEqual(snapshot["messages"], [])  # all still in a packet buffer
         self.assertEqual(len(self.state.messages), 3)
 
+    def test_live_feed_packets_without_bytes(self):
+        # MeshMapper's live feed reports a packet's header fields and path, not its bytes.
+        self.state.update_contacts({REPEATER_KEY: {"type": 2, "adv_name": "Hilltop", "adv_lat": 45.1, "adv_lon": -73.1}})
+        self.state.channels = [CHANNEL]
+        sender = "F1" * 32
+        decoded = {"hash": "0123456789ABCDEF", "payload_type": 5, "payload_type_name": "GRP_TXT", "route_type": 1,
+                   "route_type_name": "FLOOD", "route": "flood", "path": ["B1"], "path_hash_size": 1, "hops": 1}
+        packet = self.state.ingest_remote_rx_log(
+            {"decoded": decoded, "observer_id": OBSERVER_KEY, "observer_name": "Hill", "snr": 6.0,
+             "source_node": {"public_key": sender, "name": "Phone", "lat": 45.3, "lon": -73.3}},
+            now=60.0,
+        )
+        self.assertEqual((packet["hash"], packet["source"], packet["snr"]), ("0123456789ABCDEF", "meshmapper", 6.0))
+        self.assertNotIn("raw", packet)
+        self.assertNotIn("message", packet)  # nothing to decrypt
+        self.assertEqual(packet["path_nodes"][0]["node_id"], REPEATER_KEY)
+        # MeshMapper knew the sender: it becomes the origin, placed where MeshMapper has it.
+        self.assertEqual(packet["origin"]["node_id"], sender)
+        self.assertEqual((self.state.nodes[sender]["name"], self.state.nodes[sender]["lat"]), ("Phone", 45.3))
+        json.dumps(packet)
+
+        # It only fills gaps: what the radio already knows about a node stays.
+        self.state.ingest_remote_rx_log(
+            {"decoded": decoded, "observer_id": OBSERVER_KEY,
+             "source_node": {"public_key": REPEATER_KEY, "name": "Renamed", "lat": 10.0, "lon": 10.0}}
+        )
+        self.assertEqual((self.state.nodes[REPEATER_KEY]["name"], self.state.nodes[REPEATER_KEY]["lat"]), ("Hilltop", 45.1))
+        self.assertEqual(self.state.remote_packets[-1]["seen_count"], 2)
+        # This radio's own packets always come with their bytes.
+        self.assertIsNone(self.state.ingest_rx_log({"decoded": decoded}))
+
     def test_subscribers_receive_packets(self):
         queue = self.state.subscribe()
         self.state.ingest_rx_log({"payload": _flood(4, [], _advert(REPEATER_KEY, 2, "Hilltop", 45.1, -73.1))})

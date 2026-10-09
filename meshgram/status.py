@@ -22,7 +22,7 @@ DISABLED = "disabled"
 STATES = {CONNECTED, CONNECTING, DISCONNECTED, DISABLED}
 
 # Display order; services not listed here come after, in registration order.
-SERVICE_ORDER = ("radio", "telegram", "mqtt_publish", "mqtt_subscribe")
+SERVICE_ORDER = ("radio", "telegram", "mqtt_publish", "mqtt_subscribe", "meshmapper_feed")
 
 StatusListener = Callable[[dict[str, Any]], None]
 

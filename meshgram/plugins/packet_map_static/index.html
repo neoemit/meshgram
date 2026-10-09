@@ -118,10 +118,13 @@
 
   /* --- Connections (radio, Telegram, MQTT) -------------------------------- */
   .conns-wrap { position: relative; }
-  .conns { display: inline-flex; align-items: center; gap: 10px; height: 30px; padding: 0 11px; border-radius: 999px;
+  .conns { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border-radius: 999px;
     border: 1px solid var(--border); background: var(--surface-2); font-size: 12.5px; font-weight: 600; color: var(--text-2); white-space: nowrap; }
   .conns:hover, .conns[aria-expanded="true"] { background: var(--surface-3); color: var(--text); }
+  .conn-pills { display: inline-flex; align-items: center; }
   .conn { display: inline-flex; align-items: center; gap: 6px; }
+  /* Hairline divider between indicators. */
+  .conn + .conn { margin-left: 11px; padding-left: 11px; border-left: 1px solid var(--border-strong); }
   .conn, .conn-row { --c: var(--text-3); }
   .conn[data-state="connected"], .conn-row[data-state="connected"] { --c: var(--good); }
   .conn[data-state="connecting"], .conn-row[data-state="connecting"] { --c: var(--ok); }
@@ -477,7 +480,8 @@
     .app-header { gap: 10px; padding: 0 12px; }
     .stats { display: none; }
     .status { padding: 0 10px; }
-    .conns { gap: 6px; padding: 0 10px; }
+    .conns { padding: 0 11px; }
+    .conn + .conn { margin-left: 7px; padding-left: 0; border-left: 0; }
     .conn-label { display: none; }
     #status-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .sidebar-head { padding: 10px 12px 8px; }
@@ -1280,12 +1284,12 @@ function detailRows(packet) {
   const refText = (ref, full) => (ref ? `${nodeLabel(ref)}${ref.node_id ? ` · ${full ? ref.node_id : shortId(ref.node_id)}` : ""}` : "—");
   const rows = [
     ["Received", new Date(packet.received_at * 1000).toLocaleString()],
-    ["Type", `${meta.label} · ${packet.payload_type_name} (${packet.payload_type}) v${packet.payload_version}`],
+    ["Type", `${meta.label} · ${packet.payload_type_name} (${packet.payload_type})${packet.payload_version != null ? ` v${packet.payload_version}` : ""}`],
     ["Route", `${packet.route_type_name} (${packet.route_type})`],
     ["Packet hash", packet.hash, true],
     isRemote(packet) ? ["Reported by", `${observerName(packet)} (MeshMapper) · ${shortId((packet.observer || {}).node_id)}`] : null,
     [isRemote(packet) ? "Reports" : "Heard", `${packet.seen_count}×`],
-    ["Size", `${packet.len} B · payload ${packet.payload_len} B`],
+    packet.len != null ? ["Size", `${packet.len} B · payload ${packet.payload_len} B`] : null,
     ["Hops", `${packet.hops} · ${packet.path_hash_size}-byte hashes`],
     ["Path", (packet.path || []).join(" → ") || "—", true],
     ["Heard from", refText(packet.heard_from, false)],
@@ -1306,7 +1310,8 @@ function detailRows(packet) {
   if (packet.trace_tag) {
     rows.push(["Trace tag", packet.trace_tag, true], ["Trace SNRs", (packet.trace_snrs || []).map((s) => `${s} dB`).join(", ") || "—"]);
   }
-  rows.push(["Raw", packet.raw, true]);
+  // MeshMapper's live feed reports packets without their bytes.
+  rows.push(["Raw", packet.raw || "Not included in MeshMapper's live feed", Boolean(packet.raw)]);
   return el("dl", {}, rows.filter(Boolean).map(([k, v, mono]) => [el("dt", {}, k), el("dd", { class: mono ? "mono" : null }, v)]));
 }
 
@@ -2016,7 +2021,7 @@ $("skip-link").addEventListener("click", (event) => {
 // --- Connections -------------------------------------------------------------------------------
 
 // Short header labels; the panel shows the server's full labels.
-const CONN_LABELS = { radio: "Radio", telegram: "Telegram", mqtt_publish: "MQTT ↑", mqtt_subscribe: "MQTT ↓" };
+const CONN_LABELS = { radio: "Radio", telegram: "Telegram", mqtt_publish: "MQTT ↑", mqtt_subscribe: "MQTT ↓", meshmapper_feed: "Live feed" };
 const CONN_STATES = { connected: "Connected", connecting: "Connecting…", disconnected: "Disconnected", disabled: "Off", unknown: "Unknown" };
 const connections = { list: [], stale: false };
 
