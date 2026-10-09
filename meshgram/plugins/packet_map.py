@@ -6,6 +6,10 @@ repeaters highlighted) next to a live list of every RF packet the radio hears.
 Repeater hashes in each packet's path are resolved to known nodes so the route
 a packet took can be drawn on the map.
 
+Packets heard by other MeshMapper observers (relayed by the meshmapper plugin
+through the transport's remote RX log listeners) are shown too, routed to the
+observer that heard them, in a buffer of their own.
+
 The plugin never emits bridge actions; it only listens to raw RF logs.
 """
 from __future__ import annotations
@@ -33,7 +37,9 @@ from meshgram.meshcore_packets import (
     PAYLOAD_TYPE_ANON_REQ,
     PAYLOAD_TYPE_GRP_TXT,
     decode_packet,
+    decrypt_group_text,
     is_valid_position,
+    parse_packet,
 )
 from meshgram.plugin import BasePlugin
 from meshgram.types import PluginAction, PluginContext
@@ -63,9 +69,11 @@ class PacketMapConfig:
     host: str = "127.0.0.1"
     port: int = 8080
     max_packets: int = 500
+    max_messages: int = 1000
+    max_remote_packets: int = 1000
     password: str = ""
     title: str = DEFAULT_TITLE
-    # Empty: the page picks a light or dark CARTO basemap to match its theme.
+    # Empty: the page restyles OpenStreetMap tiles to match its light or dark theme.
     tile_url: str = ""
     tile_attribution: str = ""
 
@@ -78,6 +86,8 @@ class PacketMapConfig:
             host=str(host).strip(),
             port=_as_int(port, 8080),
             max_packets=max(10, _as_int(settings.get("max_packets"), 500)),
+            max_messages=max(10, _as_int(settings.get("max_messages"), 1000)),
+            max_remote_packets=max(10, _as_int(settings.get("max_remote_packets"), 1000)),
             password=str(password),
             title=str(settings.get("title") or DEFAULT_TITLE),
             tile_url=str(settings.get("tile_url") or ""),
@@ -117,11 +127,21 @@ def _has_position(node: Optional[dict[str, Any]]) -> bool:
 class PacketMapState:
     """Node registry and packet ring buffer backing the web app."""
 
-    def __init__(self, max_packets: int = 500):
+    def __init__(self, max_packets: int = 500, max_messages: int = 1000, max_remote_packets: int = 1000):
         self.nodes: dict[str, dict[str, Any]] = {}
         self.packets: deque[dict[str, Any]] = deque(maxlen=max_packets)
+        # Packets other MeshMapper observers heard; kept apart so a busy region
+        # can't push this radio's own packets out of the buffer.
+        self.remote_packets: deque[dict[str, Any]] = deque(maxlen=max_remote_packets)
+        # Channel secrets (``name``, ``secret``, ``hash``) for decrypting channel
+        # messages that meshcore_py didn't decrypt, such as other observers' packets.
+        self.channels: list[dict[str, Any]] = []
+        # Decrypted messages are kept longer than the packet buffer, which busy
+        # meshes fill with adverts and ACKs within minutes.
+        self.messages: deque[dict[str, Any]] = deque(maxlen=max_messages)
         self.self_id: Optional[str] = None
         self._hash_counts: dict[str, int] = {}
+        self._remote_hash_counts: dict[str, int] = {}
         self._next_packet_id = 1
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
 
@@ -238,9 +258,12 @@ class PacketMapState:
             "candidates": candidates,
         }
 
-    def _resolve_path(self, path: list[str]) -> list[dict[str, Any]]:
-        # Walk backwards from our own radio: each hop is picked relative to the next one.
-        anchor = self.nodes.get(self.self_id) if self.self_id else None
+    def _resolve_path(self, path: list[str], receiver_id: Optional[str] = None) -> list[dict[str, Any]]:
+        # Walk backwards from the radio that heard the packet (ours unless another
+        # observer's position is known): each hop is picked relative to the next one.
+        anchor = self.nodes.get(receiver_id) if receiver_id else None
+        if not _has_position(anchor):
+            anchor = self.nodes.get(self.self_id) if self.self_id else None
         resolved: list[dict[str, Any]] = []
         for hash_hex in reversed(path):
             candidates = self._candidates(hash_hex)
@@ -270,6 +293,47 @@ class PacketMapState:
     # Packets ----------------------------------------------------------------
 
     def ingest_rx_log(self, rx_log: dict[str, Any], now: Optional[float] = None) -> Optional[dict[str, Any]]:
+        return self._ingest(rx_log, now, observer_id=None)
+
+    def ingest_remote_rx_log(self, rx_log: dict[str, Any], now: Optional[float] = None) -> Optional[dict[str, Any]]:
+        """Ingest a packet another MeshMapper observer heard (``observer_id``/``observer_name`` keys)."""
+        observer_id = _clean_key(rx_log.get("observer_id"))
+        if not observer_id or observer_id == self.self_id:
+            return None
+        return self._ingest(rx_log, now, observer_id=observer_id)
+
+    def _decrypt_channel_message(self, raw: bytes) -> Optional[dict[str, Any]]:
+        if not self.channels:
+            return None
+        parsed = parse_packet(raw)
+        return decrypt_group_text(parsed["payload"], self.channels) if parsed else None
+
+    def _upsert_observer(self, observer_id: str, name: Any) -> Optional[dict[str, Any]]:
+        if len(observer_id) != 64:
+            return None
+        known_name = (self.nodes.get(observer_id) or {}).get("name")
+        node, changed = self._upsert_node(
+            observer_id, is_observer=True, name=None if known_name else (str(name or "").strip() or None)
+        )
+        return node if changed else None
+
+    @staticmethod
+    def _track(buffer: deque[dict[str, Any]], counts: dict[str, int], packet: dict[str, Any]) -> None:
+        """Append to a ring buffer, keeping per-hash counts of what's in it (for "heard N×")."""
+        if len(buffer) == buffer.maxlen:
+            dropped = buffer[0]["hash"]
+            remaining = counts.get(dropped, 1) - 1
+            if remaining > 0:
+                counts[dropped] = remaining
+            else:
+                counts.pop(dropped, None)
+        counts[packet["hash"]] = counts.get(packet["hash"], 0) + 1
+        packet["seen_count"] = counts[packet["hash"]]
+        buffer.append(packet)
+
+    def _ingest(
+        self, rx_log: dict[str, Any], now: Optional[float], observer_id: Optional[str]
+    ) -> Optional[dict[str, Any]]:
         raw_hex = str(rx_log.get("payload") or "").strip()
         if not raw_hex:
             # ``raw_hex`` is the whole log frame: SNR byte, RSSI byte, then the packet.
@@ -287,11 +351,27 @@ class PacketMapState:
             if isinstance(rx_log.get(key), (int, float)):
                 packet[key] = rx_log[key]
 
-        # Extras that meshcore_py adds when it can decrypt a channel message.
+        changed_nodes: list[dict[str, Any]] = []
+        if observer_id:
+            packet["source"] = "meshmapper"
+            observer_node = self._upsert_observer(observer_id, rx_log.get("observer_name"))
+            if observer_node is not None:
+                changed_nodes.append(observer_node)
+            packet["observer"] = {
+                "node_id": observer_id,
+                "name": (self.nodes.get(observer_id) or {}).get("name") or rx_log.get("observer_name"),
+            }
+
+        # Channel messages: meshcore_py adds the channel and text when it can decrypt
+        # a local packet; anything else is decrypted here with the radio's channel keys.
         if packet["payload_type"] == PAYLOAD_TYPE_GRP_TXT:
-            if rx_log.get("chan_name"):
-                packet["channel_name"] = str(rx_log["chan_name"])
-            message = rx_log.get("message")
+            channel_name, message = rx_log.get("chan_name"), rx_log.get("message")
+            if not message:
+                decrypted = self._decrypt_channel_message(bytes.fromhex(raw_hex))
+                if decrypted:
+                    channel_name, message = decrypted["channel_name"], decrypted["message"]
+            if channel_name:
+                packet["channel_name"] = str(channel_name)
             if isinstance(message, str) and message:
                 sender, sep, body = message.partition(": ")
                 if sep and 0 < len(sender) <= 32:
@@ -300,7 +380,6 @@ class PacketMapState:
                 else:
                     packet["message"] = message
 
-        changed_nodes: list[dict[str, Any]] = []
         advert = packet.get("advert")
         if packet["payload_type"] == PAYLOAD_TYPE_ADVERT and advert:
             existing = self.nodes.get(advert["public_key"])
@@ -320,16 +399,17 @@ class PacketMapState:
             if created:
                 changed_nodes.append(node)
 
-        packet["path_nodes"] = self._resolve_path(packet["path"])
+        packet["path_nodes"] = self._resolve_path(packet["path"], observer_id)
         packet["origin"] = self._resolve_origin(packet)
         if packet["route"] == "flood":
-            # The last relay (or the originator, for zero-hop packets) is who we heard.
+            # The last relay (or the originator, for zero-hop packets) is who was heard.
             packet["heard_from"] = packet["path_nodes"][-1] if packet["path_nodes"] else packet["origin"]
         else:
             packet["heard_from"] = None
 
+        # "Heard directly" signal stats describe this radio's links only.
         heard_id = (packet.get("heard_from") or {}).get("node_id")
-        if heard_id and heard_id in self.nodes:
+        if heard_id and heard_id in self.nodes and not observer_id:
             node, _ = self._upsert_node(heard_id, last_heard=now, last_snr=packet.get("snr"), last_rssi=packet.get("rssi"))
             if node not in changed_nodes:
                 changed_nodes.append(node)
@@ -339,26 +419,26 @@ class PacketMapState:
             if node not in changed_nodes:
                 changed_nodes.append(node)
 
-        if len(self.packets) == self.packets.maxlen:
-            dropped = self.packets[0]["hash"]
-            remaining = self._hash_counts.get(dropped, 1) - 1
-            if remaining > 0:
-                self._hash_counts[dropped] = remaining
-            else:
-                self._hash_counts.pop(dropped, None)
-        self._hash_counts[packet["hash"]] = self._hash_counts.get(packet["hash"], 0) + 1
-        packet["seen_count"] = self._hash_counts[packet["hash"]]
-        self.packets.append(packet)
+        if observer_id:
+            self._track(self.remote_packets, self._remote_hash_counts, packet)
+        else:
+            self._track(self.packets, self._hash_counts, packet)
+        if packet.get("message"):
+            self.messages.append(packet)
 
         self._publish({"type": "packet", "packet": packet, "nodes": [dict(node) for node in changed_nodes]})
         return packet
 
     def snapshot(self) -> dict[str, Any]:
+        # Messages still in a packet buffer are already sent there; only send the older ones.
+        buffered = {packet["id"] for packet in self.packets} | {packet["id"] for packet in self.remote_packets}
         return {
             "type": "snapshot",
             "self_id": self.self_id,
             "nodes": [dict(node) for node in self.nodes.values()],
             "packets": list(self.packets),
+            "remote_packets": list(self.remote_packets),
+            "messages": [message for message in self.messages if message["id"] not in buffered],
         }
 
 
@@ -534,7 +614,11 @@ class PacketMapPlugin(BasePlugin):
     def __init__(self, settings: Optional[dict[str, Any]] = None):
         super().__init__(settings)
         self.config = PacketMapConfig.from_settings(self.settings)
-        self.state = PacketMapState(max_packets=self.config.max_packets)
+        self.state = PacketMapState(
+            max_packets=self.config.max_packets,
+            max_messages=self.config.max_messages,
+            max_remote_packets=self.config.max_remote_packets,
+        )
         self.server = PacketMapServer(self.config, self.state)
         self._transport: Any = None
         self._refresh_task: Optional[asyncio.Task[None]] = None
@@ -557,6 +641,9 @@ class PacketMapPlugin(BasePlugin):
             return
         self._transport = transport
         transport.add_rx_log_listener(self.handle_rx_log)
+        add_remote_listener = getattr(transport, "add_remote_rx_log_listener", None)
+        if callable(add_remote_listener):
+            add_remote_listener(self.handle_remote_rx_log)
         self.state.apply_self(transport.device_self_info)
         self._refresh_contacts()
         if self._refresh_task is None or self._refresh_task.done():
@@ -566,6 +653,9 @@ class PacketMapPlugin(BasePlugin):
         contacts = getattr(self._transport, "contacts", None)
         if isinstance(contacts, dict):
             self.state.apply_contacts(contacts)
+        channels = getattr(self._transport, "channels", None)
+        if isinstance(channels, list):
+            self.state.channels = channels
 
     async def _contact_refresh_loop(self) -> None:
         while True:
@@ -576,6 +666,13 @@ class PacketMapPlugin(BasePlugin):
         packet = self.state.ingest_rx_log(rx_log)
         if packet is None:
             LOGGER.debug("Packet map: skipping undecodable RX log: %s", rx_log.get("raw_hex"))
+
+    async def handle_remote_rx_log(self, rx_log: dict[str, Any]) -> None:
+        if not self._enabled:
+            return
+        packet = self.state.ingest_remote_rx_log(rx_log)
+        if packet is None:
+            LOGGER.debug("Packet map: skipping undecodable observer packet from %s", rx_log.get("observer_id"))
 
     async def on_shutdown(self) -> None:
         if self._refresh_task is not None:

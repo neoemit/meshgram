@@ -69,8 +69,8 @@ Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshta
 - `plugins/ping_pong.py` — keyword-response automation with dedupe and channel filtering
 - `plugins/dm_http_command.py` — DMs that invoke HTTP endpoints and return formatted responses
 - `plugins/trace_me.py` — MeshCore-only route trace responder
-- `plugins/meshmapper.py` — MeshCore-only MeshMapper observer: uploads every RX packet to MeshMapper's MQTT broker (paho-mqtt, device-signed JWT auth). Uses the optional `on_mesh_connected` / `on_shutdown` plugin hooks and `MeshCoreTransport.add_rx_log_listener()` instead of message hooks.
-- `plugins/packet_map.py` — MeshCore-only web app (stdlib asyncio HTTP server + Server-Sent Events) showing a Leaflet map of positioned nodes/repeaters and a live list of every RX packet. The page is `plugins/packet_map_static/index.html` (single file, no build step). Node positions come from adverts and `MeshCoreTransport.contacts`.
+- `plugins/meshmapper.py` — MeshCore-only MeshMapper observer: uploads every RX packet to MeshMapper's MQTT broker (paho-mqtt, device-signed JWT auth). Uses the optional `on_mesh_connected` / `on_shutdown` plugin hooks and `MeshCoreTransport.add_rx_log_listener()` instead of message hooks. It also subscribes to the region's `packets` topics (best effort; backs off if the broker refuses) and passes other observers' packets to `MeshCoreTransport.dispatch_remote_rx_log()`.
+- `plugins/packet_map.py` — MeshCore-only web app (stdlib asyncio HTTP server + Server-Sent Events) showing a Leaflet map of positioned nodes/repeaters with animated packet routes, a live list of every RX packet, and a Messages tab (table of decrypted channel messages, replayable on the map). The page is `plugins/packet_map_static/index.html` (single file, no build step). Node positions come from adverts and `MeshCoreTransport.contacts`. Other observers' packets arrive via `add_remote_rx_log_listener()` and are decrypted with `MeshCoreTransport.channels` (`meshcore_packets.decrypt_group_text`).
 
 ### Key modules
 

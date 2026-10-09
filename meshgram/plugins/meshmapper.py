@@ -11,6 +11,10 @@ Authentication uses a MeshCore auth token: an Ed25519-signed JWT whose
 token itself (no private key ever leaves the device); a private key can be
 configured as an alternative.
 
+The plugin also subscribes to the region's ``packets`` topics, if the broker
+allows it, and hands packets heard by *other* observers to the transport's
+remote RX log listeners (the packet_map plugin shows them).
+
 The plugin never emits bridge actions and only listens to raw RF logs, so it
 does not interact with the other plugins.
 """
@@ -41,10 +45,13 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_SERVER = "mqtt.meshmapper.net"
 DEFAULT_TOPIC_STATUS = "meshcore/{IATA}/{PUBLIC_KEY}/status"
 DEFAULT_TOPIC_PACKETS = "meshcore/{IATA}/{PUBLIC_KEY}/packets"
+DEFAULT_TOPIC_SUBSCRIBE = "meshcore/{IATA}/+/packets"
 PLACEHOLDER_IATA_CODES = {"", "XXX", "XYZ"}
 CLIENT_VERSION = f"meshgram/{__version__}"
 
 MQTT_AUTH_FAILURE_CODES = {4, 5, 134, 135}
+# A broker that rejects a subscription by dropping the connection does so right away.
+SUBSCRIBE_GRACE_SECONDS = 10.0
 
 HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
 
@@ -71,6 +78,13 @@ def _clean_hex(value: Any) -> str:
     return "".join(str(value or "").split()).upper()
 
 
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(slots=True)
 class MeshMapperConfig:
     iata: str
@@ -87,6 +101,8 @@ class MeshMapperConfig:
     client_id_prefix: str = "meshgram_"
     topic_status: str = DEFAULT_TOPIC_STATUS
     topic_packets: str = DEFAULT_TOPIC_PACKETS
+    subscribe: bool = True
+    topic_subscribe: str = DEFAULT_TOPIC_SUBSCRIBE
     private_key: str = ""
 
     @classmethod
@@ -110,6 +126,8 @@ class MeshMapperConfig:
             client_id_prefix=str(settings.get("client_id_prefix") or "meshgram_"),
             topic_status=str(settings.get("topic_status") or DEFAULT_TOPIC_STATUS),
             topic_packets=str(settings.get("topic_packets") or DEFAULT_TOPIC_PACKETS),
+            subscribe=_as_bool(settings.get("subscribe"), True),
+            topic_subscribe=str(settings.get("topic_subscribe") or DEFAULT_TOPIC_SUBSCRIBE),
             private_key=_clean_hex(private_key),
         )
 
@@ -172,6 +190,40 @@ def build_packet_message(
     if route == "D" and parsed["path_hashes"]:
         message["path"] = ",".join(parsed["path_hashes"])
     return message
+
+
+def parse_observer_packet(topic: str, payload: bytes, own_public_key: str) -> Optional[dict[str, Any]]:
+    """Turn another observer's ``packets`` message into an RF-log-like dict, or ``None`` to skip it.
+
+    Skips our own uploads, non-packet documents and packets the observer transmitted itself.
+    """
+    parts = topic.split("/")
+    observer_id = _clean_hex(parts[-2]) if len(parts) >= 2 else ""
+    try:
+        message = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(message, dict):
+        return None
+    if not HEX_RE.match(observer_id) or observer_id in {"", "+"}:
+        observer_id = _clean_hex(message.get("origin_id"))
+    if not observer_id or not HEX_RE.match(observer_id) or observer_id == own_public_key:
+        return None
+    if str(message.get("type") or "PACKET").upper() != "PACKET" or str(message.get("direction") or "rx").lower() != "rx":
+        return None
+    raw_hex = _clean_hex(message.get("raw"))
+    if not raw_hex or len(raw_hex) % 2 or not HEX_RE.match(raw_hex):
+        return None
+    observation: dict[str, Any] = {
+        "payload": raw_hex,
+        "observer_id": observer_id,
+        "observer_name": str(message.get("origin") or "").strip() or None,
+    }
+    for source_key, target_key in (("SNR", "snr"), ("RSSI", "rssi")):
+        value = _as_float(message.get(source_key))
+        if value is not None:
+            observation[target_key] = value
+    return observation
 
 
 # --- Auth token --------------------------------------------------------------
@@ -245,6 +297,11 @@ class MeshMapperUploader:
         self._token_task: Optional[asyncio.Task[None]] = None
         self._status_task: Optional[asyncio.Task[None]] = None
         self._refresh_now: Optional[asyncio.Event] = None
+        # Subscribing to other observers is best effort: once the broker refuses it, stop asking.
+        self._subscribe_denied = False
+        self._subscribe_sent_at: Optional[float] = None
+        self._subscribe_confirmed = False
+        self._remote_seen = False
 
     # Identity ----------------------------------------------------------------
 
@@ -394,6 +451,8 @@ class MeshMapperUploader:
         )
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
+        client.on_subscribe = self._on_subscribe
+        client.on_message = self._on_message
         client.reconnect_delay_set(min_delay=1, max_delay=120)
         client.connect_async(cfg.server, cfg.port, keepalive=cfg.keepalive)
         client.loop_start()
@@ -419,15 +478,74 @@ class MeshMapperUploader:
         self._connected = True
         LOGGER.info("MeshMapper: connected; publishing packets to %s", self._topic(self.config.topic_packets))
         self._publish_status("online")
+        self._subscribe()
 
     def _on_disconnect(
         self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any = None
     ) -> None:
         self._connected = False
+        sent_at = self._subscribe_sent_at
+        if (
+            sent_at is not None
+            and not self._subscribe_confirmed
+            and time.monotonic() - sent_at < SUBSCRIBE_GRACE_SECONDS
+            and _reason_code_value(reason_code) != 0
+        ):
+            self._deny_subscription(f"the broker closed the connection right after it ({reason_code})")
+        self._subscribe_sent_at = None
         if _reason_code_value(reason_code) != 0:
             LOGGER.warning("MeshMapper: MQTT disconnected (%s); paho will reconnect", reason_code)
             if _reason_code_value(reason_code) in MQTT_AUTH_FAILURE_CODES:
                 self._request_token_refresh()
+
+    # Other observers' packets ------------------------------------------------------
+
+    def _subscribe(self) -> None:
+        if not self.config.subscribe or self._subscribe_denied or self._client is None:
+            return
+        topic = self._topic(self.config.topic_subscribe)
+        try:
+            self._client.subscribe(topic, qos=0)
+        except Exception as exc:
+            LOGGER.warning("MeshMapper: could not subscribe to %s: %s", topic, exc)
+            return
+        self._subscribe_sent_at = time.monotonic()
+        self._subscribe_confirmed = False
+
+    def _deny_subscription(self, reason: str) -> None:
+        if self._subscribe_denied:
+            return
+        self._subscribe_denied = True
+        LOGGER.warning(
+            "MeshMapper: can't receive other observers' packets from %s: %s. "
+            "Uploads are unaffected; not retrying until restart.",
+            self._topic(self.config.topic_subscribe),
+            reason,
+        )
+
+    def _on_subscribe(self, client: Any, userdata: Any, mid: Any, reason_codes: Any, properties: Any = None) -> None:
+        codes = reason_codes if isinstance(reason_codes, (list, tuple)) else [reason_codes]
+        failed = [code for code in codes if getattr(code, "is_failure", _reason_code_value(code) >= 0x80)]
+        if failed:
+            self._deny_subscription(f"the broker refused the subscription ({failed[0]})")
+            return
+        self._subscribe_confirmed = True
+        LOGGER.info("MeshMapper: subscribed to %s for other observers' packets", self._topic(self.config.topic_subscribe))
+
+    def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
+        observation = parse_observer_packet(str(message.topic), message.payload, self._public_key)
+        if observation is None:
+            return
+        dispatch = getattr(self._transport, "dispatch_remote_rx_log", None)
+        if self._loop is None or self._loop.is_closed() or not callable(dispatch):
+            return
+        if not self._remote_seen:
+            self._remote_seen = True
+            LOGGER.info(
+                "MeshMapper: receiving other observers' packets (first from %s)",
+                observation.get("observer_name") or observation["observer_id"][:12],
+            )
+        asyncio.run_coroutine_threadsafe(dispatch(observation), self._loop)
 
     def _request_token_refresh(self) -> None:
         if self._loop is None or self._refresh_now is None or self._loop.is_closed():

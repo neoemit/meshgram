@@ -7,7 +7,8 @@ source/destination hashes, channel hash, ...). Encrypted bodies stay opaque.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Optional
+import hmac
+from typing import Any, Iterable, Optional
 
 ROUTE_TYPE_TRANSPORT_FLOOD = 0x00
 ROUTE_TYPE_FLOOD = 0x01
@@ -137,6 +138,38 @@ def decode_advert(payload: bytes) -> Optional[dict[str, Any]]:
         if name:
             advert["name"] = name
     return advert
+
+
+def decrypt_group_text(payload: bytes, channels: Iterable[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Decrypt a GRP_TXT payload with the first matching channel secret, like meshcore_py does.
+
+    The payload is ``channel_hash(1) || MAC(2) || AES-128-ECB ciphertext``; the MAC is the start of
+    HMAC-SHA256(secret, ciphertext) and the plaintext is ``timestamp(4) || flags(1) || text``, where
+    the text is ``"<sender>: <message>"``. ``channels`` items have ``name``, ``secret`` (16 bytes)
+    and ``hash`` (hex of the first byte of SHA-256(secret)). Returns ``None`` if no channel matches.
+    """
+    if len(payload) < 3 + 16 or (len(payload) - 3) % 16:
+        return None
+    try:
+        from Crypto.Cipher import AES  # pycryptodome, a meshcore_py dependency
+    except ImportError:  # pragma: no cover - only without meshcore_py installed
+        return None
+    channel_hash = payload[0:1].hex()
+    mac = payload[1:3]
+    ciphertext = payload[3:]
+    for channel in channels:
+        secret = channel.get("secret")
+        if not isinstance(secret, (bytes, bytearray)) or str(channel.get("hash") or "").lower() != channel_hash:
+            continue
+        if hmac.new(bytes(secret), ciphertext, hashlib.sha256).digest()[:2] != mac:
+            continue
+        plaintext = AES.new(bytes(secret), AES.MODE_ECB).decrypt(ciphertext)
+        return {
+            "channel_name": str(channel.get("name") or ""),
+            "message": plaintext[5:].strip(b"\0").decode("utf-8", "ignore"),
+            "sender_timestamp": int.from_bytes(plaintext[0:4], "little"),
+        }
+    return None
 
 
 def is_valid_position(lat: Any, lon: Any) -> bool:

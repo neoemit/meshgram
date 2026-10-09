@@ -45,12 +45,14 @@ class MeshCoreTransport(MeshTransport):
         self._on_text: Optional[MeshTextCallback] = None
         self._on_reaction: Optional[MeshReactionCallback] = None
         self._contacts: dict[str, dict[str, Any]] = {}
+        self._channels: dict[int, dict[str, Any]] = {}
         self._subscriptions: list[Any] = []
         self.local_short_name: Optional[str] = None
         # Optional fallback cache for identity-less echoes:
         # (channel, text) -> monotonic-time-sent.
         self._recent_outbound_texts: dict[tuple[int, str], float] = {}
         self._rx_log_listeners: list[RxLogListener] = []
+        self._remote_rx_log_listeners: list[RxLogListener] = []
 
     # --- Lifecycle ----------------------------------------------------------
 
@@ -220,6 +222,7 @@ class MeshCoreTransport(MeshTransport):
         from meshcore import EventType  # type: ignore[attr-defined]
 
         loaded = 0
+        channels: dict[int, dict[str, Any]] = {}
         for channel_index in MESHCORE_CHANNEL_INDEX_RANGE:
             try:
                 result = await get_channel(channel_index)
@@ -232,7 +235,11 @@ class MeshCoreTransport(MeshTransport):
                 continue
             if getattr(result, "type", None) is not None:
                 loaded += 1
+                payload = getattr(result, "payload", None)
+                if isinstance(payload, dict):
+                    channels[channel_index] = dict(payload)
 
+        self._channels = channels
         LOGGER.info("MeshCore channel metadata refreshed for path enrichment (channels=%s)", loaded)
 
     async def _refresh_contacts_async(self) -> None:
@@ -274,6 +281,20 @@ class MeshCoreTransport(MeshTransport):
         """Contacts known to the companion radio, keyed by public key (hex)."""
         return {key: dict(value) for key, value in self._contacts.items() if isinstance(value, dict)}
 
+    @property
+    def channels(self) -> list[dict[str, Any]]:
+        """Configured channels with their secrets (``name``, ``secret``, ``hash``), for decrypting RF logs."""
+        result = []
+        for _, channel in sorted(self._channels.items()):
+            secret = channel.get("channel_secret")
+            name = str(channel.get("channel_name") or "").strip()
+            if not isinstance(secret, (bytes, bytearray)) or len(secret) != 16 or not any(secret) or not name:
+                continue
+            secret = bytes(secret)
+            channel_hash = str(channel.get("channel_hash") or hashlib.sha256(secret).hexdigest()[:2]).lower()
+            result.append({"name": name, "secret": secret, "hash": channel_hash})
+        return result
+
     def add_rx_log_listener(self, listener: RxLogListener) -> None:
         """Register a callback for raw RF packet logs. Survives reconnects."""
         if listener not in self._rx_log_listeners:
@@ -282,6 +303,26 @@ class MeshCoreTransport(MeshTransport):
     def remove_rx_log_listener(self, listener: RxLogListener) -> None:
         with contextlib.suppress(ValueError):
             self._rx_log_listeners.remove(listener)
+
+    # Packets heard by *other* observers (e.g. relayed from MeshMapper's MQTT broker by the
+    # meshmapper plugin) are shared with plugins through the transport, like local RF logs.
+    # Each dict looks like an RF log (``payload``, ``snr``, ``rssi``) plus ``observer_id`` and
+    # ``observer_name``.
+
+    def add_remote_rx_log_listener(self, listener: RxLogListener) -> None:
+        if listener not in self._remote_rx_log_listeners:
+            self._remote_rx_log_listeners.append(listener)
+
+    def remove_remote_rx_log_listener(self, listener: RxLogListener) -> None:
+        with contextlib.suppress(ValueError):
+            self._remote_rx_log_listeners.remove(listener)
+
+    async def dispatch_remote_rx_log(self, rx_log: dict[str, Any]) -> None:
+        for listener in list(self._remote_rx_log_listeners):
+            try:
+                await listener(dict(rx_log))
+            except Exception:
+                LOGGER.exception("MeshCore remote RX log listener failed")
 
     async def query_device_info(self) -> dict[str, Any]:
         """Return the DEVICE_INFO payload (model, firmware version) or ``{}``."""

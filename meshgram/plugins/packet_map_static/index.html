@@ -23,6 +23,7 @@
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     --radius: 12px;
     --self: #ff5c8a;
+    --observer: #2dd4bf;
 
     --bg: #0a0e13;
     --surface: #10151c;
@@ -47,6 +48,7 @@
     --route-casing: #0a0e13;
     --chip-mix: #ffffff;
     --chip-pct: 75%;
+    --tab-active: #2c3746;
     color-scheme: dark;
   }
   :root[data-theme="light"] {
@@ -73,6 +75,7 @@
     --route-casing: #ffffff;
     --chip-mix: #000000;
     --chip-pct: 55%;
+    --tab-active: #ffffff;
     color-scheme: light;
   }
 
@@ -163,6 +166,9 @@
   .switch:checked::after { transform: translateX(14px); }
   .flow-swatch { width: 16px; height: 16px; flex: none; display: grid; place-items: center; }
   .flow-swatch::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px 2px var(--accent); }
+  .flow-swatch.observer::before { width: 7px; height: 7px; background: var(--observer); box-shadow: 0 0 6px 2px var(--observer); }
+  .observer-swatch { width: 14px; height: 14px; margin: 1px; flex: none; border: 2px solid var(--observer); border-radius: 50%; }
+  .popup-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .panel-note { margin: 2px 8px 2px; font-size: 12.5px; color: var(--text-3); }
 
   /* --- Sidebar ------------------------------------------------------------- */
@@ -183,6 +189,12 @@
     font-size: 12px; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums; }
 
   .type-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid var(--border); }
+  .source-filter { display: flex; gap: 2px; margin: 0 12px 10px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-3); }
+  .seg { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 28px; padding: 0 8px; border: 0; border-radius: 7px;
+    background: none; color: var(--text-2); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .seg:hover { color: var(--text); }
+  .seg[aria-pressed="true"] { background: var(--tab-active); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .2); }
+  .seg .n { color: var(--text-3); font-weight: 500; font-variant-numeric: tabular-nums; }
   .filter-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 11px; border: 1px solid var(--border);
     border-radius: 999px; background: transparent; color: var(--text-2); font-size: 13px; font-weight: 600; }
   .filter-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
@@ -228,6 +240,7 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--surface-3); color: var(--text-2); font-weight: 550; }
   .stop.relay { color: color-mix(in srgb, #f0883e var(--chip-pct), var(--chip-mix)); background: color-mix(in srgb, #f0883e 13%, transparent); }
   .stop.self { color: color-mix(in srgb, var(--self) var(--chip-pct), var(--chip-mix)); background: color-mix(in srgb, var(--self) 13%, transparent); }
+  .stop.observer { color: color-mix(in srgb, var(--observer) var(--chip-pct), var(--chip-mix)); background: color-mix(in srgb, var(--observer) 14%, transparent); }
   .stop.unknown { font-family: var(--mono); font-size: 12px; color: var(--text-3); background: none; border: 1px dashed var(--border-strong); line-height: 20px; }
   .route-sep { color: var(--text-3); }
   .pkt-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: var(--text-2); }
@@ -242,6 +255,7 @@
   .tag { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 999px;
     font-size: 12px; font-weight: 650; color: var(--text-2); }
   .tag.warn { border-color: color-mix(in srgb, var(--ok) 60%, transparent); color: var(--ok); }
+  .tag.observer { border-color: color-mix(in srgb, var(--observer) 60%, transparent); color: color-mix(in srgb, var(--observer) var(--chip-pct), var(--chip-mix)); }
   .pkt-details { padding: 0 16px 14px; border-top: 1px solid var(--border); }
   .pkt-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 16px; margin: 12px 0 0; font-size: 13px; }
   .pkt-details dt { color: var(--text-3); }
@@ -277,6 +291,7 @@
     filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, .5)); transition: transform .15s ease-out; }
   .node-marker:hover .nm svg, .node-marker:focus-visible .nm svg { transform: scale(1.25); }
   .nm .shape { fill: var(--c); stroke: var(--marker-stroke); stroke-width: 2; }
+  .nm.observer::after { content: ""; position: absolute; inset: -5px; border: 2px solid var(--observer); border-radius: 50%; }
   .nm-halo { position: absolute; inset: -7px; border: 2px solid var(--self); border-radius: 50%; animation: halo 2.4s ease-out infinite; }
   @keyframes halo { from { transform: scale(.55); opacity: .9; } to { transform: scale(1.7); opacity: 0; } }
 
@@ -287,6 +302,110 @@
   .flow-dot { position: absolute; inset: 0; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #fff 0 20%, var(--c) 55%);
     box-shadow: 0 0 0 2px var(--route-casing), 0 0 14px 4px var(--c); }
 
+  /* --- Views ----------------------------------------------------------------------- */
+  .view-tabs { display: flex; flex: none; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-3); }
+  .view-tab { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border-radius: 8px;
+    color: var(--text-2); font-size: 14px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+  .view-tab svg { width: 16px; height: 16px; }
+  .view-tab:hover { color: var(--text); }
+  .view-tab[aria-current="page"] { background: var(--tab-active); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .2); }
+  .view-tab:focus-visible { outline-offset: 0; }
+  .tab-badge { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-contrast);
+    font-size: 12px; font-weight: 700; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums; }
+
+  .toast { position: absolute; z-index: 12; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px;
+    max-width: min(600px, calc(100% - 150px)); padding: 6px 6px 6px 14px; border-radius: 12px; font-size: 14px; }
+  .toast-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toast-link { display: inline-flex; flex: none; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 8px;
+    color: var(--accent-text); font-weight: 650; text-decoration: none; white-space: nowrap; }
+  .toast-link:hover { background: var(--accent-soft); }
+  .toast-link svg { width: 16px; height: 16px; }
+  .toast .icon-btn { width: 30px; height: 30px; flex: none; border: 0; background: none; }
+
+  /* --- Messages view ------------------------------------------------------------------- */
+  .messages-view { flex: 1 1 auto; min-height: 0; overflow-y: auto; background: var(--list-bg);
+    scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+  .messages-inner { max-width: 1440px; margin: 0 auto; padding: 24px 24px 40px; }
+  .messages-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; margin-bottom: 16px; }
+  .messages-head h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.015em; }
+  .messages-sub { margin: 4px 0 0; font-size: 14px; color: var(--text-3); }
+  .messages-tools { display: flex; flex: 1 1 300px; gap: 8px; max-width: 440px; }
+  .sort-select { display: none; flex: none; align-items: center; gap: 8px; font-size: 13px; color: var(--text-3); }
+  .sort-select select { height: 38px; padding: 0 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-3);
+    color: var(--text); font: inherit; font-size: 14px; }
+  .channel-chips { padding: 0 0 14px; border-bottom: 0; }
+  .msg-pill-wrap { position: sticky; z-index: 3; top: 0; height: 0; display: flex; justify-content: center; }
+  .msg-pill-wrap .new-pill { position: relative; top: 56px; left: auto; transform: none; }
+  .table-card { border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); overflow: clip; }
+  .msg-table { width: 100%; margin-bottom: -1px; border-collapse: separate; border-spacing: 0; font-size: 14px; }
+  .msg-table:focus { outline: none; }
+  .msg-table th { position: sticky; top: 0; z-index: 1; height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface-3);
+    color: var(--text-2); font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; text-align: left; white-space: nowrap; }
+  .msg-table td { padding: 13px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .msg-table .num { text-align: right; }
+  .sort-btn { display: inline-flex; align-items: center; gap: 4px; margin: 0 -6px; padding: 6px; border: 0; border-radius: 6px; background: none;
+    color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; }
+  .sort-btn:hover { color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent); }
+  .sort-btn svg { width: 14px; height: 14px; opacity: 0; transition: opacity .15s, transform .15s; }
+  .sort-btn:hover svg { opacity: .5; }
+  th[aria-sort] .sort-btn { color: var(--text); }
+  th[aria-sort] .sort-btn svg { opacity: 1; color: var(--accent-text); }
+  th[aria-sort="ascending"] .sort-btn svg { transform: rotate(180deg); }
+  .msg-table th.num .sort-btn { flex-direction: row-reverse; }
+  .msg-row { cursor: pointer; }
+  .msg-row:hover > td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+  .msg-row.expanded > td { background: var(--accent-soft); border-bottom-color: transparent; }
+  .msg-row.fresh > td { animation: row-fresh 2.4s ease-out; }
+  @keyframes row-fresh { from { background: color-mix(in srgb, var(--accent) 22%, transparent); } }
+  .msg-table .col-expand { width: 44px; padding-right: 0; }
+  .row-toggle { width: 28px; height: 28px; margin: -4px 0 -4px -4px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px;
+    background: none; color: var(--text-3); }
+  .row-toggle:hover { background: var(--surface-3); color: var(--text); }
+  .row-toggle svg { width: 16px; height: 16px; transform: rotate(-90deg); transition: transform .15s; }
+  .row-toggle[aria-expanded="true"] svg { transform: none; }
+  .msg-table .sub { display: block; margin-top: 3px; font-size: 12.5px; color: var(--text-3); }
+  .cell-time { white-space: nowrap; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .chan { display: inline-block; padding: 1px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-text);
+    font-size: 13px; font-weight: 650; white-space: nowrap; }
+  .chan.unknown { background: var(--surface-3); color: var(--text-3); font-weight: 600; }
+  .cell-from { max-width: 220px; }
+  .from-name { display: flex; align-items: center; gap: 7px; min-width: 0; font-weight: 650; }
+  .from-name .swatch { width: 12px; height: 12px; }
+  .from-name .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .from-name .name.muted { color: var(--text-3); font-weight: 500; }
+  .cell-msg { min-width: 240px; font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cell-route { white-space: nowrap; color: var(--text-2); }
+  .cell-route .sub { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .cell-signal { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .cell-signal .sig { gap: 8px; }
+  .cell-heard { color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .msg-table .col-actions { width: 1%; white-space: nowrap; text-align: right; }
+  .btn-accent { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); color: var(--accent-text); }
+  .btn-accent:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .btn[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+  .btn[aria-disabled="true"]:hover { background: var(--surface-2); }
+  .msg-details > td { padding: 0 16px 18px 56px; background: var(--accent-soft); cursor: auto; }
+  .details-title { margin: 2px 0 8px; font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--text-3); }
+  .paths { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .path-item { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto auto; grid-template-areas: "when chain sig action";
+    align-items: center; gap: 8px 16px; padding: 8px 8px 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+  .path-when { grid-area: when; font-size: 13px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .path-chain { grid-area: chain; min-width: 0; }
+  .path-sig { grid-area: sig; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 13px; color: var(--text-2); }
+  .path-sig .sig { flex-wrap: wrap; gap: 2px 10px; }
+  .sig > span { white-space: nowrap; }
+  .path-action { grid-area: action; justify-self: end; }
+  .meta-grid { display: flex; flex-wrap: wrap; gap: 6px 28px; margin: 14px 0 0; font-size: 13px; }
+  .meta-grid div { display: flex; gap: 8px; min-width: 0; }
+  .meta-grid dt { color: var(--text-3); }
+  .meta-grid dd { margin: 0; overflow-wrap: anywhere; }
+  .table-empty { padding: 56px 24px; text-align: center; color: var(--text-3); }
+  .table-empty svg { width: 40px; height: 40px; margin-bottom: 10px; }
+  .table-empty strong { display: block; margin-bottom: 4px; font-size: 15px; color: var(--text-2); }
+  .table-empty p { max-width: 440px; margin: 0 auto; }
+  .table-empty .btn { margin-top: 14px; }
+  .table-note { margin: 0; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-3); }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
   }
@@ -295,17 +414,59 @@
     .map-wrap { flex: 0 0 48%; }
     .sidebar { flex: 1 1 auto; border-left: 0; border-top: 1px solid var(--border); }
     .map-panel { top: 12px; right: 12px; bottom: auto; left: auto; width: 214px; max-height: calc(100% - 40px); }
+    .toast { top: auto; bottom: 30px; left: 12px; right: 12px; transform: none; max-width: none; }
   }
-  @media (max-width: 600px) {
-    .app-header { gap: 10px; padding: 0 12px; }
+  @media (max-width: 1100px) {
     .stat.optional { display: none; }
+  }
+  @media (max-width: 960px) {
+    .messages-inner { padding: 16px 12px 32px; }
+    .messages-tools { max-width: none; }
+    .sort-select { display: inline-flex; }
+    .msg-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .msg-table, .msg-table tbody { display: block; }
+    /* Each row becomes a card: channel, sender and Replay; the message; then a wrapping line of details. */
+    .msg-row { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 12px 12px 14px 44px;
+      border-bottom: 1px solid var(--border); }
+    .msg-row > td { display: block; padding: 0; border: 0; background: none !important; }
+    .msg-row:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+    .msg-row.expanded { background: var(--accent-soft); }
+    .msg-row.fresh { animation: row-fresh 2.4s ease-out; }
+    .msg-row > .col-expand { position: absolute; top: 15px; left: 10px; width: auto; }
+    .msg-row > .cell-channel { order: 1; }
+    .msg-row > .cell-from { order: 2; flex: 1 1 0; min-width: 0; max-width: none; }
+    .msg-row > .cell-from .sub { display: none; }
+    .msg-row > .col-actions { order: 3; width: auto; }
+    .msg-row > .cell-msg { order: 4; flex: 1 1 100%; min-width: 0; }
+    .msg-row > .cell-time, .msg-row > .cell-route, .msg-row > .cell-signal, .msg-row > .cell-heard { font-size: 13px; color: var(--text-2); }
+    .msg-row > .cell-time { order: 5; }
+    .msg-row > .cell-route { order: 6; }
+    .msg-row > .cell-signal { order: 7; }
+    .msg-row > .cell-heard { order: 8; }
+    .msg-row > .cell-heard::before { content: "Heard "; }
+    .msg-row .sub { display: inline; margin: 0 0 0 5px; }
+    .msg-row > .cell-route .sub { max-width: none; }
+    .msg-details, .msg-details > td { display: block; }
+    .msg-details > td { padding: 0 12px 14px; border-bottom: 1px solid var(--border); }
+    .path-item { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "when sig action" "chain chain chain"; }
+  }
+  @media (max-width: 700px) {
+    .app-header { gap: 10px; padding: 0 12px; }
+    .stats { display: none; }
+    .status { padding: 0 10px; }
+    #status-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .sidebar-head { padding: 10px 12px 8px; }
     .btn .btn-text { display: none; }
+  }
+  @media (max-width: 480px) {
+    .brand h1 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .view-tab { padding: 0 10px; }
   }
 </style>
 </head>
 <body>
-<a class="skip-link" href="#packets">Skip to packet list</a>
+<a class="skip-link" id="skip-link" href="#packets">Skip to packet list</a>
+<div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
 <header class="app-header">
   <div class="brand">
     <svg class="logo" viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
@@ -315,6 +476,10 @@
     </svg>
     <h1 id="title">Meshgram</h1>
   </div>
+  <nav class="view-tabs" aria-label="Views">
+    <a class="view-tab" href="#map" data-view="map" aria-current="page"><span data-icon="map"></span>Map</a>
+    <a class="view-tab" href="#messages" data-view="messages" id="messages-tab"><span data-icon="chat"></span>Messages<span class="tab-badge" id="messages-badge" aria-hidden="true" hidden></span></a>
+  </nav>
   <div class="stats">
     <span class="stat"><b id="stat-nodes">0</b> nodes</span>
     <span class="stat optional"><b id="stat-packets">0</b> packets</span>
@@ -325,7 +490,7 @@
     <div class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Connecting…</span></div>
   </div>
 </header>
-<main class="app-main">
+<main class="app-main" id="view-map">
   <section class="map-wrap" aria-label="Map">
     <div class="map-controls">
       <div class="control-group glass">
@@ -343,12 +508,21 @@
       <div class="panel-body" id="panel-body">
         <ul class="type-list" id="type-list"></ul>
         <div class="legend-row"><span class="swatch" id="self-swatch"></span><span>This radio</span></div>
+        <div class="legend-row" id="observer-legend" hidden><span class="observer-swatch" aria-hidden="true"></span><span>MeshMapper observer</span></div>
         <div class="panel-divider"></div>
         <label class="switch-row"><span class="flow-swatch" aria-hidden="true"></span><span>Live packet flow</span>
           <input class="switch" id="flow-toggle" type="checkbox" role="switch"></label>
+        <label class="switch-row" id="remote-flow-row" hidden><span class="flow-swatch observer" aria-hidden="true"></span><span>MeshMapper packets</span>
+          <input class="switch" id="remote-flow-toggle" type="checkbox" role="switch"></label>
+        <p class="panel-note" id="remote-note" hidden></p>
         <p class="panel-note" id="unplaced" hidden></p>
       </div>
     </section>
+    <div class="toast glass" id="toast" hidden>
+      <span class="toast-text" id="toast-text"></span>
+      <a class="toast-link" id="toast-back" href="#messages"><span data-icon="arrowLeft"></span>Back to messages</a>
+      <button class="icon-btn" id="toast-close" type="button" aria-label="Dismiss" title="Dismiss" data-icon="x"></button>
+    </div>
     <div id="map"></div>
   </section>
   <aside class="sidebar" aria-labelledby="packets-title">
@@ -360,12 +534,67 @@
       </div>
       <button class="btn" id="pause" type="button" aria-pressed="false"></button>
     </div>
+    <div class="source-filter" id="source-filter" role="group" aria-label="Packet source" hidden>
+      <button class="seg" type="button" data-source="all">All</button>
+      <button class="seg" type="button" data-source="local">This radio</button>
+      <button class="seg" type="button" data-source="remote" title="Packets other MeshMapper observers heard">MeshMapper <span class="n" id="remote-count"></span></button>
+    </div>
     <div class="type-chips" id="type-chips" role="group" aria-label="Filter by packet type" hidden></div>
     <div class="list-wrap">
       <button class="new-pill" id="new-pill" type="button" hidden></button>
       <ol class="packets" id="packets" tabindex="-1" aria-labelledby="packets-title"></ol>
     </div>
   </aside>
+</main>
+<main class="messages-view" id="view-messages" aria-labelledby="messages-title" hidden>
+  <div class="messages-inner">
+    <div class="messages-head">
+      <div>
+        <h2 id="messages-title">Messages</h2>
+        <p class="messages-sub" id="messages-summary">Decrypted channel messages heard by the radio.</p>
+      </div>
+      <div class="messages-tools">
+        <div class="search">
+          <span data-icon="search"></span>
+          <input id="msg-filter" type="search" placeholder="Search messages…" aria-label="Search messages" autocomplete="off">
+        </div>
+        <label class="sort-select"><span>Sort</span>
+          <select id="msg-sort">
+            <option value="time:desc">Newest first</option>
+            <option value="time:asc">Oldest first</option>
+            <option value="snr:desc">Best signal</option>
+            <option value="hops:asc">Fewest hops</option>
+            <option value="heard:desc">Most heard</option>
+            <option value="from:asc">Sender (A–Z)</option>
+            <option value="channel:asc">Channel (A–Z)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div class="type-chips channel-chips" id="channel-chips" role="group" aria-label="Filter by channel" hidden></div>
+    <div class="msg-pill-wrap"><button class="new-pill" id="msg-new-pill" type="button" hidden></button></div>
+    <div class="table-card">
+      <table class="msg-table" id="msg-table" tabindex="-1">
+        <caption class="sr-only">Decrypted channel messages. Expand a row to see every path it was heard over.</caption>
+        <thead>
+          <tr>
+            <th scope="col" class="col-expand"><span class="sr-only">Details</span></th>
+            <th scope="col" data-sort="time"><button class="sort-btn" type="button">Time<span data-icon="chevron"></span></button></th>
+            <th scope="col" data-sort="channel"><button class="sort-btn" type="button">Channel<span data-icon="chevron"></span></button></th>
+            <th scope="col" data-sort="from"><button class="sort-btn" type="button">From<span data-icon="chevron"></span></button></th>
+            <th scope="col">Message</th>
+            <th scope="col" data-sort="hops"><button class="sort-btn" type="button" title="Fewest hops the message arrived over">Route<span data-icon="chevron"></span></button></th>
+            <th scope="col" class="num" data-sort="snr"><button class="sort-btn" type="button" title="Best SNR and RSSI across every copy heard">Signal<span data-icon="chevron"></span></button></th>
+            <th scope="col" class="num" data-sort="heard"><button class="sort-btn" type="button" title="How many copies the radio heard">Heard<span data-icon="chevron"></span></button></th>
+            <th scope="col" class="col-actions"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="msg-body"></tbody>
+      </table>
+      <div class="table-empty" id="msg-empty" hidden></div>
+      <p class="table-note" id="msg-note" hidden></p>
+    </div>
+  </div>
 </main>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -382,6 +611,7 @@ const NODE_TYPES = {
 };
 const RELAY_TYPES = new Set(["repeater", "room"]);
 const SELF_COLOR = "#ff5c8a";
+const OBSERVER_COLOR = "#2dd4bf";
 const PACKET_TYPES = {
   ADVERT: { label: "Advert", color: "#3fb950" },
   GRP_TXT: { label: "Channel msg", color: "#a371f7" },
@@ -418,6 +648,10 @@ const ICONS = {
   locate: '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
   radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M19.1 4.9a10 10 0 0 1 0 14.2"/><circle cx="12" cy="12" r="2"/>',
   arrowUp: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  arrowLeft: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
+  map: '<path d="M9 4 3 6.5V20l6-2.5 6 2.5 6-2.5V4l-6 2.5z"/><path d="M9 4v13.5M15 6.5V20"/>',
+  chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.9A8 8 0 1 1 21 12Z"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
 };
 const OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
@@ -466,6 +700,10 @@ const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value));
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const hasPos = (node) => Boolean(node) && Number.isFinite(node.lat) && Number.isFinite(node.lon);
 const shortId = (id) => (id || "").slice(0, 8);
+// Packets other MeshMapper observers heard (relayed by the meshmapper plugin) rather than this radio.
+const isRemote = (packet) => packet.source === "meshmapper";
+// Hashtag channels may or may not be stored with their "#".
+const channelLabel = (name) => (name.startsWith("#") ? name : `#${name}`);
 const nodeLabel = (ref) => (ref && (ref.name || (ref.node_id ? shortId(ref.node_id) : ref.hash))) || "?";
 const nodeMeta = (node) => NODE_TYPES[node && node.type] || NODE_TYPES.unknown;
 const packetMeta = (packet) => PACKET_TYPES[packet.payload_type_name] || { label: packet.payload_type_name, color: "#8b98a5" };
@@ -499,11 +737,22 @@ const state = {
   typeFilter: new Set(),
   hiddenTypes: new Set((store.get("hiddenNodeTypes", []) || []).filter((t) => t in NODE_TYPES)),
   showFlow: store.get("flow", true) !== false,
+  showRemoteFlow: store.get("remoteFlow", true) !== false,
+  sourceFilter: ["all", "local", "remote"].includes(store.get("source", "all")) ? store.get("source", "all") : "all",
   viewReady: false,
+  messages: new Map(),   // packet id -> packet with decrypted text
+  expanded: new Set(),   // message hashes whose details are open
+  channelFilter: new Set(),
+  msgSort: { key: "time", dir: "desc" },
+  unreadMessages: 0,
+  renderedHashes: null,  // message hashes already shown, to highlight new ones
+  returnFocusHash: null,
 };
 const markers = new Map();  // node id -> { marker, key, layer }
 
-if (CONFIG.title) { document.title = CONFIG.title; $("title").textContent = CONFIG.title; }
+const APP_TITLE = CONFIG.title || "Meshgram";
+document.title = APP_TITLE;
+$("title").textContent = APP_TITLE;
 
 // --- Map ---------------------------------------------------------------------------
 
@@ -569,8 +818,9 @@ window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", (e
 function nodeIcon(node) {
   const meta = nodeMeta(node);
   const size = node.is_self ? 22 : RELAY_TYPES.has(node.type) ? 18 : 15;
-  const label = `${node.is_self ? "This radio" : meta.name}: ${node.name || shortId(node.id)}`;
-  const html = `<span class="nm" style="--c:${node.is_self ? SELF_COLOR : meta.color}">`
+  const observer = node.is_observer && !node.is_self;
+  const label = `${node.is_self ? "This radio" : meta.name}${observer ? ", MeshMapper observer" : ""}: ${node.name || shortId(node.id)}`;
+  const html = `<span class="nm${observer ? " observer" : ""}" style="--c:${node.is_self ? SELF_COLOR : meta.color}">`
     + (node.is_self ? '<span class="nm-halo"></span>' : "")
     + `<svg viewBox="0 0 20 20" role="img" aria-label="${esc(label)}">${SHAPES[node.is_self ? "circle" : meta.shape]}</svg></span>`;
   return L.divIcon({
@@ -579,7 +829,7 @@ function nodeIcon(node) {
   });
 }
 
-const markerKey = (node) => `${node.type}|${node.is_self ? 1 : 0}|${node.name || ""}`;
+const markerKey = (node) => `${node.type}|${node.is_self ? 1 : 0}|${node.is_observer ? 1 : 0}|${node.name || ""}`;
 const layerFor = (node) => (node.is_self ? selfLayer : typeLayers[node.type] || typeLayers.unknown);
 
 function nodePopup(node) {
@@ -595,7 +845,9 @@ function nodePopup(node) {
   rows.push(["Key", el("span", { class: "mono", title: node.id }, `${node.id.slice(0, 16)}…`)]);
   const query = node.name || shortId(node.id);
   return el("div", { class: "popup" },
-    el("span", { class: "chip", style: `--c:${node.is_self ? SELF_COLOR : meta.color}` }, node.is_self ? "This radio" : meta.name),
+    el("div", { class: "popup-chips" },
+      el("span", { class: "chip", style: `--c:${node.is_self ? SELF_COLOR : meta.color}` }, node.is_self ? "This radio" : meta.name),
+      node.is_observer && !node.is_self ? el("span", { class: "chip", style: `--c:${OBSERVER_COLOR}` }, "MeshMapper observer") : null),
     el("div", { class: "popup-title" }, node.name || shortId(node.id)),
     el("dl", {}, rows.map(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
     el("button", { class: "btn btn-sm", type: "button", onclick: () => { map.closePopup(); setSearch(query); } },
@@ -739,6 +991,7 @@ function updateNodeStats() {
     row.querySelector(".count").textContent = count;
     if (type === "unknown") row.hidden = count === 0 && !state.hiddenTypes.has(type);
   }
+  $("observer-legend").hidden = ![...state.nodes.values()].some((n) => n.is_observer && !n.is_self && hasPos(n));
   const note = $("unplaced");
   note.hidden = !unplacedRelays;
   note.textContent = `${plural(unplacedRelays, "repeater has", "repeaters have")} no position`;
@@ -746,7 +999,8 @@ function updateNodeStats() {
 
 // --- Packet routes ----------------------------------------------------------------------
 
-// Positioned stops in travel order. Flood packets: originator → relays → this radio.
+// Positioned stops in travel order. Flood packets: originator → relays → the radio that heard
+// it (this one, or the MeshMapper observer that reported it).
 // Direct packets carry the remaining route, so they're drawn along it in order.
 // `gap` marks a stop reached through relays we couldn't place on the map.
 function routeStops(packet) {
@@ -763,7 +1017,7 @@ function routeStops(packet) {
   const flood = packet.route === "flood";
   if (flood && packet.origin) add(packet.origin.node_id, "origin");
   for (const hop of packet.path_nodes || []) add(hop.node_id, "hop");
-  if (flood) add(state.selfId, "self");
+  if (flood) add(isRemote(packet) ? (packet.observer || {}).node_id : state.selfId, isRemote(packet) ? "observer" : "self");
   return stops;
 }
 
@@ -771,7 +1025,7 @@ const segmentDash = (packet, stop) => (stop.gap ? "1 8" : packet.route === "dire
 
 const iconCache = new Map();
 function fxIcon(kind, color, size, html) {
-  const key = `${kind}|${color}`;
+  const key = `${kind}|${color}|${size}`;
   if (!iconCache.has(key)) {
     iconCache.set(key, L.divIcon({ className: "fx-icon", html: `<span class="${kind}" style="--c:${color}"></span>${html || ""}`, iconSize: [size, size] }));
   }
@@ -836,7 +1090,8 @@ const flows = new Set();
 let frame = null;
 
 function playFlow(packet, force = false) {
-  if ((!state.showFlow && !force) || document.hidden) return;
+  const remote = isRemote(packet);
+  if (((!state.showFlow || (remote && !state.showRemoteFlow)) && !force) || document.hidden) return;
   const stops = routeStops(packet);
   if (!stops.length) return;
   const color = packetMeta(packet).color;
@@ -852,12 +1107,14 @@ function playFlow(packet, force = false) {
     segments.push({ i, start: at, dur, line: null, arrived: false, dash: segmentDash(packet, stops[i + 1]) });
     at += dur + (reduce ? 0 : HOP_PAUSE_MS);
   }
+  // Other observers' packets are drawn lighter so this radio's own traffic stands out.
   const flow = {
     stops, color, segments, travel: at, linger: reduce ? 2500 : 500, start: performance.now(), dot: null,
+    weight: remote ? 2.5 : 3.5, lineOpacity: remote ? 0.7 : 0.9,
     projected: stops.map((s) => crs.project(L.latLng(s.lat, s.lon))),
   };
   if (!reduce) {
-    flow.dot = L.marker([stops[0].lat, stops[0].lon], { icon: fxIcon("flow-dot", color, 12), pane: "flow", interactive: false, keyboard: false }).addTo(flowLayer);
+    flow.dot = L.marker([stops[0].lat, stops[0].lon], { icon: fxIcon("flow-dot", color, remote ? 9 : 12), pane: "flow", interactive: false, keyboard: false }).addTo(flowLayer);
     ripple(stops[0], color);
   }
   flows.add(flow);
@@ -879,14 +1136,14 @@ function stepFlow(flow, now) {
     const here = progress >= 1 ? L.latLng(b.lat, b.lon) : crs.unproject(L.point(pa.x + (pb.x - pa.x) * e, pa.y + (pb.y - pa.y) * e));
     if (!seg.line) {
       seg.line = L.polyline([[a.lat, a.lon], here], {
-        pane: "trails", color: flow.color, weight: 3.5, opacity: 0.9, lineCap: "round", dashArray: seg.dash, interactive: false,
+        pane: "trails", color: flow.color, weight: flow.weight, opacity: flow.lineOpacity, lineCap: "round", dashArray: seg.dash, interactive: false,
       }).addTo(flowLayer);
     } else if (!seg.arrived) {
       seg.line.setLatLngs([[a.lat, a.lon], here]);
     }
     if (progress >= 1 && !seg.arrived) {
       seg.arrived = true;
-      ripple(b, b.kind === "self" ? SELF_COLOR : flow.color);
+      ripple(b, b.kind === "self" ? SELF_COLOR : b.kind === "observer" ? OBSERVER_COLOR : flow.color);
     }
     position = here;
   }
@@ -895,7 +1152,7 @@ function stepFlow(flow, now) {
   if (t <= fadeAt) return;
   const opacity = 1 - (t - fadeAt) / FADE_MS;
   if (opacity <= 0) { removeFlow(flow); return; }
-  for (const seg of flow.segments) if (seg.line) seg.line.setStyle({ opacity: 0.9 * opacity });
+  for (const seg of flow.segments) if (seg.line) seg.line.setStyle({ opacity: flow.lineOpacity * opacity });
   if (flow.dot) flow.dot.setOpacity(opacity);
 }
 
@@ -919,7 +1176,7 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) clear
 
 // --- Packet list ---------------------------------------------------------------------------
 
-const findPacket = (id) => (id === null ? null : state.packets.find((p) => p.id === id) || null);
+const findPacket = (id) => (id === null ? null : state.packets.find((p) => p.id === id) || state.messages.get(id) || null);
 
 function packetTitle(packet) {
   if (packet.advert) return { text: packet.advert.name || shortId(packet.advert.public_key) };
@@ -948,13 +1205,25 @@ function routeChain(packet) {
       title: known ? `${hop.name || shortId(hop.node_id)} · hash ${hop.hash}` : `Unknown relay · hash ${hop.hash} · ${plural(hop.candidates, "candidate", "candidates")}`,
     }, known ? hop.name || hop.hash : hop.hash));
   }
-  if (flood) items.push(el("span", { class: "stop self" }, "You"));
+  if (flood) items.push(receiverStop(packet));
   const parts = [];
   items.forEach((item, i) => {
     if (i && !(i === 1 && !flood)) parts.push(el("span", { class: "route-sep", "aria-hidden": "true" }, "→"));
     parts.push(item);
   });
   return el("span", { class: "pkt-route", "aria-label": `Route: ${items.map((n) => n.textContent).join(", ")}` }, parts);
+}
+
+function observerName(packet) {
+  const observer = packet.observer || {};
+  const node = observer.node_id ? state.nodes.get(observer.node_id) : null;
+  return (node && node.name) || observer.name || shortId(observer.node_id) || "Observer";
+}
+
+// Last stop of a flood route: this radio, or the MeshMapper observer that reported the packet.
+function receiverStop(packet) {
+  if (!isRemote(packet)) return el("span", { class: "stop self" }, "You");
+  return el("span", { class: "stop observer", title: "MeshMapper observer that heard it" }, observerName(packet));
 }
 
 function signalView(packet) {
@@ -968,7 +1237,8 @@ function signalView(packet) {
 function hopsText(packet) {
   if (packet.payload_type_name === "TRACE") return `${plural(packet.hops, "hop", "hops")} traced`;
   if (packet.route === "direct") return packet.hops ? `Direct · ${plural(packet.hops, "hop", "hops")} to go` : "Direct · last hop";
-  return packet.hops === 0 ? "Heard directly" : `${plural(packet.hops, "hop", "hops")}`;
+  if (packet.hops === 0) return isRemote(packet) ? `Heard directly by ${observerName(packet)}` : "Heard directly";
+  return plural(packet.hops, "hop", "hops");
 }
 
 function detailRows(packet) {
@@ -979,7 +1249,8 @@ function detailRows(packet) {
     ["Type", `${meta.label} · ${packet.payload_type_name} (${packet.payload_type}) v${packet.payload_version}`],
     ["Route", `${packet.route_type_name} (${packet.route_type})`],
     ["Packet hash", packet.hash, true],
-    ["Heard", `${packet.seen_count}×`],
+    isRemote(packet) ? ["Reported by", `${observerName(packet)} (MeshMapper) · ${shortId((packet.observer || {}).node_id)}`] : null,
+    [isRemote(packet) ? "Reports" : "Heard", `${packet.seen_count}×`],
     ["Size", `${packet.len} B · payload ${packet.payload_len} B`],
     ["Hops", `${packet.hops} · ${packet.path_hash_size}-byte hashes`],
     ["Path", (packet.path || []).join(" → ") || "—", true],
@@ -1002,7 +1273,7 @@ function detailRows(packet) {
     rows.push(["Trace tag", packet.trace_tag, true], ["Trace SNRs", (packet.trace_snrs || []).map((s) => `${s} dB`).join(", ") || "—"]);
   }
   rows.push(["Raw", packet.raw, true]);
-  return el("dl", {}, rows.map(([k, v, mono]) => [el("dt", {}, k), el("dd", { class: mono ? "mono" : null }, v)]));
+  return el("dl", {}, rows.filter(Boolean).map(([k, v, mono]) => [el("dt", {}, k), el("dd", { class: mono ? "mono" : null }, v)]));
 }
 
 function fillDetails(card, packet) {
@@ -1027,28 +1298,34 @@ function packetCard(packet, fresh) {
       el("span", { class: "pkt-top" },
         el("span", { class: "chip", title: packet.payload_type_name }, meta.label),
         el("span", { class: `pkt-who${title.muted ? " muted" : ""}` }, title.text),
-        packet.channel_name ? el("span", { class: "pkt-chan" }, `#${packet.channel_name}`) : null,
+        packet.channel_name ? el("span", { class: "pkt-chan" }, channelLabel(packet.channel_name)) : null,
         el("time", { class: "pkt-time", datetime: new Date(packet.received_at * 1000).toISOString(), title: new Date(packet.received_at * 1000).toLocaleString() },
           fmtTime(packet.received_at))),
       packet.message ? el("span", { class: "pkt-msg" }, packet.message) : null,
       routeChain(packet),
       el("span", { class: "pkt-meta" },
+        isRemote(packet) ? el("span", { class: "tag observer", title: `Reported to MeshMapper by ${observerName(packet)}` }, "MeshMapper") : null,
         signalView(packet),
         el("span", {}, hopsText(packet)),
         packet.advert && packet.advert.lat != null ? el("span", { class: "tag" }, "GPS") : null,
-        packet.seen_count > 1 ? el("span", { class: "tag warn", title: "The same packet was heard over several paths" }, `Heard ${packet.seen_count}×`) : null)),
+        packet.seen_count > 1 ? (isRemote(packet)
+          ? el("span", { class: "tag warn", title: "Other observers reported the same packet several times" }, `Reported ${packet.seen_count}×`)
+          : el("span", { class: "tag warn", title: "The same packet was heard over several paths" }, `Heard ${packet.seen_count}×`)) : null)),
     el("div", { class: "pkt-details", id: detailsId, hidden: !selected }));
   if (selected) fillDetails(card, packet);
   return card;
 }
 
+const matchesSource = (packet) => state.sourceFilter === "all" || (state.sourceFilter === "remote") === isRemote(packet);
+
 function matchesFilter(packet) {
+  if (!matchesSource(packet)) return false;
   if (state.typeFilter.size && !state.typeFilter.has(packet.payload_type_name)) return false;
   const query = $("filter").value.trim().toLowerCase();
   if (!query) return true;
   const refs = [packet.origin, packet.heard_from, ...(packet.path_nodes || [])].filter(Boolean);
   const haystack = [packetTitle(packet).text, packetMeta(packet).label, packet.payload_type_name, packet.hash, packet.message,
-    packet.channel_name, packet.raw, ...(packet.path || []), ...refs.flatMap((r) => [r.name, r.node_id])]
+    packet.channel_name, packet.raw, isRemote(packet) ? observerName(packet) : null, ...(packet.path || []), ...refs.flatMap((r) => [r.name, r.node_id])]
     .filter(Boolean).join(" ").toLowerCase();
   return haystack.includes(query);
 }
@@ -1074,8 +1351,8 @@ function prependPacket(packet) {
   if (state.paused) { state.pausedCount++; updatePauseButton(); return; }
   const list = $("packets");
   list.querySelector(".empty")?.remove();
-  // Keep what the reader is looking at in place when they've scrolled down the list.
-  const anchored = list.scrollTop > 4;
+  // Keep what the reader is looking at (or about to click) in place.
+  const anchored = list.scrollTop > 4 || list.matches(":hover");
   const before = list.scrollHeight;
   list.prepend(packetCard(packet, !anchored));
   if (anchored) {
@@ -1113,38 +1390,78 @@ $("pause").addEventListener("click", () => {
   if (!state.paused) renderList();
 });
 
-const chipEls = new Map();
+// Filter chips ("All" plus one per option). The buttons are only rebuilt when the set of
+// options changes, so counts can update live without losing keyboard focus.
+function syncChips(wrap, options, selected, minOptions = 1) {
+  const keys = options.map((o) => o.key).join("\n");
+  if (wrap.dataset.keys !== keys) {
+    wrap.dataset.keys = keys;
+    wrap.replaceChildren(
+      el("button", { class: "filter-chip", type: "button", "data-key": "" }, "All"),
+      ...options.map((o) => el("button", { class: "filter-chip", type: "button", "data-key": o.key, title: o.title },
+        o.color ? el("i", { style: `--c:${o.color}`, "aria-hidden": "true" }) : null, o.label, el("span", { class: "n" }))));
+  }
+  const counts = new Map(options.map((o) => [o.key, o.count]));
+  for (const chip of wrap.children) {
+    const key = chip.dataset.key;
+    chip.setAttribute("aria-pressed", String(key ? selected.has(key) : selected.size === 0));
+    if (key) chip.querySelector(".n").textContent = counts.get(key);
+  }
+  wrap.hidden = options.length < minOptions;
+}
+
+function toggleChip(event, selected) {
+  const chip = event.target.closest(".filter-chip");
+  if (!chip) return false;
+  const key = chip.dataset.key;
+  if (!key) selected.clear();
+  else if (selected.has(key)) selected.delete(key);
+  else selected.add(key);
+  return true;
+}
+
 function renderTypeChips() {
   const counts = new Map();
-  for (const packet of state.packets) counts.set(packet.payload_type_name, (counts.get(packet.payload_type_name) || 0) + 1);
+  for (const packet of state.packets) {
+    if (matchesSource(packet)) counts.set(packet.payload_type_name, (counts.get(packet.payload_type_name) || 0) + 1);
+  }
   const rank = (type) => { const i = PACKET_TYPE_ORDER.indexOf(type); return i === -1 ? 99 : i; };
   const types = [...counts.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
-  const wrap = $("type-chips");
-  if (types.join() !== [...chipEls.keys()].filter(Boolean).join()) {
-    chipEls.clear();
-    chipEls.set("", el("button", { class: "filter-chip", type: "button", "data-type": "" }, "All"));
-    for (const type of types) {
-      const meta = PACKET_TYPES[type] || { label: type, color: "#8b98a5" };
-      chipEls.set(type, el("button", { class: "filter-chip", type: "button", "data-type": type, title: type },
-        el("i", { style: `--c:${meta.color}`, "aria-hidden": "true" }), meta.label, el("span", { class: "n" }, "0")));
-    }
-    wrap.replaceChildren(...chipEls.values());
-  }
-  for (const [type, chip] of chipEls) {
-    chip.setAttribute("aria-pressed", String(type ? state.typeFilter.has(type) : state.typeFilter.size === 0));
-    if (type) chip.querySelector(".n").textContent = counts.get(type);
-  }
-  wrap.hidden = types.length === 0;
+  syncChips($("type-chips"), types.map((type) => {
+    const meta = PACKET_TYPES[type] || { label: type, color: "#8b98a5" };
+    return { key: type, label: meta.label, color: meta.color, title: type, count: counts.get(type) };
+  }), state.typeFilter);
 }
 $("type-chips").addEventListener("click", (event) => {
-  const chip = event.target.closest(".filter-chip");
-  if (!chip) return;
-  const type = chip.dataset.type;
-  if (!type) state.typeFilter.clear();
-  else if (state.typeFilter.has(type)) state.typeFilter.delete(type);
-  else state.typeFilter.add(type);
+  if (!toggleChip(event, state.typeFilter)) return;
   renderTypeChips();
   renderList();
+});
+
+// The source switch appears once another observer's packet has arrived.
+function updateSourceFilter() {
+  const remote = state.packets.filter(isRemote);
+  $("source-filter").hidden = remote.length === 0 && state.sourceFilter === "all";
+  $("remote-count").textContent = remote.length || "";
+  for (const button of $("source-filter").children) button.setAttribute("aria-pressed", String(button.dataset.source === state.sourceFilter));
+  const observers = new Set(remote.map((p) => (p.observer || {}).node_id)).size;
+  $("remote-flow-row").hidden = observers === 0;
+  $("remote-note").hidden = observers === 0;
+  $("remote-note").textContent = `Packets from ${plural(observers, "MeshMapper observer", "MeshMapper observers")}`;
+}
+$("source-filter").addEventListener("click", (event) => {
+  const button = event.target.closest(".seg");
+  if (!button) return;
+  state.sourceFilter = button.dataset.source;
+  store.set("source", state.sourceFilter);
+  updateSourceFilter();
+  renderTypeChips();
+  renderList();
+});
+$("remote-flow-toggle").checked = state.showRemoteFlow;
+$("remote-flow-toggle").addEventListener("change", (event) => {
+  state.showRemoteFlow = event.target.checked;
+  store.set("remoteFlow", state.showRemoteFlow);
 });
 
 function setSearch(query) {
@@ -1199,6 +1516,469 @@ function updatePacketStats() {
   $("stat-rate").textContent = state.packets.filter((p) => p.received_at >= cutoff).length;
 }
 
+// --- Messages view ------------------------------------------------------------------------------
+// Decrypted channel messages, one row per message: every copy the radio heard (same packet
+// hash, different paths) is grouped, and each path can be replayed on the map.
+
+const MAX_MESSAGES = 2000;
+const MAX_MESSAGE_ROWS = 500;
+const SORT_DEFAULT_DIR = { time: "desc", channel: "asc", from: "asc", hops: "asc", snr: "desc", heard: "desc" };
+const SORT_VALUES = {
+  time: (g) => g.time,
+  channel: (g) => g.channel.toLowerCase(),
+  from: (g) => (g.sender || "￿").toLowerCase(),
+  hops: (g) => g.hops,
+  snr: (g) => (g.snr == null ? -Infinity : g.snr),
+  heard: (g) => g.heard,
+};
+const savedSort = store.get("msgSort", null);
+if (savedSort && savedSort.key in SORT_VALUES && ["asc", "desc"].includes(savedSort.dir)) state.msgSort = savedSort;
+
+let currentView = "map";
+let messagesScroll = 0;
+let toastTimer = null;
+let messagesPending = false;  // a live update waits until the pointer/focus leaves the table
+let messagesUnseen = 0;
+
+const isToday = (ts) => new Date(ts * 1000).toDateString() === new Date().toDateString();
+const fmtDate = (ts) => new Date(ts * 1000).toLocaleDateString([], { day: "numeric", month: "short" });
+const truncate = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
+
+function addMessage(packet) {
+  if (!packet.message) return;
+  state.messages.set(packet.id, packet);
+  if (state.messages.size > MAX_MESSAGES) state.messages.delete(state.messages.keys().next().value);
+}
+
+function messageGroups() {
+  const byHash = new Map();
+  for (const packet of state.messages.values()) {
+    if (byHash.has(packet.hash)) byHash.get(packet.hash).push(packet);
+    else byHash.set(packet.hash, [packet]);
+  }
+  return [...byHash.entries()].map(([hash, copies]) => {
+    copies.sort((a, b) => a.received_at - b.received_at);
+    const first = copies[0];
+    // Signal describes this radio's reception when it heard the message itself.
+    const local = copies.filter((c) => !isRemote(c));
+    const signalCopies = local.length ? local : copies;
+    const snrs = signalCopies.map((c) => c.snr).filter(Number.isFinite);
+    const rssis = signalCopies.map((c) => c.rssi).filter(Number.isFinite);
+    const origin = first.origin;
+    return {
+      hash, copies, first,
+      time: first.received_at,
+      channel: first.channel_name ? channelLabel(first.channel_name) : `Channel ${first.channel_hash || "?"}`,
+      knownChannel: Boolean(first.channel_name),
+      sender: first.sender_name || (origin && (origin.name || origin.node_id) ? nodeLabel(origin) : ""),
+      text: first.message,
+      hops: Math.min(...copies.map((c) => c.hops)),
+      snr: snrs.length ? Math.max(...snrs) : null,
+      rssi: rssis.length ? Math.max(...rssis) : null,
+      heard: copies.length,
+      remote: copies.length - local.length,
+      routable: copies.some((c) => routeStops(c).length > 0),
+    };
+  });
+}
+
+// The copy that took the fewest hops (the earliest one on a tie), preferring this radio's own copies.
+function bestCopy(group) {
+  const local = group.copies.filter((c) => !isRemote(c));
+  return (local.length ? local : group.copies).reduce((best, copy) => (copy.hops < best.hops ? copy : best));
+}
+
+function messageMatches(group) {
+  if (state.channelFilter.size && !state.channelFilter.has(group.channel)) return false;
+  const query = $("msg-filter").value.trim().toLowerCase();
+  if (!query) return true;
+  const relays = group.copies.flatMap((c) => (c.path_nodes || []).map((h) => h.name || h.hash));
+  return [group.text, group.sender, group.channel, group.hash, ...relays].filter(Boolean).join(" ").toLowerCase().includes(query);
+}
+
+function sortGroups(groups) {
+  const { key, dir } = state.msgSort;
+  const value = SORT_VALUES[key] || SORT_VALUES.time;
+  const sign = dir === "asc" ? 1 : -1;
+  const compare = (a, b) => (typeof a === "string" ? a.localeCompare(b) : a === b ? 0 : a < b ? -1 : 1);
+  return groups.sort((a, b) => sign * compare(value(a), value(b)) || b.time - a.time);
+}
+
+function routeSummary(packet) {
+  if (!packet.hops) return el("span", {}, isRemote(packet) ? `Heard directly by ${observerName(packet)}` : "Heard directly");
+  const via = packet.heard_from;
+  return [el("span", {}, plural(packet.hops, "hop", "hops")),
+    via ? el("span", { class: "sub", title: `Last relay: ${nodeLabel(via)}` }, `via ${nodeLabel(via)}`) : null];
+}
+
+function signalCell(snr, rssi) {
+  if (snr == null && rssi == null) return "—";
+  return [
+    snr != null ? el("span", { class: "sig" },
+      el("span", { class: `bars ${snrClass(snr)}`, "data-level": snrLevel(snr), "aria-hidden": "true" }, el("i"), el("i"), el("i"), el("i")),
+      el("span", {}, el("span", { class: "sr-only" }, "SNR "), el("b", { class: snrClass(snr) }, snr), " dB")) : null,
+    rssi != null ? el("span", { class: "sub" }, el("span", { class: "sr-only" }, "RSSI "), `${rssi} dBm`) : null,
+  ];
+}
+
+function pathChain(packet) {
+  const chain = routeChain(packet);
+  if (chain) return chain;
+  if (packet.route === "flood" && packet.origin) {
+    return el("span", { class: "pkt-route" },
+      el("span", { class: packet.origin.node_id ? "stop" : "stop unknown" }, nodeLabel(packet.origin)),
+      el("span", { class: "route-sep", "aria-hidden": "true" }, "→"),
+      receiverStop(packet));
+  }
+  return el("span", { class: "route-label" }, "Heard directly");
+}
+
+function replayButton(group) {
+  const sender = group.sender || "unknown sender";
+  const content = [el("span", { html: icon("play") }), "Replay"];
+  if (!group.routable) {
+    return el("button", {
+      class: "btn btn-sm", type: "button", "aria-disabled": "true", "data-action": "replay-unavailable",
+      title: "Can't replay: no node on this message's route has a known position",
+      "aria-label": `Replay the message from ${sender} on the map (unavailable: no node on its route has a position)`,
+    }, content);
+  }
+  return el("button", {
+    class: "btn btn-sm btn-accent", type: "button", "data-action": "replay",
+    title: group.heard > 1 ? `Replay all ${group.heard} paths on the map` : "Replay on the map",
+    "aria-label": `Replay the message from ${sender} on the map`,
+  }, content);
+}
+
+function messageDetails(group) {
+  const start = group.first.received_at;
+  const paths = el("ol", { class: "paths" }, group.copies.map((copy, i) => el("li", { class: "path-item" },
+    el("span", { class: "path-when", title: new Date(copy.received_at * 1000).toLocaleString() },
+      i === 0 ? fmtTime(copy.received_at) : `+${(copy.received_at - start).toFixed(1)} s`),
+    el("span", { class: "path-chain" }, pathChain(copy)),
+    el("span", { class: "path-sig" },
+      isRemote(copy) ? el("span", { class: "tag observer", title: `Reported to MeshMapper by ${observerName(copy)}` }, "MeshMapper") : null,
+      signalView(copy)),
+    el("span", { class: "path-action" }, routeStops(copy).length
+      ? el("button", { class: "btn btn-sm", type: "button", "data-action": "replay-path", "data-id": copy.id, "aria-label": `Replay path ${i + 1} on the map` },
+        el("span", { html: icon("play") }), "Replay")
+      : el("span", { class: "sub" }, "Not on map")))));
+  const origin = group.first.origin;
+  const meta = [
+    ["Packet hash", group.hash, true],
+    ["Channel hash", group.first.channel_hash || "—", true],
+    ["Size", `${group.first.len} B`],
+    origin && origin.node_id ? ["Sender key", origin.node_id, true] : null,
+  ].filter(Boolean);
+  return [
+    el("p", { class: "details-title" }, group.heard > 1 ? `Heard ${group.heard}× over these paths` : "Heard over this path"),
+    paths,
+    el("dl", { class: "meta-grid" }, meta.map(([k, v, mono]) => el("div", {}, el("dt", {}, k), el("dd", { class: mono ? "mono" : null }, v)))),
+  ];
+}
+
+function messageRows(group, fresh) {
+  const expanded = state.expanded.has(group.hash);
+  const detailsId = `msg-details-${group.hash}`;
+  const origin = group.first.origin;
+  const node = origin && origin.node_id ? state.nodes.get(origin.node_id) : null;
+  const meta = node ? (node.is_self ? { name: "This radio", color: SELF_COLOR, shape: "circle" } : nodeMeta(node)) : null;
+  const when = new Date(group.time * 1000);
+  const sender = group.sender || "Unknown sender";
+  const row = el("tr", { class: `msg-row${expanded ? " expanded" : ""}${fresh ? " fresh" : ""}`, "data-hash": group.hash },
+    el("td", { class: "col-expand" },
+      el("button", { class: "row-toggle", type: "button", "data-action": "toggle", "aria-expanded": String(expanded), "aria-controls": detailsId,
+        "aria-label": `Paths and details for the message from ${sender}`, html: icon("chevron") })),
+    el("td", { class: "cell-time" },
+      el("time", { datetime: when.toISOString(), title: when.toLocaleString() }, fmtTime(group.time)),
+      isToday(group.time) ? null : el("span", { class: "sub" }, fmtDate(group.time))),
+    el("td", { class: "cell-channel" },
+      el("span", { class: group.knownChannel ? "chan" : "chan unknown", title: `Channel hash ${group.first.channel_hash || "?"}` }, group.channel)),
+    el("td", { class: "cell-from" },
+      el("span", { class: "from-name" },
+        meta ? el("span", { class: "swatch", style: `--c:${meta.color}`, title: meta.name, html: shapeSvg(meta.shape) }) : null,
+        el("span", { class: group.sender ? "name" : "name muted", title: sender }, sender)),
+      origin && origin.node_id ? el("span", { class: "sub mono", title: origin.node_id }, shortId(origin.node_id)) : null),
+    el("td", { class: "cell-msg" }, group.text),
+    el("td", { class: "cell-route" }, routeSummary(bestCopy(group))),
+    el("td", {
+      class: "cell-signal num",
+      title: [group.snr != null ? `Best SNR ${group.snr} dB` : null, group.rssi != null ? `best RSSI ${group.rssi} dBm` : null].filter(Boolean).join(" · "),
+    }, signalCell(group.snr, group.rssi)),
+    el("td", {
+      class: "cell-heard num",
+      title: group.remote ? `${plural(group.heard - group.remote, "copy", "copies")} heard by this radio, ${group.remote} reported by other MeshMapper observers`
+        : plural(group.heard, "copy heard", "copies heard"),
+    }, `${group.heard}×`, group.remote ? el("span", { class: "sub" }, `${group.remote} via MeshMapper`) : null),
+    el("td", { class: "col-actions" }, replayButton(group)));
+  const details = el("tr", { class: "msg-details", id: detailsId, "data-hash": group.hash, hidden: !expanded },
+    el("td", { colspan: "9" }, expanded ? messageDetails(group) : null));
+  return [row, details];
+}
+
+function messagesEmptyState(filtered) {
+  if (filtered) {
+    return [el("span", { html: icon("search") }), el("strong", {}, "No matching messages"),
+      el("p", {}, "Try a different search or channel."),
+      el("button", { class: "btn btn-sm", type: "button", onclick: clearMessageFilters }, "Clear filters")];
+  }
+  return [el("span", { html: icon("chat") }), el("strong", {}, "No decrypted messages yet"),
+    el("p", {}, "Channel messages appear here when the radio has the channel's key. Messages it can't decrypt still show in the packet list on the map.")];
+}
+
+function clearMessageFilters() {
+  $("msg-filter").value = "";
+  state.channelFilter.clear();
+  renderMessages();
+  $("msg-filter").focus();
+}
+
+// `live`: a packet just arrived. If the reader has scrolled down a newest-first list, keep
+// the rows they're looking at in place instead of pushing them down.
+function renderMessages(live = false) {
+  if (currentView !== "messages") return;
+  messagesPending = false;
+  const groups = messageGroups();
+  const channels = new Map();
+  for (const group of groups) channels.set(group.channel, (channels.get(group.channel) || 0) + 1);
+  syncChips($("channel-chips"), [...channels].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key, count]) => ({ key, label: key, count })), state.channelFilter, 2);
+
+  const visible = sortGroups(groups.filter(messageMatches));
+  const rows = visible.slice(0, MAX_MESSAGE_ROWS);
+  const scroller = $("view-messages");
+  const anchored = live && state.msgSort.key === "time" && state.msgSort.dir === "desc" && scroller.scrollTop > 4;
+  const before = scroller.scrollHeight;
+  const seen = state.renderedHashes;
+  // Rows are rebuilt, so put keyboard focus back on the same control afterwards.
+  const active = document.activeElement;
+  const activeRow = active && active !== $("msg-body") && $("msg-body").contains(active) ? active.closest("tr") : null;
+  const refocus = activeRow && `tr.${activeRow.className.split(" ")[0]}[data-hash="${activeRow.dataset.hash}"] `
+    + (active.dataset.action ? `[data-action="${active.dataset.action}"]${active.dataset.id ? `[data-id="${active.dataset.id}"]` : ""}` : "button");
+  $("msg-body").replaceChildren(...rows.flatMap((g) => messageRows(g, Boolean(seen) && !seen.has(g.hash))));
+  state.renderedHashes = new Set(groups.map((g) => g.hash));
+  if (refocus) $("msg-body").querySelector(refocus)?.focus({ preventScroll: true });
+  if (anchored) scroller.scrollTop += scroller.scrollHeight - before;
+
+  $("msg-table").hidden = rows.length === 0;
+  $("msg-empty").hidden = rows.length > 0;
+  if (!rows.length) $("msg-empty").replaceChildren(...messagesEmptyState(groups.length > 0));
+  $("msg-note").hidden = visible.length <= MAX_MESSAGE_ROWS;
+  $("msg-note").textContent = `Showing the first ${MAX_MESSAGE_ROWS} of ${visible.length} messages. Search or pick a channel to narrow the list.`;
+  const senders = new Set(groups.map((g) => g.sender).filter(Boolean)).size;
+  $("messages-summary").textContent = !groups.length ? "Decrypted channel messages heard by the radio."
+    : visible.length < groups.length ? `Showing ${visible.length} of ${plural(groups.length, "message", "messages")}`
+    : `${plural(groups.length, "message", "messages")} · ${plural(channels.size, "channel", "channels")} · ${plural(senders, "sender", "senders")}`;
+  updateSortHeaders();
+}
+
+function updateSortHeaders() {
+  for (const th of document.querySelectorAll(".msg-table th[data-sort]")) {
+    if (th.dataset.sort === state.msgSort.key) th.setAttribute("aria-sort", state.msgSort.dir === "asc" ? "ascending" : "descending");
+    else th.removeAttribute("aria-sort");
+  }
+  const value = `${state.msgSort.key}:${state.msgSort.dir}`;
+  const select = $("msg-sort");
+  if ([...select.options].some((o) => o.value === value)) select.value = value;
+  else select.selectedIndex = -1;
+}
+
+function setSort(key, dir) {
+  state.msgSort = { key, dir };
+  store.set("msgSort", state.msgSort);
+  renderMessages();
+}
+
+function toggleMessageRow(hash) {
+  const row = $("msg-body").querySelector(`tr.msg-row[data-hash="${hash}"]`);
+  if (!row) return;
+  const open = !state.expanded.has(hash);
+  if (open) state.expanded.add(hash); else state.expanded.delete(hash);
+  const details = row.nextElementSibling;
+  row.classList.toggle("expanded", open);
+  row.querySelector(".row-toggle").setAttribute("aria-expanded", String(open));
+  if (open && !details.firstElementChild.childElementCount) {
+    const group = messageGroups().find((g) => g.hash === hash);
+    if (group) details.firstElementChild.append(...messageDetails(group));
+  }
+  details.hidden = !open;
+}
+
+// Switch to the map, frame every path, and replay the copies with their real time offsets.
+function replayMessage(hash, packetId) {
+  const group = messageGroups().find((g) => g.hash === hash);
+  if (!group) return;
+  const copies = group.copies.filter((c) => (packetId == null || c.id === packetId) && routeStops(c).length);
+  if (!copies.length) return;
+  state.returnFocusHash = hash;
+  navigate("map");
+  selectPacket(copies[0].id, false);
+  const card = document.querySelector(`.pkt[data-id="${copies[0].id}"]`);
+  if (card) card.scrollIntoView({ block: "nearest" });
+  const bounds = L.latLngBounds(copies.flatMap(routeStops).map((s) => [s.lat, s.lon]));
+  const start = copies[0].received_at;
+  const play = () => copies.forEach((c) => setTimeout(() => playFlow(c, true), clamp((c.received_at - start) * 1000, 0, 3000)));
+  if (map.getBounds().pad(-0.08).contains(bounds)) play();
+  else {
+    map.once("moveend", play);
+    map.flyToBounds(bounds, { padding: [80, 80], maxZoom: 15, duration: 0.6 });
+  }
+  const paths = plural(copies.length, "path", "paths");
+  showToast(`Replaying “${truncate(group.text, 40)}” from ${group.sender || "unknown sender"} · ${paths}`);
+  $("toast-back").focus({ preventScroll: true });
+}
+
+function showToast(text) {
+  $("toast-text").textContent = text;
+  $("toast-text").title = text;
+  $("toast").hidden = false;
+  $("announcer").textContent = text;
+  scheduleToastHide(10000);
+}
+function scheduleToastHide(ms) {
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, ms);
+}
+$("toast").addEventListener("mouseenter", () => clearTimeout(toastTimer));
+$("toast").addEventListener("focusin", () => clearTimeout(toastTimer));
+$("toast").addEventListener("mouseleave", () => scheduleToastHide(4000));
+$("toast").addEventListener("focusout", () => scheduleToastHide(4000));
+$("toast-close").addEventListener("click", () => { $("toast").hidden = true; });
+$("toast-back").addEventListener("click", (event) => {
+  event.preventDefault();
+  $("toast").hidden = true;
+  // Prefer a real "back" so the history stays tidy when we came from the messages view.
+  if (history.state && history.state.from === "messages") history.back();
+  else navigate("messages");
+});
+
+function updateMessagesBadge() {
+  const count = state.unreadMessages;
+  const badge = $("messages-badge");
+  badge.hidden = count === 0;
+  badge.textContent = count > 99 ? "99+" : String(count);
+  if (count) $("messages-tab").setAttribute("aria-label", `Messages, ${count} new`);
+  else $("messages-tab").removeAttribute("aria-label");
+}
+
+// True while the reader is pointing at or keyboard-focused in the table: rows must not move
+// under them, so live updates wait (with a "new messages" pill) until they leave.
+function messagesBusy() {
+  const active = document.activeElement;
+  return $("msg-body").matches(":hover") || (active !== document.body && $("msg-body").contains(active));
+}
+
+function onMessagePacket(packet) {
+  const isNew = ![...state.messages.values()].some((m) => m.hash === packet.hash);
+  addMessage(packet);
+  if (currentView !== "messages") {
+    if (isNew) { state.unreadMessages++; updateMessagesBadge(); }
+    return;
+  }
+  const busy = messagesBusy();
+  if (isNew && (busy || $("view-messages").scrollTop > 4)) { messagesUnseen++; updateMessagesPill(); }
+  if (busy) messagesPending = true;
+  else renderMessages(true);
+}
+
+function flushMessages() {
+  if (!messagesPending || messagesBusy()) return;
+  renderMessages(true);
+  if ($("view-messages").scrollTop <= 4) { messagesUnseen = 0; updateMessagesPill(); }
+}
+
+function updateMessagesPill() {
+  const pill = $("msg-new-pill");
+  pill.hidden = messagesUnseen === 0;
+  pill.innerHTML = `${icon("arrowUp")}${esc(plural(messagesUnseen, "new message", "new messages"))}`;
+}
+
+$("msg-body").addEventListener("mouseleave", flushMessages);
+$("msg-body").addEventListener("focusout", () => setTimeout(flushMessages, 0));
+$("view-messages").addEventListener("scroll", () => {
+  if (messagesUnseen && !messagesPending && $("view-messages").scrollTop <= 4) { messagesUnseen = 0; updateMessagesPill(); }
+}, { passive: true });
+$("msg-new-pill").addEventListener("click", () => {
+  renderMessages();
+  messagesUnseen = 0;
+  updateMessagesPill();
+  $("view-messages").scrollTo({ top: 0, behavior: reducedMotion.matches ? "auto" : "smooth" });
+});
+
+$("msg-filter").addEventListener("input", () => renderMessages());
+$("msg-sort").addEventListener("change", (event) => { const [key, dir] = event.target.value.split(":"); setSort(key, dir); });
+$("channel-chips").addEventListener("click", (event) => { if (toggleChip(event, state.channelFilter)) renderMessages(); });
+document.querySelector(".msg-table thead").addEventListener("click", (event) => {
+  const th = event.target.closest(".sort-btn") && event.target.closest("th[data-sort]");
+  if (!th) return;
+  const key = th.dataset.sort;
+  setSort(key, state.msgSort.key === key ? (state.msgSort.dir === "asc" ? "desc" : "asc") : SORT_DEFAULT_DIR[key]);
+});
+$("msg-body").addEventListener("click", (event) => {
+  const row = event.target.closest("tr");
+  if (!row) return;
+  const hash = row.dataset.hash;
+  const action = event.target.closest("[data-action]");
+  if (action) {
+    if (action.dataset.action === "toggle") toggleMessageRow(hash);
+    else if (action.dataset.action === "replay") replayMessage(hash, null);
+    else if (action.dataset.action === "replay-path") replayMessage(hash, Number(action.dataset.id));
+    return;
+  }
+  // Clicking elsewhere on a row toggles it too, unless the reader is selecting text.
+  if (!row.classList.contains("msg-row") || event.target.closest("button, a") || String(window.getSelection())) return;
+  toggleMessageRow(hash);
+});
+
+// --- Views ---------------------------------------------------------------------------------------
+// The URL hash (#map / #messages) is the source of truth, so refresh and Back/Forward work.
+
+const viewFromHash = () => (location.hash === "#messages" ? "messages" : "map");
+
+function showView(view) {
+  if (view === currentView) return;
+  if (currentView === "messages") messagesScroll = $("view-messages").scrollTop;
+  currentView = view;
+  const messages = view === "messages";
+  $("view-map").hidden = messages;
+  $("view-messages").hidden = !messages;
+  for (const tab of document.querySelectorAll(".view-tab")) {
+    if (tab.dataset.view === view) tab.setAttribute("aria-current", "page");
+    else tab.removeAttribute("aria-current");
+  }
+  document.title = messages ? `Messages · ${APP_TITLE}` : APP_TITLE;
+  $("skip-link").textContent = messages ? "Skip to messages" : "Skip to packet list";
+  if (!messages) {
+    map.invalidateSize();
+    return;
+  }
+  $("toast").hidden = true;
+  state.unreadMessages = 0;
+  messagesUnseen = 0;
+  updateMessagesBadge();
+  updateMessagesPill();
+  renderMessages();
+  $("view-messages").scrollTop = messagesScroll;
+  if (state.returnFocusHash) {
+    const row = $("msg-body").querySelector(`tr.msg-row[data-hash="${state.returnFocusHash}"]`);
+    const target = row && (row.querySelector('[data-action="replay"]') || row.querySelector(".row-toggle"));
+    if (target) target.focus();
+    state.returnFocusHash = null;
+  }
+}
+
+function navigate(view) {
+  if (viewFromHash() !== view) history.pushState({ from: currentView }, "", `#${view}`);
+  showView(view);
+}
+window.addEventListener("popstate", () => showView(viewFromHash()));
+window.addEventListener("hashchange", () => showView(viewFromHash()));
+$("skip-link").addEventListener("click", (event) => {
+  event.preventDefault();
+  const target = currentView === "map" ? $("packets") : $("msg-table").hidden ? $("msg-filter") : $("msg-table");
+  target.focus();
+});
+
 // --- Live updates ------------------------------------------------------------------------------
 
 function handleEvent(event) {
@@ -1208,9 +1988,13 @@ function handleEvent(event) {
     markers.clear();
     state.nodes.clear();
     event.nodes.forEach(upsertNode);
-    state.packets = event.packets;
+    state.packets = [...event.packets, ...(event.remote_packets || [])].sort((a, b) => a.received_at - b.received_at || a.id - b.id);
+    state.messages.clear();
+    for (const packet of [...(event.messages || []), ...state.packets]) addMessage(packet);
+    updateSourceFilter();
     renderTypeChips();
     renderList();
+    renderMessages();
     showSelectedRoute(false);
   } else if (event.type === "nodes" || event.type === "self") {
     if (event.self_id) state.selfId = event.self_id;
@@ -1219,9 +2003,11 @@ function handleEvent(event) {
     (event.nodes || []).forEach(upsertNode);
     state.packets.push(event.packet);
     if (state.packets.length > 5000) state.packets.splice(0, state.packets.length - 5000);
+    if (isRemote(event.packet)) updateSourceFilter();
     renderTypeChips();
     prependPacket(event.packet);
     playFlow(event.packet);
+    if (event.packet.message) onMessagePacket(event.packet);
   }
   if (!state.viewReady) autoFit();
   updateNodeStats();
@@ -1249,6 +2035,7 @@ updatePauseButton();
 renderList();
 updateNodeStats();
 setInterval(updatePacketStats, 5000);
+showView(viewFromHash());
 connect();
 </script>
 </body>

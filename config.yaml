@@ -104,6 +104,8 @@ plugins:
       # transport: websockets
       # token_audience: mqtt.meshmapper.net
       # status_interval_seconds: 300
+      # Also receive other observers' packets for packet_map (if the broker allows it):
+      # subscribe: true
       # Auth tokens are signed by the radio itself. Only if your firmware can't
       # sign on-device, set MESHMAPPER_PRIVATE_KEY in .env (never here).
 
@@ -116,6 +118,7 @@ plugins:
       host: 127.0.0.1
       port: 8080
       # max_packets: 500
+      # max_remote_packets: 1000   # packets from other MeshMapper observers
       # Optional HTTP Basic auth; prefer PACKET_MAP_PASSWORD in .env.
       # password: ""
 

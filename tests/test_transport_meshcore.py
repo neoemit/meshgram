@@ -55,7 +55,12 @@ def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
 
         async def get_channel(self, channel_idx: int) -> _Event:
             self.channel_requests.append(channel_idx)
-            return _Event(_EventType.CHANNEL_INFO, {"channel_idx": channel_idx, "channel_name": f"ch{channel_idx}"})
+            # Channel 0 is configured; the others are empty slots (zero secret).
+            secret = bytes(range(16)) if channel_idx == 0 else bytes(16)
+            return _Event(
+                _EventType.CHANNEL_INFO,
+                {"channel_idx": channel_idx, "channel_name": f"ch{channel_idx}", "channel_secret": secret},
+            )
 
     class _MeshCore:
         def __init__(self):
@@ -375,6 +380,42 @@ class MeshCoreTransportTests(unittest.TestCase):
             loop.close()
 
         self.assertEqual(received, [{"payload": "1500aabb", "snr": 5.0}] * 2)
+
+    def test_channel_secrets_are_kept_for_decryption(self):
+        import hashlib
+
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+        finally:
+            loop.close()
+        secret = bytes(range(16))
+        self.assertEqual(transport.channels, [{"name": "ch0", "secret": secret, "hash": hashlib.sha256(secret).hexdigest()[:2]}])
+
+    def test_remote_rx_logs_reach_registered_listeners(self):
+        received: list = []
+
+        async def listener(payload):
+            received.append(payload)
+            payload["mutated"] = True
+
+        async def failing_listener(payload):
+            raise RuntimeError("boom")
+
+        transport = self._make_transport()
+        transport.add_remote_rx_log_listener(failing_listener)
+        transport.add_remote_rx_log_listener(listener)
+        transport.add_remote_rx_log_listener(listener)
+        observation = {"payload": "1500aabb", "observer_id": "AB" * 32}
+        with self.assertLogs("meshgram.transport.meshcore", level="ERROR"):
+            asyncio.run(transport.dispatch_remote_rx_log(observation))
+        self.assertEqual(len(received), 1)
+        self.assertNotIn("mutated", observation)  # each listener gets its own copy
+        transport.remove_remote_rx_log_listener(listener)
+        transport.remove_remote_rx_log_listener(failing_listener)
+        asyncio.run(transport.dispatch_remote_rx_log(observation))
+        self.assertEqual(len(received), 1)
 
     def test_sign_with_device_returns_signature_bytes(self):
         transport = self._make_transport()

@@ -18,6 +18,7 @@ from meshgram.plugins.meshmapper import (
     MeshMapperUploader,
     build_packet_message,
     packet_hash,
+    parse_observer_packet,
 )
 from meshgram.types import PluginContext
 
@@ -116,6 +117,31 @@ class PacketFormattingTests(unittest.TestCase):
         self.assertIsNone(build_packet_message({"payload": "zz"}, "Gateway", PUBKEY_HEX))
 
 
+class ObserverPacketTests(unittest.TestCase):
+    OTHER = "AB" * 32
+
+    def _message(self, **overrides):
+        message = {"origin": "Hilltop obs", "origin_id": self.OTHER, "type": "PACKET", "direction": "rx",
+                   "raw": "1500aabb", "SNR": "6.25", "RSSI": "-97"}
+        message.update(overrides)
+        return json.dumps(message).encode()
+
+    def test_other_observer_packet_becomes_rx_log(self):
+        observation = parse_observer_packet(f"meshcore/YOW/{self.OTHER}/packets", self._message(), PUBKEY_HEX)
+        self.assertEqual(
+            observation,
+            {"payload": "1500AABB", "observer_id": self.OTHER, "observer_name": "Hilltop obs", "snr": 6.25, "rssi": -97.0},
+        )
+
+    def test_skips_own_uploads_transmissions_and_garbage(self):
+        topic = f"meshcore/YOW/{self.OTHER}/packets"
+        self.assertIsNone(parse_observer_packet(f"meshcore/YOW/{PUBKEY_HEX}/packets", self._message(origin_id=PUBKEY_HEX), PUBKEY_HEX))
+        self.assertIsNone(parse_observer_packet(topic, self._message(direction="tx"), PUBKEY_HEX))
+        self.assertIsNone(parse_observer_packet(topic, self._message(type="STATUS"), PUBKEY_HEX))
+        self.assertIsNone(parse_observer_packet(topic, self._message(raw="zz"), PUBKEY_HEX))
+        self.assertIsNone(parse_observer_packet(topic, b"not json", PUBKEY_HEX))
+
+
 class ConfigTests(unittest.TestCase):
     def test_defaults_target_meshmapper_broker(self):
         config = MeshMapperConfig.from_settings({"iata": "yow"})
@@ -158,10 +184,13 @@ class _FakeMqttClient:
         self.will: tuple | None = None
         self.connect_args: tuple | None = None
         self.published: list[tuple[str, dict, int, bool]] = []
+        self.subscriptions: list[tuple[str, int]] = []
         self.loop_started = False
         self.disconnected = False
         self.on_connect = None
         self.on_disconnect = None
+        self.on_subscribe = None
+        self.on_message = None
 
     def username_pw_set(self, username, password):
         self.credentials.append((username, password))
@@ -197,6 +226,16 @@ class _FakeMqttClient:
         self.published.append((topic, json.loads(payload), qos, retain))
         return _FakePublishInfo()
 
+    def subscribe(self, topic, qos=0):
+        self.subscriptions.append((topic, qos))
+        return (0, len(self.subscriptions))
+
+
+class _FakeMessage:
+    def __init__(self, topic: str, payload: dict):
+        self.topic = topic
+        self.payload = json.dumps(payload).encode()
+
 
 class _ReasonCode:
     def __init__(self, value: int):
@@ -220,6 +259,7 @@ class _FakeTransport:
         }
         self.listeners: list = []
         self.signed: list[bytes] = []
+        self.remote: list[dict] = []
 
     def add_rx_log_listener(self, listener):
         if listener not in self.listeners:
@@ -231,6 +271,9 @@ class _FakeTransport:
     async def sign_with_device(self, data: bytes) -> bytes:
         self.signed.append(data)
         return sign_with_expanded_key(data, RFC_PRIVATE_KEY, RFC_PUBLIC_KEY)
+
+    async def dispatch_remote_rx_log(self, rx_log: dict) -> None:
+        self.remote.append(rx_log)
 
 
 def _make_context(backend=MESHCORE_BACKEND) -> PluginContext:
@@ -321,6 +364,61 @@ class UploaderTests(unittest.TestCase):
             self.assertEqual((topic, status["status"], retain), (f"{topic_base}/status", "offline", True))
             self.assertTrue(client.disconnected)
             self.assertFalse(client.loop_started)
+
+        asyncio.run(scenario())
+
+    def test_subscribes_to_region_and_forwards_other_observers(self):
+        async def scenario():
+            client = await self._connect()
+            topic = "meshcore/YOW/+/packets"
+            self.assertEqual(client.subscriptions, [(topic, 0)])
+            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                client.on_subscribe(client, None, 1, [_ReasonCode(0)], None)
+
+            other = "AB" * 32
+            packet = {"origin": "Hilltop obs", "type": "PACKET", "direction": "rx", "raw": "1500AABB", "SNR": "4"}
+            client.on_message(client, None, _FakeMessage(f"meshcore/YOW/{other}/packets", packet))
+            client.on_message(client, None, _FakeMessage(f"meshcore/YOW/{PUBKEY_HEX}/packets", packet))  # ours
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertEqual(
+                self.transport.remote,
+                [{"payload": "1500AABB", "observer_id": other, "observer_name": "Hilltop obs", "snr": 4.0}],
+            )
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_refused_subscription_is_not_retried(self):
+        async def scenario():
+            client = await self._connect()
+            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING") as logs:
+                client.on_subscribe(client, None, 1, [_ReasonCode(0x80)], None)
+            self.assertIn("Uploads are unaffected", logs.output[0])
+            client.on_connect(client, None, None, _ReasonCode(0), None)  # reconnect
+            self.assertEqual(len(client.subscriptions), 1)
+            self.assertEqual(client.published[-1][1]["status"], "online")  # uploads carry on
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_disconnect_right_after_subscribing_stops_subscribing(self):
+        async def scenario():
+            client = await self._connect()
+            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+                client.on_disconnect(client, None, None, _ReasonCode(135), None)
+            client.on_connect(client, None, None, _ReasonCode(0), None)
+            self.assertEqual(len(client.subscriptions), 1)
+            await self.plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_subscribing_can_be_turned_off(self):
+        async def scenario():
+            self.plugin.config.subscribe = False
+            client = await self._connect()
+            self.assertEqual(client.subscriptions, [])
+            await self.plugin.on_shutdown()
 
         asyncio.run(scenario())
 

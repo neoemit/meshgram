@@ -1,11 +1,13 @@
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import unittest
 from types import SimpleNamespace
 
 from meshgram.config import MESHCORE_BACKEND, MESHTASTIC_BACKEND, PluginConfig
-from meshgram.meshcore_packets import decode_advert, decode_packet
+from meshgram.meshcore_packets import decode_advert, decode_packet, decrypt_group_text
 from meshgram.plugin import load_plugins
 from meshgram.plugins.packet_map import PacketMapConfig, PacketMapPlugin, PacketMapServer, PacketMapState
 
@@ -13,6 +15,20 @@ SELF_KEY = "AA" * 32
 REPEATER_KEY = "B1" + "11" * 31
 OTHER_REPEATER_KEY = "B1" + "22" * 31
 COMPANION_KEY = "C3" * 32
+OBSERVER_KEY = "D0" * 32
+CHANNEL_SECRET = bytes(range(16))
+CHANNEL = {"name": "#ping", "secret": CHANNEL_SECRET, "hash": hashlib.sha256(CHANNEL_SECRET).hexdigest()[:2]}
+
+
+def _channel_payload(text: str, secret: bytes = CHANNEL_SECRET, timestamp: int = 1234) -> str:
+    """GRP_TXT payload as MeshCore builds it: hash(1) || HMAC(2) || AES-128-ECB(timestamp, flags, text)."""
+    from Crypto.Cipher import AES
+
+    plain = timestamp.to_bytes(4, "little") + b"\x00" + text.encode("utf-8")
+    plain += b"\x00" * (-len(plain) % 16)
+    ciphertext = AES.new(secret, AES.MODE_ECB).encrypt(plain)
+    mac = hmac.new(secret, ciphertext, hashlib.sha256).digest()[:2]
+    return (hashlib.sha256(secret).digest()[:1] + mac + ciphertext).hex()
 
 
 def _advert(public_key: str, node_type: int, name: str = "", lat: float = None, lon: float = None, timestamp: int = 1000) -> str:
@@ -78,6 +94,16 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(decoded["payload_type_name"], "TRACE")
         self.assertEqual(decoded["trace_snrs"], [5.0, -2.0])
         self.assertEqual(decoded["path"], [])
+
+    def test_decrypts_channel_text_with_matching_secret(self):
+        payload = bytes.fromhex(_channel_payload("Phone: hello mesh"))
+        self.assertEqual(
+            decrypt_group_text(payload, [CHANNEL]),
+            {"channel_name": "#ping", "message": "Phone: hello mesh", "sender_timestamp": 1234},
+        )
+        other = {**CHANNEL, "secret": bytes(16 * [7])}
+        self.assertIsNone(decrypt_group_text(payload, [other]))  # MAC doesn't match
+        self.assertIsNone(decrypt_group_text(payload[:-1], [CHANNEL]))  # not whole AES blocks
 
     def test_truncated_packet(self):
         self.assertIsNone(decode_packet(bytes.fromhex("1505aa")))
@@ -168,6 +194,57 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.state.ingest_rx_log({"payload": raw})["seen_count"], 2)
         self.assertEqual([p["id"] for p in self.state.snapshot()["packets"]], [3, 4, 5])
 
+    def test_messages_outlive_packet_buffer(self):
+        for i in range(3):
+            self.state.ingest_rx_log({"payload": _flood(5, [], f"1{i}" + "2233" + "44"), "chan_name": "Public", "message": f"Phone: hi {i}"})
+        for _ in range(2):
+            self.state.ingest_rx_log({"payload": _flood(4, [], _advert(REPEATER_KEY, 2, "Hilltop", 45.1, -73.1))})
+        snapshot = self.state.snapshot()
+        self.assertEqual([p["id"] for p in snapshot["packets"]], [3, 4, 5])
+        # Message 3 is still in the packet buffer, so only the two evicted ones are added.
+        self.assertEqual([m["message"] for m in snapshot["messages"]], ["hi 0", "hi 1"])
+        self.assertEqual(len(self.state.messages), 3)
+
+    def test_other_observers_packets(self):
+        self.state.update_contacts(
+            {
+                OBSERVER_KEY: {"type": 2, "adv_name": "Hill Observer", "adv_lat": 46.0, "adv_lon": -74.0},
+                REPEATER_KEY: {"type": 2, "adv_name": "Near observer", "adv_lat": 46.01, "adv_lon": -74.01},
+                OTHER_REPEATER_KEY: {"type": 2, "adv_name": "Near us", "adv_lat": 45.01, "adv_lon": -73.01},
+            }
+        )
+        self.state.channels = [CHANNEL]
+        raw = _flood(5, ["B1"], _channel_payload("Phone: hi from the hill"))
+        packet = self.state.ingest_remote_rx_log(
+            {"payload": raw, "snr": 4.5, "rssi": -90, "observer_id": OBSERVER_KEY.lower(), "observer_name": "Hill"},
+            now=50.0,
+        )
+        self.assertEqual(packet["source"], "meshmapper")
+        self.assertEqual(packet["observer"], {"node_id": OBSERVER_KEY, "name": "Hill Observer"})
+        # Decrypted with the radio's channel keys.
+        self.assertEqual((packet["channel_name"], packet["sender_name"], packet["message"]), ("#ping", "Phone", "hi from the hill"))
+        # The ambiguous "B1" hop is resolved near the observer that heard it, not near us.
+        self.assertEqual(packet["path_nodes"][0]["node_id"], REPEATER_KEY)
+        self.assertTrue(self.state.nodes[OBSERVER_KEY]["is_observer"])
+        # "Heard directly" stats are only about this radio's links.
+        self.assertNotIn("last_heard", self.state.nodes[REPEATER_KEY])
+        # Kept apart from this radio's packets, and duplicates are counted separately.
+        self.assertEqual((len(self.state.packets), len(self.state.remote_packets)), (0, 1))
+        self.assertEqual(self.state.ingest_rx_log({"payload": raw})["seen_count"], 1)
+
+        # Unknown observers become nodes named after their MeshMapper origin.
+        other = "E0" * 32
+        self.state.ingest_remote_rx_log({"payload": raw, "observer_id": other, "observer_name": "Valley"})
+        self.assertEqual(self.state.remote_packets[-1]["seen_count"], 2)
+        self.assertEqual((self.state.nodes[other]["name"], self.state.nodes[other]["is_observer"]), ("Valley", True))
+        # Our own uploads coming back are ignored.
+        self.assertIsNone(self.state.ingest_remote_rx_log({"payload": raw, "observer_id": SELF_KEY}))
+
+        snapshot = self.state.snapshot()
+        self.assertEqual([p["id"] for p in snapshot["remote_packets"]], [1, 3])
+        self.assertEqual(snapshot["messages"], [])  # all still in a packet buffer
+        self.assertEqual(len(self.state.messages), 3)
+
     def test_subscribers_receive_packets(self):
         queue = self.state.subscribe()
         self.state.ingest_rx_log({"payload": _flood(4, [], _advert(REPEATER_KEY, 2, "Hilltop", 45.1, -73.1))})
@@ -243,10 +320,16 @@ class _FakeTransport:
         self.listeners = []
         self.device_self_info = {"public_key": SELF_KEY, "name": "Base", "adv_lat": 45.0, "adv_lon": -73.0}
         self.contacts = {REPEATER_KEY: {"type": 2, "adv_name": "Hilltop", "adv_lat": 45.1, "adv_lon": -73.1}}
+        self.channels = [CHANNEL]
+        self.remote_listeners = []
 
     def add_rx_log_listener(self, listener):
         if listener not in self.listeners:
             self.listeners.append(listener)
+
+    def add_remote_rx_log_listener(self, listener):
+        if listener not in self.remote_listeners:
+            self.remote_listeners.append(listener)
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
@@ -275,6 +358,13 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         await transport.listeners[0]({"payload": _flood(2, ["B1"], "AAC3" + "0011"), "snr": 2.0})
         self.assertEqual(plugin.state.packets[-1]["path_nodes"][0]["name"], "Hilltop")
+
+        # Packets other MeshMapper observers heard arrive through the transport too.
+        self.assertEqual(transport.remote_listeners, [plugin.handle_remote_rx_log])
+        await transport.remote_listeners[0](
+            {"payload": _flood(5, [], _channel_payload("Phone: hi")), "observer_id": OBSERVER_KEY, "observer_name": "Hill"}
+        )
+        self.assertEqual(plugin.state.remote_packets[-1]["message"], "hi")
 
         await plugin.on_shutdown()
         self.assertIsNone(plugin.server.port)
