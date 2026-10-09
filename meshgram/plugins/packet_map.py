@@ -41,8 +41,7 @@ from meshgram.types import PluginAction, PluginContext
 LOGGER = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).with_name("packet_map_static")
-DEFAULT_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-DEFAULT_TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+DEFAULT_TITLE = "Meshgram"
 HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
 # Node types that relay packets and therefore appear in packet paths.
 RELAY_NODE_TYPES = {"repeater", "room"}
@@ -65,9 +64,10 @@ class PacketMapConfig:
     port: int = 8080
     max_packets: int = 500
     password: str = ""
-    title: str = "Meshgram packet map"
-    tile_url: str = DEFAULT_TILE_URL
-    tile_attribution: str = DEFAULT_TILE_ATTRIBUTION
+    title: str = DEFAULT_TITLE
+    # Empty: the page picks a light or dark CARTO basemap to match its theme.
+    tile_url: str = ""
+    tile_attribution: str = ""
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "PacketMapConfig":
@@ -79,9 +79,9 @@ class PacketMapConfig:
             port=_as_int(port, 8080),
             max_packets=max(10, _as_int(settings.get("max_packets"), 500)),
             password=str(password),
-            title=str(settings.get("title") or "Meshgram packet map"),
-            tile_url=str(settings.get("tile_url") or DEFAULT_TILE_URL),
-            tile_attribution=str(settings.get("tile_attribution") or DEFAULT_TILE_ATTRIBUTION),
+            title=str(settings.get("title") or DEFAULT_TITLE),
+            tile_url=str(settings.get("tile_url") or ""),
+            tile_attribution=str(settings.get("tile_attribution") or ""),
         )
 
     def client_config(self) -> dict[str, Any]:

@@ -492,10 +492,11 @@ Notes:
 
 MeshCore only. Serves a small web app showing what your radio hears in real time:
 
-- **Map (left):** every node that shares a GPS position, from adverts the radio hears and from its contact list. Repeaters and room servers are drawn as diamonds, companions as dots, and your own radio has a pink ring. When a packet arrives, its route (originator → repeaters → your radio) flashes on the map, and the node you heard it from pulses.
-- **Packet list (right):** every received RF packet, newest first. Each card shows the packet type, the sender, SNR/RSSI (colour-coded), hop count, the repeater path resolved to names, the channel and decrypted text for channel messages Meshgram has the key for, and a "heard N×" badge when the same packet arrives over several paths. Click a card to see all decoded metadata (hash, route type, transport codes, advert key/position, source/destination hashes, raw hex) and draw its route on the map. You can filter by text or packet type, and pause the list.
+- **Map (left):** every node that shares a GPS position, from adverts the radio hears and from its contact list. Each node type has its own shape and colour (repeaters ◆, room servers ■, companions ●, sensors ▲) and your own radio is pink. When a packet arrives, a glowing dot follows its real route (originator → each repeater in its path → your radio), pausing briefly at each relay, and the trail fades once it arrives. Hops that couldn't be placed on the map are drawn dotted. In the **Nodes on map** panel, click a node type to show or hide it (Alt-click shows only that type), and turn the live packet flow on or off.
+- **Packet list (right):** every received RF packet, newest first. Each card shows the packet type, the sender, SNR/RSSI (colour-coded, with signal bars), hop count, the route as a chain of named stops, the channel and decrypted text for channel messages Meshgram has the key for, and a "Heard N×" badge when the same packet arrives over several paths. Click a card to see all decoded metadata (hash, route type, transport codes, advert key/position, source/destination hashes, raw hex), draw its route on the map with direction arrows, and replay its flow. You can search, filter by one or more packet types, and pause the list. If you scroll down, new packets don't move the list; a "new packets" button takes you back to the top.
+- The page has light and dark themes (following the system setting until you pick one), works on phones, and remembers the map position and zoom, hidden node types, and theme in the browser across refreshes.
 
-It only listens to the radio's raw RF log. It sends nothing over the mesh or to Telegram, and needs no extra Python packages. The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access.
+It only listens to the radio's raw RF log. It sends nothing over the mesh or to Telegram, and needs no extra Python packages. The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access. Routes can only end at your radio on the map if it has a position: set one in the radio's advert settings (e.g. from the MeshCore app).
 
 ```yaml
 plugins:
@@ -514,8 +515,8 @@ Then open `http://<host>:8080/`.
 | `port` | `8080` | Listen port. `PACKET_MAP_PORT` overrides it. |
 | `password` | — | If set, the page requires HTTP Basic auth with this password (any username). Prefer `PACKET_MAP_PASSWORD` in `.env`. |
 | `max_packets` | `500` | Packets kept in memory and sent to newly opened pages |
-| `title` | `Meshgram packet map` | Page title |
-| `tile_url` / `tile_attribution` | OpenStreetMap | Leaflet tile layer URL template and attribution |
+| `title` | `Meshgram` | Page title |
+| `tile_url` / `tile_attribution` | OpenStreetMap | Leaflet tile layer URL template and attribution. When unset, OpenStreetMap tiles are restyled to match the light or dark theme; a custom tile server is shown as-is. |
 
 Notes:
 
@@ -523,7 +524,7 @@ Notes:
 - The page shows decrypted channel messages and node positions. Don't expose it on an untrusted network without `password` and, ideally, a TLS reverse proxy.
 - Path hops are 1–3 byte public-key prefixes, so a hop is matched to a known node by prefix. If several repeaters share the prefix, the one closest to the next hop is picked. Unknown hops are listed by their hash and skipped on the map.
 - For direct-routed packets the path is the remaining route, so it is drawn dashed and isn't connected to your radio.
-- Nodes appear on the map once they share a position (in an advert or in the radio's contact list). The legend shows how many repeaters have no position.
+- Nodes appear on the map once they share a position (in an advert or in the radio's contact list). The **Nodes on map** panel shows how many repeaters have no position.
 - History is kept in memory only and is lost on restart.
 
 ---

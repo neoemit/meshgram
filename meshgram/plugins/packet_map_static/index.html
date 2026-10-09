@@ -2,122 +2,369 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Meshgram packet map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Meshgram</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%234cc2ff'/%3E%3Cpath d='M10 21 16 10 22 21Z' fill='none' stroke='%2304121c' stroke-width='2' stroke-linejoin='round'/%3E%3Cg fill='%2304121c'%3E%3Ccircle cx='16' cy='10' r='3'/%3E%3Ccircle cx='10' cy='21' r='3'/%3E%3Ccircle cx='22' cy='21' r='3'/%3E%3C/g%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script>
+  // Apply the saved (or system) theme before first paint to avoid a flash.
+  (function () {
+    var theme = null;
+    try { theme = JSON.parse(localStorage.getItem("meshgram.theme")); } catch (e) {}
+    if (theme !== "light" && theme !== "dark") theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
 <style>
   :root {
-    --bg: #0f1419; --panel: #161c23; --card: #1d252e; --card-hover: #242e39; --border: #2b3642;
-    --text: #e6edf3; --muted: #8b98a5; --accent: #4cc2ff;
-    --good: #3fb950; --ok: #d29922; --bad: #f85149;
-    --repeater: #f0883e; --chat: #4cc2ff; --room: #a371f7; --sensor: #3fb950; --unknown: #8b98a5; --self: #ff5c8a;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --radius: 12px;
+    --self: #ff5c8a;
+
+    --bg: #0a0e13;
+    --surface: #10151c;
+    --surface-2: #161d26;
+    --surface-3: #1d2631;
+    --list-bg: #0d1217;
+    --border: #242e3a;
+    --border-strong: #354253;
+    --text: #e9eef4;
+    --text-2: #b6c1cd;
+    --text-3: #8b98a7;
+    --accent: #4cc2ff;
+    --accent-text: #7fd3ff;
+    --accent-soft: rgba(76, 194, 255, .14);
+    --accent-contrast: #04121c;
+    --good: #56d364;
+    --ok: #e3b341;
+    --bad: #ff7b72;
+    --glass: rgba(16, 21, 28, .9);
+    --shadow: 0 10px 30px rgba(0, 0, 0, .45), 0 1px 2px rgba(0, 0, 0, .4);
+    --marker-stroke: #0a0e13;
+    --route-casing: #0a0e13;
+    --chip-mix: #ffffff;
+    --chip-pct: 75%;
+    color-scheme: dark;
   }
+  :root[data-theme="light"] {
+    --bg: #eef2f6;
+    --surface: #ffffff;
+    --surface-2: #ffffff;
+    --surface-3: #f1f4f8;
+    --list-bg: #f5f7fa;
+    --border: #dde3ea;
+    --border-strong: #c3cdd8;
+    --text: #0f172a;
+    --text-2: #334155;
+    --text-3: #546072;
+    --accent: #0b7fc7;
+    --accent-text: #075f96;
+    --accent-soft: rgba(11, 127, 199, .1);
+    --accent-contrast: #ffffff;
+    --good: #1a7f37;
+    --ok: #9a6700;
+    --bad: #cf222e;
+    --glass: rgba(255, 255, 255, .93);
+    --shadow: 0 10px 30px rgba(15, 23, 42, .14), 0 1px 2px rgba(15, 23, 42, .08);
+    --marker-stroke: #ffffff;
+    --route-casing: #ffffff;
+    --chip-mix: #000000;
+    --chip-pct: 55%;
+    color-scheme: light;
+  }
+
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  header { height: 48px; display: flex; align-items: center; gap: 16px; padding: 0 16px;
-    border-bottom: 1px solid var(--border); background: var(--panel); }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  .stats { display: flex; gap: 16px; color: var(--muted); font-size: 13px; }
-  .stats b { color: var(--text); font-variant-numeric: tabular-nums; }
-  .status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
-  .status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
-  .status.live .dot { background: var(--good); box-shadow: 0 0 6px var(--good); }
-  main { display: flex; height: calc(100% - 48px); }
-  #map-wrap { flex: 1 1 60%; position: relative; min-width: 0; }
-  #map { position: absolute; inset: 0; background: #1b2026; }
-  aside { flex: 0 0 40%; max-width: 560px; min-width: 340px; display: flex; flex-direction: column;
-    border-left: 1px solid var(--border); background: var(--panel); }
-  .toolbar { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  .toolbar input, .toolbar select, .toolbar button { background: var(--card); color: var(--text);
-    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; }
-  .toolbar input { flex: 1; min-width: 120px; }
-  .toolbar button { cursor: pointer; }
-  .toolbar button.active { border-color: var(--accent); color: var(--accent); }
-  #packets { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
-  .empty { color: var(--muted); text-align: center; padding: 32px 16px; }
-  .pkt { background: var(--card); border: 1px solid var(--border); border-left: 4px solid var(--type-color, var(--unknown));
-    border-radius: 6px; padding: 8px 10px; cursor: pointer; }
-  .pkt:hover { background: var(--card-hover); }
-  .pkt.selected { border-color: var(--accent); border-left-color: var(--type-color, var(--accent));
-    box-shadow: 0 0 0 1px var(--accent) inset; }
-  .pkt.fresh { animation: fresh 1.5s ease-out; }
-  @keyframes fresh { from { background: #2d4a5e; } to { background: var(--card); } }
-  .pkt .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .pkt .row + .row { margin-top: 4px; }
-  .badge { font-size: 11px; font-weight: 700; letter-spacing: .03em; padding: 2px 6px; border-radius: 4px;
-    background: var(--type-color, var(--unknown)); color: #0f1419; }
-  .badge.route { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 600; }
-  .badge.dup { background: transparent; color: var(--ok); border: 1px solid var(--ok); }
-  .who { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
-  .time { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-  .signal { display: flex; gap: 10px; font-variant-numeric: tabular-nums; font-size: 13px; }
-  .signal span b { font-size: 15px; }
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; background: var(--bg); color: var(--text);
+    font: 14px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .skip-link { position: absolute; z-index: 2000; left: 12px; top: -48px; padding: 8px 14px; border-radius: 10px;
+    background: var(--accent); color: var(--accent-contrast); font-weight: 650; text-decoration: none; }
+  .skip-link:focus { top: 10px; }
+  svg.i { width: 18px; height: 18px; flex: none; }
+
+  /* --- Header ------------------------------------------------------------- */
+  .app-header { flex: none; height: 56px; display: flex; align-items: center; gap: 18px; padding: 0 14px 0 16px;
+    background: var(--surface); border-bottom: 1px solid var(--border); }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .logo { flex: none; }
+  .logo .bg { fill: var(--accent); }
+  .logo .fg { fill: var(--accent-contrast); stroke: var(--accent-contrast); }
+  .brand h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.015em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stats { display: flex; gap: 6px; min-width: 0; }
+  .stat { display: inline-flex; align-items: baseline; gap: 5px; height: 28px; padding: 4px 11px; border-radius: 999px;
+    background: var(--surface-3); border: 1px solid var(--border); font-size: 13px; color: var(--text-2); white-space: nowrap; }
+  .stat b { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
+  .header-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .status { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 11px; border-radius: 999px;
+    font-size: 13px; font-weight: 650; color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); white-space: nowrap; }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .status.live { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent); }
+  .status.live .dot { animation: live 2s ease-in-out infinite; }
+  @keyframes live { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 60%, transparent); } 60% { box-shadow: 0 0 0 6px transparent; } }
+  .icon-btn { width: 36px; height: 36px; display: inline-grid; place-items: center; padding: 0; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2); }
+  .icon-btn:hover { background: var(--surface-3); color: var(--text); }
+
+  /* --- Layout ------------------------------------------------------------- */
+  .app-main { flex: 1 1 auto; min-height: 0; display: flex; }
+  .map-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
+  #map { position: absolute; inset: 0; z-index: 0; isolation: isolate; background: var(--bg); }
+  .sidebar { flex: 0 0 clamp(360px, 32vw, 520px); display: flex; flex-direction: column; min-height: 0;
+    background: var(--surface); border-left: 1px solid var(--border); }
+
+  /* --- Map overlays --------------------------------------------------------- */
+  .glass { background: var(--glass); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    border: 1px solid var(--border); box-shadow: var(--shadow); }
+  .map-controls { position: absolute; z-index: 10; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .control-group { display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; }
+  .control-group button { width: 40px; height: 40px; display: grid; place-items: center; padding: 0; border: 0; background: none; color: var(--text-2); }
+  .control-group button + button { border-top: 1px solid var(--border); }
+  .control-group button:hover { background: var(--surface-3); color: var(--text); }
+  .control-group button:focus-visible { outline-offset: -3px; }
+
+  .map-panel { position: absolute; z-index: 10; left: 12px; bottom: 30px; width: 240px; max-height: calc(100% - 150px);
+    overflow-y: auto; border-radius: 14px; }
+  .panel-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 11px 12px 9px 14px;
+    background: none; border: 0; border-radius: 14px; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); }
+  .panel-head svg { width: 16px; height: 16px; transition: transform .2s; }
+  .panel-head[aria-expanded="false"] svg { transform: rotate(-90deg); }
+  .panel-body { padding: 0 6px 8px; }
+  .type-list { list-style: none; margin: 0; padding: 0; }
+  .type-toggle { width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 8px; border: 0; border-radius: 8px;
+    background: none; text-align: left; font-size: 14px; color: var(--text); }
+  .type-toggle:hover { background: var(--surface-3); }
+  .type-toggle .count { margin-left: auto; color: var(--text-3); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .type-toggle[aria-pressed="false"] .label { color: var(--text-3); text-decoration: line-through; }
+  .type-toggle[aria-pressed="false"] .swatch { opacity: .4; }
+  .check { width: 18px; height: 18px; flex: none; display: grid; place-items: center; border-radius: 5px;
+    border: 1.5px solid var(--border-strong); color: transparent; }
+  .check svg { width: 12px; height: 12px; stroke-width: 3.2; }
+  .type-toggle[aria-pressed="true"] .check { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+  .swatch { width: 16px; height: 16px; flex: none; display: block; }
+  .swatch svg { display: block; width: 100%; height: 100%; overflow: visible; }
+  .swatch .shape { fill: var(--c); stroke: var(--marker-stroke); stroke-width: 1.5; }
+  .panel-divider { height: 1px; margin: 6px 8px; background: var(--border); }
+  .legend-row, .switch-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 8px; font-size: 14px; color: var(--text); }
+  .switch-row { cursor: pointer; }
+  .switch-row:hover { background: var(--surface-3); }
+  .switch { appearance: none; -webkit-appearance: none; position: relative; flex: none; width: 32px; height: 18px; margin: 0 0 0 auto;
+    border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .2s; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .35); transition: transform .2s; }
+  .switch:checked { background: var(--accent); }
+  .switch:checked::after { transform: translateX(14px); }
+  .flow-swatch { width: 16px; height: 16px; flex: none; display: grid; place-items: center; }
+  .flow-swatch::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px 2px var(--accent); }
+  .panel-note { margin: 2px 8px 2px; font-size: 12.5px; color: var(--text-3); }
+
+  /* --- Sidebar ------------------------------------------------------------- */
+  .sidebar-head { display: flex; gap: 8px; padding: 12px 12px 10px; }
+  .search { position: relative; flex: 1; min-width: 0; }
+  .search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--text-3); pointer-events: none; }
+  .search input { width: 100%; height: 38px; padding: 0 12px 0 34px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface-3); font-size: 14px; }
+  .search input::placeholder { color: var(--text-3); }
+  .search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .btn { height: 38px; display: inline-flex; align-items: center; gap: 7px; padding: 0 13px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface-2); font-size: 14px; font-weight: 600; white-space: nowrap; }
+  .btn:hover { background: var(--surface-3); }
+  .btn svg { width: 16px; height: 16px; }
+  .btn[aria-pressed="true"] { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent-text); }
+  .btn-sm { height: 32px; padding: 0 11px; font-size: 13px; border-radius: 8px; }
+  .btn .badge { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-contrast);
+    font-size: 12px; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums; }
+
+  .type-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid var(--border); }
+  .filter-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 11px; border: 1px solid var(--border);
+    border-radius: 999px; background: transparent; color: var(--text-2); font-size: 13px; font-weight: 600; }
+  .filter-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+  .filter-chip .n { color: var(--text-3); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .filter-chip:hover { background: var(--surface-3); color: var(--text); }
+  .filter-chip[aria-pressed="true"] { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--text); }
+
+  .list-wrap { position: relative; flex: 1 1 auto; min-height: 0; background: var(--list-bg); }
+  .packets { list-style: none; margin: 0; padding: 12px 12px 20px; height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+    scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+  .new-pill { position: absolute; z-index: 2; top: 12px; left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px;
+    height: 32px; padding: 0 14px; border: 0; border-radius: 999px; background: var(--accent); color: var(--accent-contrast);
+    font-size: 13px; font-weight: 700; box-shadow: var(--shadow); }
+  .empty { margin: auto; padding: 48px 24px; text-align: center; color: var(--text-3); }
+  .empty svg { width: 40px; height: 40px; margin-bottom: 10px; color: var(--text-3); }
+  .empty strong { display: block; margin-bottom: 4px; font-size: 15px; color: var(--text-2); }
+
+  /* --- Packet cards ------------------------------------------------------------ */
+  .pkt { position: relative; flex: none; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);
+    transition: border-color .15s, box-shadow .15s; }
+  .pkt::before { content: ""; position: absolute; left: -1px; top: 12px; bottom: 12px; width: 3px; border-radius: 0 3px 3px 0; background: var(--c); }
+  .pkt:hover { border-color: var(--border-strong); }
+  .pkt.selected { border-color: color-mix(in srgb, var(--accent) 70%, transparent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .pkt.fresh { animation: fresh 1.8s ease-out; }
+  @keyframes fresh { from { background: color-mix(in srgb, var(--c) 18%, var(--surface-2)); } to { background: var(--surface-2); } }
+  .pkt-head { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 12px 14px 12px 16px; border: 0; border-radius: var(--radius);
+    background: none; text-align: left; }
+  .pkt-head:focus-visible { outline-offset: -2px; }
+  .pkt-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .chip { flex: none; display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; white-space: nowrap;
+    font-size: 12px; font-weight: 700; letter-spacing: .01em;
+    background: color-mix(in srgb, var(--c) 16%, transparent); border: 1px solid color-mix(in srgb, var(--c) 42%, transparent);
+    color: color-mix(in srgb, var(--c) var(--chip-pct), var(--chip-mix)); }
+  .pkt-who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 650; }
+  .pkt-who.muted { color: var(--text-3); font-weight: 500; }
+  .pkt-chan { flex: none; font-size: 13px; font-weight: 650; color: var(--accent-text); }
+  .pkt-time { flex: none; margin-left: auto; padding-left: 6px; font-size: 13px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .pkt-msg { display: block; padding: 8px 11px; border-radius: 10px; background: var(--surface-3); font-size: 14.5px; line-height: 1.45;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pkt-route { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 13px; }
+  .route-label { color: var(--text-3); font-weight: 600; }
+  .stop { display: inline-block; max-width: 100%; height: 22px; padding: 0 7px; border-radius: 6px; line-height: 22px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--surface-3); color: var(--text-2); font-weight: 550; }
+  .stop.relay { color: color-mix(in srgb, #f0883e var(--chip-pct), var(--chip-mix)); background: color-mix(in srgb, #f0883e 13%, transparent); }
+  .stop.self { color: color-mix(in srgb, var(--self) var(--chip-pct), var(--chip-mix)); background: color-mix(in srgb, var(--self) 13%, transparent); }
+  .stop.unknown { font-family: var(--mono); font-size: 12px; color: var(--text-3); background: none; border: 1px dashed var(--border-strong); line-height: 20px; }
+  .route-sep { color: var(--text-3); }
+  .pkt-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: var(--text-2); }
+  .sig { display: inline-flex; align-items: center; gap: 10px; font-variant-numeric: tabular-nums; }
+  .sig b { font-weight: 700; }
+  .bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+  .bars i { width: 3px; border-radius: 1px; background: var(--border-strong); }
+  .bars i:nth-child(1) { height: 4px; } .bars i:nth-child(2) { height: 7px; } .bars i:nth-child(3) { height: 10px; } .bars i:nth-child(4) { height: 12px; }
+  .bars[data-level="1"] i:nth-child(-n+1), .bars[data-level="2"] i:nth-child(-n+2),
+  .bars[data-level="3"] i:nth-child(-n+3), .bars[data-level="4"] i { background: currentColor; }
   .q-good { color: var(--good); } .q-ok { color: var(--ok); } .q-bad { color: var(--bad); }
-  .hops { color: var(--muted); font-size: 13px; }
-  .message { margin-top: 4px; padding: 4px 8px; background: #11181f; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }
-  .channel { color: var(--room); font-size: 12px; }
-  .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
-  .path .hop { color: var(--repeater); }
-  .path .hop.unknown { color: var(--muted); }
-  .details { display: none; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 6px; }
-  .pkt.selected .details { display: block; }
-  .details dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 12px; }
-  .details dt { color: var(--muted); }
-  .details dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
-  .legend { position: absolute; z-index: 500; bottom: 18px; left: 10px; background: rgba(22,28,35,.92);
-    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; }
-  .legend div { display: flex; align-items: center; gap: 6px; }
-  .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .legend i.sq { border-radius: 2px; transform: rotate(45deg); }
-  .legend .note { color: var(--muted); margin-top: 4px; }
-  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); }
-  .leaflet-popup-content { margin: 10px 12px; font-size: 13px; }
-  .leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
-  .popup-title { font-weight: 700; font-size: 14px; }
-  .popup-meta { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
-  .node-icon { border-radius: 50%; border: 2px solid #0f1419; box-shadow: 0 0 0 1px rgba(255,255,255,.35); }
-  .node-icon.repeater, .node-icon.room { border-radius: 3px; transform: rotate(45deg); }
-  .node-icon.self { box-shadow: 0 0 0 3px var(--self); }
-  .node-icon.pulse { animation: pulse 1.6s ease-out; }
-  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(76,194,255,.9); } 100% { box-shadow: 0 0 0 18px rgba(76,194,255,0); } }
-  @media (max-width: 860px) {
-    main { flex-direction: column; }
-    #map-wrap { flex: 0 0 45%; }
-    aside { flex: 1; max-width: none; min-width: 0; border-left: 0; border-top: 1px solid var(--border); }
+  .tag { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 999px;
+    font-size: 12px; font-weight: 650; color: var(--text-2); }
+  .tag.warn { border-color: color-mix(in srgb, var(--ok) 60%, transparent); color: var(--ok); }
+  .pkt-details { padding: 0 16px 14px; border-top: 1px solid var(--border); }
+  .pkt-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 16px; margin: 12px 0 0; font-size: 13px; }
+  .pkt-details dt { color: var(--text-3); }
+  .pkt-details dd { margin: 0; overflow-wrap: anywhere; }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .pkt-actions { display: flex; gap: 8px; margin-top: 14px; }
+
+  /* --- Leaflet ------------------------------------------------------------------- */
+  .leaflet-container { font: inherit; background: var(--bg); }
+  .leaflet-container a { color: var(--accent-text); }
+  .leaflet-popup-content-wrapper { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+  .leaflet-popup-tip { background: var(--surface); box-shadow: none; }
+  .leaflet-popup-content { margin: 14px 16px; font-size: 14px; line-height: 1.45; }
+  .leaflet-container a.leaflet-popup-close-button { top: 8px; right: 8px; width: 28px; height: 28px; border-radius: 8px; font: 20px/26px var(--font); color: var(--text-3); }
+  .leaflet-container a.leaflet-popup-close-button:hover { background: var(--surface-3); color: var(--text); }
+  .leaflet-tooltip { padding: 4px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text);
+    box-shadow: var(--shadow); font-size: 13px; font-weight: 650; }
+  .leaflet-tooltip-top::before { border-top-color: var(--surface); }
+  .leaflet-control-attribution.leaflet-control { margin: 0; padding: 2px 8px; border-top-left-radius: 8px; background: var(--glass); color: var(--text-3); font-size: 11px; }
+  .leaflet-trails-pane, .leaflet-ripples-pane, .leaflet-flow-pane { pointer-events: none; }
+  .themed-tiles .leaflet-tile-pane { filter: saturate(.5) contrast(.92) brightness(1.03); }
+  :root[data-theme="dark"] .themed-tiles .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) saturate(.35) brightness(.82) contrast(.88); }
+
+  .popup-title { margin: 6px 26px 10px 0; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+  .popup dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; margin: 0 0 12px; font-size: 13px; }
+  .popup dt { color: var(--text-3); }
+  .popup dd { margin: 0; overflow-wrap: anywhere; }
+
+  .node-marker { background: none; border: 0; }
+  .node-marker:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 50%; }
+  .nm { position: relative; display: block; width: 100%; height: 100%; }
+  .nm svg { position: relative; display: block; width: 100%; height: 100%; overflow: visible;
+    filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, .5)); transition: transform .15s ease-out; }
+  .node-marker:hover .nm svg, .node-marker:focus-visible .nm svg { transform: scale(1.25); }
+  .nm .shape { fill: var(--c); stroke: var(--marker-stroke); stroke-width: 2; }
+  .nm-halo { position: absolute; inset: -7px; border: 2px solid var(--self); border-radius: 50%; animation: halo 2.4s ease-out infinite; }
+  @keyframes halo { from { transform: scale(.55); opacity: .9; } to { transform: scale(1.7); opacity: 0; } }
+
+  .fx-icon { pointer-events: none; }
+  .ripple { position: absolute; inset: 0; border: 2px solid var(--c); border-radius: 50%; background: color-mix(in srgb, var(--c) 22%, transparent);
+    animation: ripple .9s ease-out forwards; }
+  @keyframes ripple { from { transform: scale(.3); opacity: 1; } to { transform: scale(2.2); opacity: 0; } }
+  .flow-dot { position: absolute; inset: 0; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #fff 0 20%, var(--c) 55%);
+    box-shadow: 0 0 0 2px var(--route-casing), 0 0 14px 4px var(--c); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  }
+  @media (max-width: 900px) {
+    .app-main { flex-direction: column; }
+    .map-wrap { flex: 0 0 48%; }
+    .sidebar { flex: 1 1 auto; border-left: 0; border-top: 1px solid var(--border); }
+    .map-panel { top: 12px; right: 12px; bottom: auto; left: auto; width: 214px; max-height: calc(100% - 40px); }
+  }
+  @media (max-width: 600px) {
+    .app-header { gap: 10px; padding: 0 12px; }
+    .stat.optional { display: none; }
+    .sidebar-head { padding: 10px 12px 8px; }
+    .btn .btn-text { display: none; }
   }
 </style>
 </head>
 <body>
-<header>
-  <h1 id="title">Meshgram packet map</h1>
+<a class="skip-link" href="#packets">Skip to packet list</a>
+<header class="app-header">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+      <rect class="bg" width="32" height="32" rx="9"/>
+      <path class="fg" d="M10 21 16 10 22 21Z" fill="none" stroke-width="2" stroke-linejoin="round" style="fill:none"/>
+      <circle class="fg" cx="16" cy="10" r="3"/><circle class="fg" cx="10" cy="21" r="3"/><circle class="fg" cx="22" cy="21" r="3"/>
+    </svg>
+    <h1 id="title">Meshgram</h1>
+  </div>
   <div class="stats">
-    <span>Nodes on map <b id="stat-nodes">0</b></span>
-    <span>Packets <b id="stat-packets">0</b></span>
-    <span>Last minute <b id="stat-rate">0</b></span>
+    <span class="stat"><b id="stat-nodes">0</b> nodes</span>
+    <span class="stat optional"><b id="stat-packets">0</b> packets</span>
+    <span class="stat optional"><b id="stat-rate">0</b> / min</span>
   </div>
-  <div class="status" id="status"><span class="dot"></span><span id="status-text">Connecting…</span></div>
+  <div class="header-actions">
+    <button class="icon-btn" id="theme-toggle" type="button"></button>
+    <div class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Connecting…</span></div>
+  </div>
 </header>
-<main>
-  <div id="map-wrap">
+<main class="app-main">
+  <section class="map-wrap" aria-label="Map">
+    <div class="map-controls">
+      <div class="control-group glass">
+        <button type="button" id="zoom-in" aria-label="Zoom in" title="Zoom in" data-icon="plus"></button>
+        <button type="button" id="zoom-out" aria-label="Zoom out" title="Zoom out" data-icon="minus"></button>
+      </div>
+      <div class="control-group glass">
+        <button type="button" id="fit" aria-label="Fit map to the network" title="Fit map to the network" data-icon="fit"></button>
+      </div>
+    </div>
+    <section class="map-panel glass" aria-labelledby="panel-title">
+      <button class="panel-head" id="panel-toggle" type="button" aria-expanded="true" aria-controls="panel-body">
+        <span id="panel-title">Nodes on map</span><span data-icon="chevron"></span>
+      </button>
+      <div class="panel-body" id="panel-body">
+        <ul class="type-list" id="type-list"></ul>
+        <div class="legend-row"><span class="swatch" id="self-swatch"></span><span>This radio</span></div>
+        <div class="panel-divider"></div>
+        <label class="switch-row"><span class="flow-swatch" aria-hidden="true"></span><span>Live packet flow</span>
+          <input class="switch" id="flow-toggle" type="checkbox" role="switch"></label>
+        <p class="panel-note" id="unplaced" hidden></p>
+      </div>
+    </section>
     <div id="map"></div>
-    <div class="legend">
-      <div><i class="sq" style="background:var(--repeater)"></i>Repeater</div>
-      <div><i class="sq" style="background:var(--room)"></i>Room server</div>
-      <div><i style="background:var(--chat)"></i>Companion</div>
-      <div><i style="background:var(--sensor)"></i>Sensor</div>
-      <div><i style="background:var(--unknown);box-shadow:0 0 0 2px var(--self)"></i>This radio</div>
-      <div class="note" id="unplaced"></div>
+  </section>
+  <aside class="sidebar" aria-labelledby="packets-title">
+    <h2 class="sr-only" id="packets-title">Received packets</h2>
+    <div class="sidebar-head">
+      <div class="search">
+        <span data-icon="search"></span>
+        <input id="filter" type="search" placeholder="Search name, message, hash…" aria-label="Search packets" autocomplete="off">
+      </div>
+      <button class="btn" id="pause" type="button" aria-pressed="false"></button>
     </div>
-  </div>
-  <aside>
-    <div class="toolbar">
-      <input id="filter" type="search" placeholder="Filter by name, hash, message…">
-      <select id="type-filter"><option value="">All types</option></select>
-      <button id="pause" title="Pause the live list">Pause</button>
+    <div class="type-chips" id="type-chips" role="group" aria-label="Filter by packet type" hidden></div>
+    <div class="list-wrap">
+      <button class="new-pill" id="new-pill" type="button" hidden></button>
+      <ol class="packets" id="packets" tabindex="-1" aria-labelledby="packets-title"></ol>
     </div>
-    <div id="packets"><div class="empty">Waiting for packets…</div></div>
   </aside>
 </main>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -125,34 +372,85 @@
 <script>
 "use strict";
 const CONFIG = /*__MESHGRAM_CONFIG__*/{};
-const TYPE_COLORS = {
-  ADVERT: "#3fb950", GRP_TXT: "#a371f7", GRP_DATA: "#8957e5", TXT_MSG: "#4cc2ff", ACK: "#8b98a5",
-  REQ: "#d29922", RESPONSE: "#e3b341", PATH: "#f0883e", ANON_REQ: "#db6d28", TRACE: "#ff5c8a",
+
+const NODE_TYPES = {
+  repeater: { name: "Repeater", plural: "Repeaters", color: "#f0883e", shape: "diamond" },
+  room: { name: "Room server", plural: "Room servers", color: "#a371f7", shape: "square" },
+  chat: { name: "Companion", plural: "Companions", color: "#4cc2ff", shape: "circle" },
+  sensor: { name: "Sensor", plural: "Sensors", color: "#3fb950", shape: "triangle" },
+  unknown: { name: "Unknown node", plural: "Unknown", color: "#8b98a5", shape: "circle" },
 };
-const NODE_COLORS = { repeater: "#f0883e", room: "#a371f7", chat: "#4cc2ff", sensor: "#3fb950", unknown: "#8b98a5" };
+const RELAY_TYPES = new Set(["repeater", "room"]);
+const SELF_COLOR = "#ff5c8a";
+const PACKET_TYPES = {
+  ADVERT: { label: "Advert", color: "#3fb950" },
+  GRP_TXT: { label: "Channel msg", color: "#a371f7" },
+  GRP_DATA: { label: "Channel data", color: "#8957e5" },
+  TXT_MSG: { label: "Direct msg", color: "#4cc2ff" },
+  ACK: { label: "Ack", color: "#8b98a5" },
+  REQ: { label: "Request", color: "#d29922" },
+  RESPONSE: { label: "Response", color: "#e3b341" },
+  PATH: { label: "Path", color: "#f0883e" },
+  ANON_REQ: { label: "Anon request", color: "#db6d28" },
+  TRACE: { label: "Trace", color: "#ff5c8a" },
+  MULTIPART: { label: "Multipart", color: "#2dd4bf" },
+  CONTROL: { label: "Control", color: "#94a3b8" },
+  RAW_CUSTOM: { label: "Custom", color: "#64748b" },
+};
+const PACKET_TYPE_ORDER = Object.keys(PACKET_TYPES);
+const SHAPES = {
+  circle: '<circle class="shape" cx="10" cy="10" r="7.2"/>',
+  diamond: '<path class="shape" d="M10 1.6 18.4 10 10 18.4 1.6 10Z" stroke-linejoin="round"/>',
+  square: '<rect class="shape" x="2.8" y="2.8" width="14.4" height="14.4" rx="3.6"/>',
+  triangle: '<path class="shape" d="M10 2.2 18.4 17H1.6Z" stroke-linejoin="round"/>',
+};
+const ICONS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  minus: '<path d="M5 12h14"/>',
+  fit: '<path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/><circle cx="12" cy="12" r="2.5"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/>',
+  pause: '<path d="M9 5v14M15 5v14"/>',
+  play: '<path d="M7 4.5v15l12-7.5z" fill="currentColor"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  replay: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+  locate: '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
+  radio: '<path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M19.1 4.9a10 10 0 0 1 0 14.2"/><circle cx="12" cy="12" r="2"/>',
+  arrowUp: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+};
+const OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 const MAX_RENDERED = 500;
-
-const state = { selfId: null, nodes: new Map(), packets: [], selectedId: null, paused: false, fitted: false };
-const markers = new Map();
-
-if (CONFIG.title) { document.title = CONFIG.title; document.getElementById("title").textContent = CONFIG.title; }
-
-const map = L.map("map", { worldCopyJump: true }).setView([20, 0], 2);
-L.tileLayer(CONFIG.tile_url || "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19, attribution: CONFIG.tile_attribution || "&copy; OpenStreetMap contributors",
-}).addTo(map);
-const routeLayer = L.layerGroup().addTo(map);
-const selectedLayer = L.layerGroup().addTo(map);
+const MAX_FLOWS = 24;
+const HOP_PAUSE_MS = 180;
+const FADE_MS = 1400;
 
 // --- Helpers -------------------------------------------------------------------
+
+const $ = (id) => document.getElementById(id);
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+// localStorage can be unavailable (private mode, blocked storage); the page works without it.
+const store = {
+  get(key, fallback) {
+    try { const raw = localStorage.getItem(`meshgram.${key}`); return raw === null ? fallback : JSON.parse(raw); } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(`meshgram.${key}`, JSON.stringify(value)); } catch { /* ignore */ }
+  },
+};
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
-    if (value === undefined || value === null) continue;
+    if (value === undefined || value === null || value === false) continue;
     if (key === "class") node.className = value;
     else if (key === "style") node.style.cssText = value;
-    else node.setAttribute(key, value);
+    else if (key === "html") node.innerHTML = value;
+    else if (key.startsWith("on") && typeof value === "function") node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : value);
   }
   for (const child of children.flat(Infinity)) {
     if (child === null || child === undefined || child === false) continue;
@@ -161,325 +459,778 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-const hasPos = (node) => node && node.lat !== null && node.lat !== undefined && node.lon !== null && node.lon !== undefined;
+const icon = (name) => `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+const shapeSvg = (shape) => `<svg viewBox="0 0 20 20" aria-hidden="true">${SHAPES[shape]}</svg>`;
+const esc = (text) => String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value));
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const hasPos = (node) => Boolean(node) && Number.isFinite(node.lat) && Number.isFinite(node.lon);
 const shortId = (id) => (id || "").slice(0, 8);
 const nodeLabel = (ref) => (ref && (ref.name || (ref.node_id ? shortId(ref.node_id) : ref.hash))) || "?";
+const nodeMeta = (node) => NODE_TYPES[node && node.type] || NODE_TYPES.unknown;
+const packetMeta = (packet) => PACKET_TYPES[packet.payload_type_name] || { label: packet.payload_type_name, color: "#8b98a5" };
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour12: false });
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 function fmtAgo(ts) {
   if (!ts) return "never";
   const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
   if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
 }
 const snrClass = (snr) => (snr >= 5 ? "q-good" : snr >= -5 ? "q-ok" : "q-bad");
+const snrLevel = (snr) => (snr >= 5 ? 4 : snr >= 0 ? 3 : snr >= -5 ? 2 : 1);
 const rssiClass = (rssi) => (rssi >= -90 ? "q-good" : rssi >= -110 ? "q-ok" : "q-bad");
 
-// --- Nodes on the map ------------------------------------------------------------
+document.querySelectorAll("[data-icon]").forEach((node) => node.insertAdjacentHTML("afterbegin", icon(node.dataset.icon)));
 
-function nodeIcon(node, pulse) {
-  const type = node.type || "unknown";
-  const relay = type === "repeater" || type === "room";
-  const size = node.is_self ? 18 : relay ? 14 : 12;
-  const classes = ["node-icon", type, node.is_self ? "self" : "", pulse ? "pulse" : ""].join(" ");
+// --- State -----------------------------------------------------------------------
+
+const state = {
+  selfId: null,
+  nodes: new Map(),
+  packets: [],
+  selectedId: null,
+  paused: false,
+  pausedCount: 0,
+  unseen: 0,
+  typeFilter: new Set(),
+  hiddenTypes: new Set((store.get("hiddenNodeTypes", []) || []).filter((t) => t in NODE_TYPES)),
+  showFlow: store.get("flow", true) !== false,
+  viewReady: false,
+};
+const markers = new Map();  // node id -> { marker, key, layer }
+
+if (CONFIG.title) { document.title = CONFIG.title; $("title").textContent = CONFIG.title; }
+
+// --- Map ---------------------------------------------------------------------------
+
+const map = L.map("map", { zoomControl: false, worldCopyJump: true, minZoom: 2, maxZoom: 19 });
+map.createPane("trails").style.zIndex = 410;
+map.createPane("ripples").style.zIndex = 450;
+map.createPane("flow").style.zIndex = 620;
+
+// Restore the last view so the map is where it was before a refresh.
+const savedView = store.get("view", null);
+if (savedView && [savedView.lat, savedView.lng, savedView.zoom].every(Number.isFinite)) {
+  map.setView([savedView.lat, savedView.lng], savedView.zoom);
+  state.viewReady = true;
+} else {
+  map.setView([20, 0], 2);
+}
+map.on("zoomstart dragstart", () => { state.viewReady = true; });
+map.on("moveend", () => {
+  if (!state.viewReady) return;
+  const center = map.getCenter().wrap();
+  store.set("view", { lat: Number(center.lat.toFixed(6)), lng: Number(center.lng.toFixed(6)), zoom: map.getZoom() });
+});
+
+// Without a configured tile server, OpenStreetMap tiles are muted (light) or
+// inverted (dark) with a CSS filter so they match the theme and markers stand out.
+L.tileLayer(CONFIG.tile_url || OSM_TILES, {
+  maxZoom: 19,
+  attribution: CONFIG.tile_url ? CONFIG.tile_attribution || "" : OSM_ATTRIBUTION,
+}).addTo(map);
+if (!CONFIG.tile_url) $("map").classList.add("themed-tiles");
+
+const typeLayers = Object.fromEntries(Object.keys(NODE_TYPES).map((type) => [type, L.layerGroup()]));
+for (const [type, layer] of Object.entries(typeLayers)) if (!state.hiddenTypes.has(type)) layer.addTo(map);
+const selfLayer = L.layerGroup().addTo(map);
+const routeLayer = L.layerGroup().addTo(map);   // the selected packet's route
+const flowLayer = L.layerGroup().addTo(map);    // live packet animations
+
+$("zoom-in").addEventListener("click", () => map.zoomIn());
+$("zoom-out").addEventListener("click", () => map.zoomOut());
+$("fit").addEventListener("click", () => fitNetwork(true));
+
+// --- Theme ------------------------------------------------------------------------
+
+function currentTheme() { return document.documentElement.dataset.theme === "light" ? "light" : "dark"; }
+
+function applyTheme(theme, persist) {
+  document.documentElement.dataset.theme = theme;
+  if (persist) store.set("theme", theme);
+  const next = theme === "dark" ? "light" : "dark";
+  const button = $("theme-toggle");
+  button.innerHTML = icon(theme === "dark" ? "sun" : "moon");
+  button.setAttribute("aria-label", `Switch to ${next} theme`);
+  button.title = `Switch to ${next} theme`;
+  showSelectedRoute(false);
+}
+$("theme-toggle").addEventListener("click", () => applyTheme(currentTheme() === "dark" ? "light" : "dark", true));
+window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", (event) => {
+  if (store.get("theme", null) === null) applyTheme(event.matches ? "light" : "dark", false);
+});
+
+// --- Nodes on the map --------------------------------------------------------------
+
+function nodeIcon(node) {
+  const meta = nodeMeta(node);
+  const size = node.is_self ? 22 : RELAY_TYPES.has(node.type) ? 18 : 15;
+  const label = `${node.is_self ? "This radio" : meta.name}: ${node.name || shortId(node.id)}`;
+  const html = `<span class="nm" style="--c:${node.is_self ? SELF_COLOR : meta.color}">`
+    + (node.is_self ? '<span class="nm-halo"></span>' : "")
+    + `<svg viewBox="0 0 20 20" role="img" aria-label="${esc(label)}">${SHAPES[node.is_self ? "circle" : meta.shape]}</svg></span>`;
   return L.divIcon({
-    className: "",
-    html: `<div class="${classes}" style="width:${size}px;height:${size}px;background:${NODE_COLORS[type] || NODE_COLORS.unknown}"></div>`,
-    iconSize: [size, size], iconAnchor: [size / 2, size / 2], popupAnchor: [0, -size / 2],
+    className: "node-marker", html,
+    iconSize: [size, size], iconAnchor: [size / 2, size / 2], popupAnchor: [0, -size / 2 - 2], tooltipAnchor: [0, -size / 2 - 2],
   });
 }
+
+const markerKey = (node) => `${node.type}|${node.is_self ? 1 : 0}|${node.name || ""}`;
+const layerFor = (node) => (node.is_self ? selfLayer : typeLayers[node.type] || typeLayers.unknown);
 
 function nodePopup(node) {
-  const rows = [
-    el("div", { class: "popup-title" }, node.name || shortId(node.id), node.is_self ? " (this radio)" : ""),
-    el("div", {}, `${node.type || "unknown"}`),
-    el("div", { class: "popup-meta" }, node.id),
-    el("div", { class: "popup-meta" }, `${Number(node.lat).toFixed(5)}, ${Number(node.lon).toFixed(5)}`),
-  ];
+  const meta = nodeMeta(node);
+  const rows = [];
   if (node.last_heard) {
-    const signal = [node.last_snr != null ? `SNR ${node.last_snr} dB` : null, node.last_rssi != null ? `RSSI ${node.last_rssi} dBm` : null]
-      .filter(Boolean).join(" · ");
-    rows.push(el("div", {}, `Heard directly ${fmtAgo(node.last_heard)}${signal ? " — " + signal : ""}`));
+    const signal = [node.last_snr != null ? `SNR ${node.last_snr} dB` : null, node.last_rssi != null ? `RSSI ${node.last_rssi} dBm` : null].filter(Boolean);
+    rows.push(["Heard directly", [fmtAgo(node.last_heard), ...signal].join(" · ")]);
   }
-  if (node.last_advert) rows.push(el("div", {}, `Last advert ${fmtAgo(node.last_advert)}`));
-  return el("div", {}, rows);
+  if (node.last_seen) rows.push(["Last packet", fmtAgo(node.last_seen)]);
+  if (node.last_advert) rows.push(["Last advert", fmtAgo(node.last_advert)]);
+  rows.push(["Position", `${node.lat.toFixed(5)}, ${node.lon.toFixed(5)}`]);
+  rows.push(["Key", el("span", { class: "mono", title: node.id }, `${node.id.slice(0, 16)}…`)]);
+  const query = node.name || shortId(node.id);
+  return el("div", { class: "popup" },
+    el("span", { class: "chip", style: `--c:${node.is_self ? SELF_COLOR : meta.color}` }, node.is_self ? "This radio" : meta.name),
+    el("div", { class: "popup-title" }, node.name || shortId(node.id)),
+    el("dl", {}, rows.map(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
+    el("button", { class: "btn btn-sm", type: "button", onclick: () => { map.closePopup(); setSearch(query); } },
+      el("span", { html: icon("search") }), "Show its packets"));
 }
 
-function upsertNode(node, pulse = false) {
-  state.nodes.set(node.id, { ...(state.nodes.get(node.id) || {}), ...node });
-  const merged = state.nodes.get(node.id);
-  if (node.is_self) state.selfId = node.id;
-  let marker = markers.get(node.id);
+function upsertNode(node) {
+  const merged = { ...(state.nodes.get(node.id) || {}), ...node };
+  state.nodes.set(node.id, merged);
+  if (merged.is_self) state.selfId = merged.id;
+  const entry = markers.get(node.id);
   if (!hasPos(merged)) {
-    if (marker) { marker.remove(); markers.delete(node.id); }
+    if (entry) { entry.layer.removeLayer(entry.marker); markers.delete(node.id); }
     return;
   }
-  if (!marker) {
-    marker = L.marker([merged.lat, merged.lon], { icon: nodeIcon(merged, pulse), zIndexOffset: merged.is_self ? 1000 : 0 });
-    marker.bindPopup(() => nodePopup(state.nodes.get(node.id)));
-    marker.bindTooltip(() => { const n = state.nodes.get(node.id); return n.name || shortId(n.id); }, { direction: "top", offset: [0, -8] });
-    marker.addTo(map);
-    markers.set(node.id, marker);
-  } else {
-    marker.setLatLng([merged.lat, merged.lon]);
-    marker.setIcon(nodeIcon(merged, pulse));
+  const key = markerKey(merged);
+  const layer = layerFor(merged);
+  const zIndexOffset = merged.is_self ? 1000 : RELAY_TYPES.has(merged.type) ? 200 : 0;
+  if (!entry) {
+    const marker = L.marker([merged.lat, merged.lon], { icon: nodeIcon(merged), riseOnHover: true, zIndexOffset });
+    marker.bindPopup(() => nodePopup(state.nodes.get(node.id)), { minWidth: 230, maxWidth: 300 });
+    marker.bindTooltip(() => { const n = state.nodes.get(node.id); return esc(n.name || shortId(n.id)); }, { direction: "top" });
+    layer.addLayer(marker);
+    markers.set(node.id, { marker, key, layer });
+    return;
+  }
+  entry.marker.setLatLng([merged.lat, merged.lon]);
+  if (entry.key !== key) {
+    entry.marker.setIcon(nodeIcon(merged));
+    entry.marker.setZIndexOffset(zIndexOffset);
+    entry.key = key;
+  }
+  if (entry.layer !== layer) {
+    entry.layer.removeLayer(entry.marker);
+    layer.addLayer(entry.marker);
+    entry.layer = layer;
   }
 }
 
-function pulseNode(nodeId) {
-  const node = state.nodes.get(nodeId);
-  const marker = markers.get(nodeId);
-  if (node && marker) marker.setIcon(nodeIcon(node, true));
+// Fit to the bulk of the network: a few nodes advertise bogus far-away positions,
+// so ignore anything much further out than the typical node.
+function networkBounds() {
+  const placed = [...state.nodes.values()].filter(hasPos);
+  if (!placed.length) return null;
+  const self = state.nodes.get(state.selfId);
+  const median = (values) => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
+  const center = hasPos(self) ? L.latLng(self.lat, self.lon) : L.latLng(median(placed.map((n) => n.lat)), median(placed.map((n) => n.lon)));
+  const distances = placed.map((n) => center.distanceTo([n.lat, n.lon]) / 1000);
+  const cutoff = Math.max(60, 4 * median([...distances]));
+  const near = placed.filter((n, i) => distances[i] <= cutoff);
+  return L.latLngBounds((near.length ? near : placed).map((n) => [n.lat, n.lon]));
 }
+
+function fitNetwork(animate) {
+  const bounds = networkBounds();
+  if (!bounds) return false;
+  if (bounds.getNorthEast().equals(bounds.getSouthWest())) map.setView(bounds.getCenter(), 13, { animate });
+  else map.fitBounds(bounds, { padding: [48, 48], maxZoom: 14, animate });
+  return true;
+}
+
+function autoFit() {
+  state.viewReady = true;
+  if (!fitNetwork(false)) state.viewReady = false;
+}
+
+// --- Node type filter ----------------------------------------------------------------
+
+function buildTypeList() {
+  const list = $("type-list");
+  for (const [type, meta] of Object.entries(NODE_TYPES)) {
+    const button = el("button", {
+      class: "type-toggle", type: "button", "data-type": type, "aria-pressed": String(!state.hiddenTypes.has(type)),
+      title: "Show or hide on the map · Alt-click to show only this type",
+    },
+      el("span", { class: "swatch", style: `--c:${meta.color}`, html: shapeSvg(meta.shape) }),
+      el("span", { class: "label" }, meta.plural),
+      el("span", { class: "count" }, "0"),
+      el("span", { class: "check", html: icon("check") }));
+    list.append(el("li", { "data-type": type, hidden: type === "unknown" }, button));
+  }
+  $("self-swatch").style.setProperty("--c", SELF_COLOR);
+  $("self-swatch").innerHTML = shapeSvg("circle");
+}
+
+function toggleNodeType(type, solo) {
+  const all = Object.keys(NODE_TYPES);
+  if (solo) {
+    const alreadySolo = all.every((t) => (t === type) !== state.hiddenTypes.has(t));
+    state.hiddenTypes = new Set(alreadySolo ? [] : all.filter((t) => t !== type));
+  } else if (state.hiddenTypes.has(type)) {
+    state.hiddenTypes.delete(type);
+  } else {
+    state.hiddenTypes.add(type);
+  }
+  for (const t of all) {
+    const visible = !state.hiddenTypes.has(t);
+    if (visible) typeLayers[t].addTo(map); else typeLayers[t].remove();
+    document.querySelector(`.type-toggle[data-type="${t}"]`).setAttribute("aria-pressed", String(visible));
+  }
+  store.set("hiddenNodeTypes", [...state.hiddenTypes]);
+}
+
+$("type-list").addEventListener("click", (event) => {
+  const button = event.target.closest(".type-toggle");
+  if (button) toggleNodeType(button.dataset.type, event.altKey || event.metaKey);
+});
+
+function setPanelOpen(open) {
+  $("panel-toggle").setAttribute("aria-expanded", String(open));
+  $("panel-body").hidden = !open;
+}
+$("panel-toggle").addEventListener("click", () => {
+  const open = $("panel-toggle").getAttribute("aria-expanded") !== "true";
+  setPanelOpen(open);
+  store.set("panelOpen", open);
+});
+
+$("flow-toggle").checked = state.showFlow;
+$("flow-toggle").addEventListener("change", (event) => {
+  state.showFlow = event.target.checked;
+  store.set("flow", state.showFlow);
+  if (!state.showFlow) clearFlows();
+});
 
 function updateNodeStats() {
-  let placed = 0, unplacedRelays = 0;
+  const counts = Object.fromEntries(Object.keys(NODE_TYPES).map((t) => [t, 0]));
+  let placed = 0;
+  let unplacedRelays = 0;
   for (const node of state.nodes.values()) {
-    if (hasPos(node)) placed++;
-    else if (node.type === "repeater" || node.type === "room") unplacedRelays++;
-  }
-  document.getElementById("stat-nodes").textContent = placed;
-  document.getElementById("unplaced").textContent = unplacedRelays ? `${unplacedRelays} repeater(s) without position` : "";
-}
-
-function fitToNodes() {
-  const points = [...state.nodes.values()].filter(hasPos).map((n) => [n.lat, n.lon]);
-  if (!points.length) return;
-  state.fitted = true;
-  if (points.length === 1) map.setView(points[0], 11);
-  else map.fitBounds(points, { padding: [40, 40], maxZoom: 13 });
-}
-
-// --- Packet routes ---------------------------------------------------------------
-
-// Points (in travel order) for a packet: originator → relays → this radio.
-function routePoints(packet) {
-  const points = [];
-  const push = (nodeId) => {
-    const node = nodeId && state.nodes.get(nodeId);
-    if (hasPos(node)) points.push([node.lat, node.lon]);
-  };
-  const flood = packet.route === "flood";
-  if (flood && packet.origin) push(packet.origin.node_id);
-  for (const hop of packet.path_nodes || []) push(hop.node_id);
-  if (flood) push(state.selfId);
-  return points.filter((p, i) => i === 0 || p[0] !== points[i - 1][0] || p[1] !== points[i - 1][1]);
-}
-
-function drawRoute(layer, packet, opts) {
-  const points = routePoints(packet);
-  if (points.length < 2) return null;
-  const color = TYPE_COLORS[packet.payload_type_name] || "#8b98a5";
-  const line = L.polyline(points, {
-    color, weight: opts.weight, opacity: opts.opacity, dashArray: packet.route === "direct" ? "6 6" : null,
-  }).addTo(layer);
-  return line;
-}
-
-function flashRoute(packet) {
-  const line = drawRoute(routeLayer, packet, { weight: 3, opacity: 0.9 });
-  const heard = packet.heard_from && packet.heard_from.node_id;
-  if (heard) pulseNode(heard);
-  if (packet.origin && packet.origin.node_id) pulseNode(packet.origin.node_id);
-  if (!line) return;
-  let opacity = 0.9;
-  const timer = setInterval(() => {
-    opacity -= 0.06;
-    if (opacity <= 0) { clearInterval(timer); routeLayer.removeLayer(line); return; }
-    line.setStyle({ opacity });
-  }, 250);
-}
-
-function showSelectedRoute() {
-  selectedLayer.clearLayers();
-  const packet = state.packets.find((p) => p.id === state.selectedId);
-  if (!packet) return;
-  const line = drawRoute(selectedLayer, packet, { weight: 5, opacity: 1 });
-  if (line) map.fitBounds(line.getBounds(), { padding: [60, 60], maxZoom: 14 });
-  else {
-    const focus = [packet.origin, packet.heard_from].find((ref) => ref && hasPos(state.nodes.get(ref.node_id)));
-    if (focus) {
-      const node = state.nodes.get(focus.node_id);
-      map.panTo([node.lat, node.lon]);
-      markers.get(node.id)?.openPopup();
+    if (hasPos(node)) {
+      placed++;
+      if (!node.is_self) counts[node.type in counts ? node.type : "unknown"]++;
+    } else if (RELAY_TYPES.has(node.type)) {
+      unplacedRelays++;
     }
   }
+  $("stat-nodes").textContent = placed;
+  for (const [type, count] of Object.entries(counts)) {
+    const row = document.querySelector(`#type-list li[data-type="${type}"]`);
+    row.querySelector(".count").textContent = count;
+    if (type === "unknown") row.hidden = count === 0 && !state.hiddenTypes.has(type);
+  }
+  const note = $("unplaced");
+  note.hidden = !unplacedRelays;
+  note.textContent = `${plural(unplacedRelays, "repeater has", "repeaters have")} no position`;
 }
 
-// --- Packet list -------------------------------------------------------------------
+// --- Packet routes ----------------------------------------------------------------------
+
+// Positioned stops in travel order. Flood packets: originator → relays → this radio.
+// Direct packets carry the remaining route, so they're drawn along it in order.
+// `gap` marks a stop reached through relays we couldn't place on the map.
+function routeStops(packet) {
+  const stops = [];
+  let skipped = false;
+  const add = (nodeId, kind) => {
+    const node = nodeId ? state.nodes.get(nodeId) : null;
+    if (!hasPos(node)) { skipped = true; return; }
+    const last = stops[stops.length - 1];
+    if (last && last.lat === node.lat && last.lon === node.lon) { skipped = false; return; }
+    stops.push({ id: node.id, lat: node.lat, lon: node.lon, kind, gap: stops.length > 0 && skipped });
+    skipped = false;
+  };
+  const flood = packet.route === "flood";
+  if (flood && packet.origin) add(packet.origin.node_id, "origin");
+  for (const hop of packet.path_nodes || []) add(hop.node_id, "hop");
+  if (flood) add(state.selfId, "self");
+  return stops;
+}
+
+const segmentDash = (packet, stop) => (stop.gap ? "1 8" : packet.route === "direct" ? "9 7" : null);
+
+const iconCache = new Map();
+function fxIcon(kind, color, size, html) {
+  const key = `${kind}|${color}`;
+  if (!iconCache.has(key)) {
+    iconCache.set(key, L.divIcon({ className: "fx-icon", html: `<span class="${kind}" style="--c:${color}"></span>${html || ""}`, iconSize: [size, size] }));
+  }
+  return iconCache.get(key);
+}
+
+function arrowIcon(color, casing, angle) {
+  return L.divIcon({
+    className: "fx-icon", iconSize: [18, 18],
+    html: `<svg viewBox="0 0 18 18" width="18" height="18" style="transform:rotate(${angle.toFixed(1)}deg)" aria-hidden="true">`
+      + `<path d="M6 4l6 5-6 5" fill="none" stroke="${casing}" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>`
+      + `<path d="M6 4l6 5-6 5" fill="none" stroke="${color}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  });
+}
+
+function ripple(stop, color) {
+  if (reducedMotion.matches) return;
+  const marker = L.marker([stop.lat, stop.lon], { icon: fxIcon("ripple", color, 30), pane: "ripples", interactive: false, keyboard: false }).addTo(flowLayer);
+  setTimeout(() => flowLayer.removeLayer(marker), 950);
+}
+
+// Draws the selected packet's route with direction arrows. Returns true if the map moves.
+function showSelectedRoute(focus) {
+  routeLayer.clearLayers();
+  const packet = findPacket(state.selectedId);
+  if (!packet) return false;
+  const stops = routeStops(packet);
+  const color = packetMeta(packet).color;
+  const casing = cssVar("--route-casing") || "#000";
+  const zoom = map.getZoom();
+  for (let i = 0; i < stops.length - 1; i++) {
+    const a = L.latLng(stops[i].lat, stops[i].lon);
+    const b = L.latLng(stops[i + 1].lat, stops[i + 1].lon);
+    L.polyline([a, b], { color: casing, weight: 9, opacity: 0.7, lineCap: "round", interactive: false }).addTo(routeLayer);
+    L.polyline([a, b], { color, weight: 4.5, opacity: 1, lineCap: "round", dashArray: segmentDash(packet, stops[i + 1]), interactive: false }).addTo(routeLayer);
+    const pa = map.project(a, zoom);
+    const pb = map.project(b, zoom);
+    if (pa.distanceTo(pb) < 44) continue;
+    const angle = (Math.atan2(pb.y - pa.y, pb.x - pa.x) * 180) / Math.PI;
+    L.marker(map.unproject(pa.add(pb).divideBy(2), zoom), { icon: arrowIcon(color, casing, angle), pane: "trails", interactive: false, keyboard: false }).addTo(routeLayer);
+  }
+  if (!focus || !stops.length) return false;
+  if (stops.length === 1) {
+    const point = L.latLng(stops[0].lat, stops[0].lon);
+    const entry = markers.get(stops[0].id);
+    if (!map.getBounds().contains(point)) { map.panTo(point); return true; }
+    if (entry) entry.marker.openPopup();
+    return false;
+  }
+  const bounds = L.latLngBounds(stops.map((s) => [s.lat, s.lon]));
+  if (map.getBounds().pad(-0.08).contains(bounds)) return false;
+  map.flyToBounds(bounds, { padding: [70, 70], maxZoom: 15, duration: 0.6 });
+  return true;
+}
+map.on("zoomend", () => showSelectedRoute(false));
+
+// --- Live packet flow ----------------------------------------------------------------------
+// A glowing dot travels the packet's route hop by hop (pausing briefly at each relay, as
+// repeaters store and forward), leaving a trail that fades once it reaches this radio.
+
+const flows = new Set();
+let frame = null;
+
+function playFlow(packet, force = false) {
+  if ((!state.showFlow && !force) || document.hidden) return;
+  const stops = routeStops(packet);
+  if (!stops.length) return;
+  const color = packetMeta(packet).color;
+  if (stops.length === 1 || flows.size >= MAX_FLOWS) { ripple(stops[stops.length - 1], color); return; }
+  const reduce = reducedMotion.matches;
+  const crs = map.options.crs;
+  const zoom = map.getZoom();
+  const segments = [];
+  let at = 0;
+  for (let i = 0; i < stops.length - 1; i++) {
+    const px = map.project([stops[i].lat, stops[i].lon], zoom).distanceTo(map.project([stops[i + 1].lat, stops[i + 1].lon], zoom));
+    const dur = reduce ? 0 : clamp(300 + px * 1.8, 500, 1800);
+    segments.push({ i, start: at, dur, line: null, arrived: false, dash: segmentDash(packet, stops[i + 1]) });
+    at += dur + (reduce ? 0 : HOP_PAUSE_MS);
+  }
+  const flow = {
+    stops, color, segments, travel: at, linger: reduce ? 2500 : 500, start: performance.now(), dot: null,
+    projected: stops.map((s) => crs.project(L.latLng(s.lat, s.lon))),
+  };
+  if (!reduce) {
+    flow.dot = L.marker([stops[0].lat, stops[0].lon], { icon: fxIcon("flow-dot", color, 12), pane: "flow", interactive: false, keyboard: false }).addTo(flowLayer);
+    ripple(stops[0], color);
+  }
+  flows.add(flow);
+  if (frame === null) frame = requestAnimationFrame(tick);
+}
+
+function stepFlow(flow, now) {
+  const t = now - flow.start;
+  const crs = map.options.crs;
+  let position = null;
+  for (const seg of flow.segments) {
+    if (t < seg.start) break;
+    const a = flow.stops[seg.i];
+    const b = flow.stops[seg.i + 1];
+    const progress = seg.dur ? Math.min(1, (t - seg.start) / seg.dur) : 1;
+    const e = easeInOut(progress);
+    const pa = flow.projected[seg.i];
+    const pb = flow.projected[seg.i + 1];
+    const here = progress >= 1 ? L.latLng(b.lat, b.lon) : crs.unproject(L.point(pa.x + (pb.x - pa.x) * e, pa.y + (pb.y - pa.y) * e));
+    if (!seg.line) {
+      seg.line = L.polyline([[a.lat, a.lon], here], {
+        pane: "trails", color: flow.color, weight: 3.5, opacity: 0.9, lineCap: "round", dashArray: seg.dash, interactive: false,
+      }).addTo(flowLayer);
+    } else if (!seg.arrived) {
+      seg.line.setLatLngs([[a.lat, a.lon], here]);
+    }
+    if (progress >= 1 && !seg.arrived) {
+      seg.arrived = true;
+      ripple(b, b.kind === "self" ? SELF_COLOR : flow.color);
+    }
+    position = here;
+  }
+  if (flow.dot && position) flow.dot.setLatLng(position);
+  const fadeAt = flow.travel + flow.linger;
+  if (t <= fadeAt) return;
+  const opacity = 1 - (t - fadeAt) / FADE_MS;
+  if (opacity <= 0) { removeFlow(flow); return; }
+  for (const seg of flow.segments) if (seg.line) seg.line.setStyle({ opacity: 0.9 * opacity });
+  if (flow.dot) flow.dot.setOpacity(opacity);
+}
+
+function tick(now) {
+  frame = null;
+  for (const flow of [...flows]) stepFlow(flow, now);
+  if (flows.size) frame = requestAnimationFrame(tick);
+}
+
+function removeFlow(flow) {
+  for (const seg of flow.segments) if (seg.line) flowLayer.removeLayer(seg.line);
+  if (flow.dot) flowLayer.removeLayer(flow.dot);
+  flows.delete(flow);
+}
+
+function clearFlows() {
+  for (const flow of [...flows]) removeFlow(flow);
+}
+// Animation frames stop in background tabs; don't let a backlog replay all at once.
+document.addEventListener("visibilitychange", () => { if (document.hidden) clearFlows(); });
+
+// --- Packet list ---------------------------------------------------------------------------
+
+const findPacket = (id) => (id === null ? null : state.packets.find((p) => p.id === id) || null);
 
 function packetTitle(packet) {
-  if (packet.advert) return packet.advert.name || shortId(packet.advert.public_key);
-  if (packet.sender_name) return packet.sender_name;
-  if (packet.origin && (packet.origin.name || packet.origin.node_id)) return nodeLabel(packet.origin);
-  if (packet.src_hash) return `from ${packet.src_hash}`;
-  if (packet.channel_hash) return `channel ${packet.channel_hash}`;
-  return packet.payload_type_name;
+  if (packet.advert) return { text: packet.advert.name || shortId(packet.advert.public_key) };
+  if (packet.sender_name) return { text: packet.sender_name };
+  if (packet.origin && (packet.origin.name || packet.origin.node_id)) return { text: nodeLabel(packet.origin) };
+  if (packet.src_hash) return { text: `From ${packet.src_hash}`, muted: true };
+  if (packet.channel_hash) return { text: `Channel ${packet.channel_hash}`, muted: true };
+  if (packet.dest_hash) return { text: `To ${packet.dest_hash}`, muted: true };
+  return { text: "Unknown sender", muted: true };
 }
 
-function pathView(packet) {
+function routeChain(packet) {
   const hops = packet.path_nodes || [];
   if (!hops.length) return null;
+  const flood = packet.route === "flood";
+  const items = [];
+  if (flood && packet.origin) {
+    items.push(el("span", { class: packet.origin.node_id ? "stop" : "stop unknown", title: "Originator" }, nodeLabel(packet.origin)));
+  } else if (!flood) {
+    items.push(el("span", { class: "route-label" }, "Next"));
+  }
+  for (const hop of hops) {
+    const known = Boolean(hop.node_id);
+    items.push(el("span", {
+      class: known ? "stop relay" : "stop unknown",
+      title: known ? `${hop.name || shortId(hop.node_id)} · hash ${hop.hash}` : `Unknown relay · hash ${hop.hash} · ${plural(hop.candidates, "candidate", "candidates")}`,
+    }, known ? hop.name || hop.hash : hop.hash));
+  }
+  if (flood) items.push(el("span", { class: "stop self" }, "You"));
   const parts = [];
-  hops.forEach((hop, i) => {
-    if (i) parts.push(" → ");
-    parts.push(el("span", { class: hop.node_id ? "hop" : "hop unknown", title: hop.node_id || `${hop.candidates} candidate(s)` },
-      hop.name ? `${hop.name} (${hop.hash})` : hop.hash));
+  items.forEach((item, i) => {
+    if (i && !(i === 1 && !flood)) parts.push(el("span", { class: "route-sep", "aria-hidden": "true" }, "→"));
+    parts.push(item);
   });
-  return el("div", { class: "path" }, packet.route === "direct" ? "route: " : "via: ", parts);
+  return el("span", { class: "pkt-route", "aria-label": `Route: ${items.map((n) => n.textContent).join(", ")}` }, parts);
+}
+
+function signalView(packet) {
+  if (packet.snr == null && packet.rssi == null) return null;
+  return el("span", { class: "sig" },
+    packet.snr != null ? el("span", { class: `bars ${snrClass(packet.snr)}`, "data-level": snrLevel(packet.snr), "aria-hidden": "true" }, el("i"), el("i"), el("i"), el("i")) : null,
+    packet.snr != null ? el("span", {}, "SNR ", el("b", { class: snrClass(packet.snr) }, packet.snr), " dB") : null,
+    packet.rssi != null ? el("span", {}, "RSSI ", el("b", { class: rssiClass(packet.rssi) }, packet.rssi), " dBm") : null);
+}
+
+function hopsText(packet) {
+  if (packet.payload_type_name === "TRACE") return `${plural(packet.hops, "hop", "hops")} traced`;
+  if (packet.route === "direct") return packet.hops ? `Direct · ${plural(packet.hops, "hop", "hops")} to go` : "Direct · last hop";
+  return packet.hops === 0 ? "Heard directly" : `${plural(packet.hops, "hop", "hops")}`;
 }
 
 function detailRows(packet) {
+  const meta = packetMeta(packet);
+  const refText = (ref, full) => (ref ? `${nodeLabel(ref)}${ref.node_id ? ` · ${full ? ref.node_id : shortId(ref.node_id)}` : ""}` : "—");
   const rows = [
     ["Received", new Date(packet.received_at * 1000).toLocaleString()],
-    ["Type", `${packet.payload_type_name} (${packet.payload_type}) v${packet.payload_version}`],
+    ["Type", `${meta.label} · ${packet.payload_type_name} (${packet.payload_type}) v${packet.payload_version}`],
     ["Route", `${packet.route_type_name} (${packet.route_type})`],
-    ["Packet hash", packet.hash],
+    ["Packet hash", packet.hash, true],
     ["Heard", `${packet.seen_count}×`],
-    ["Length", `${packet.len} B (payload ${packet.payload_len} B)`],
-    ["Hops", `${packet.hops} (${packet.path_hash_size}-byte hashes)`],
-    ["Path", (packet.path || []).join(" → ") || "—"],
-    ["Heard from", packet.heard_from ? `${nodeLabel(packet.heard_from)}${packet.heard_from.node_id ? " " + shortId(packet.heard_from.node_id) : ""}` : "—"],
-    ["Origin", packet.origin ? `${nodeLabel(packet.origin)}${packet.origin.node_id ? " " + packet.origin.node_id : ""}` : "—"],
+    ["Size", `${packet.len} B · payload ${packet.payload_len} B`],
+    ["Hops", `${packet.hops} · ${packet.path_hash_size}-byte hashes`],
+    ["Path", (packet.path || []).join(" → ") || "—", true],
+    ["Heard from", refText(packet.heard_from, false)],
+    ["Origin", refText(packet.origin, true)],
   ];
-  if (packet.transport_codes) rows.push(["Transport codes", packet.transport_codes.join(" ")]);
+  if (packet.transport_codes) rows.push(["Transport codes", packet.transport_codes.join(" "), true]);
   if (packet.advert) {
     const a = packet.advert;
-    rows.push(["Advert key", a.public_key], ["Node type", a.node_type],
+    rows.push(["Advert key", a.public_key, true], ["Node type", (NODE_TYPES[a.node_type] || NODE_TYPES.unknown).name],
       ["Advert time", new Date(a.advert_timestamp * 1000).toLocaleString()],
-      ["Position", a.lat != null ? `${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}` : "not shared"]);
+      ["Position", a.lat != null ? `${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}` : "Not shared"]);
   }
-  if (packet.dest_hash) rows.push(["Destination hash", packet.dest_hash]);
-  if (packet.src_hash) rows.push(["Source hash", packet.src_hash]);
-  if (packet.src_public_key) rows.push(["Source key", packet.src_public_key]);
-  if (packet.channel_hash) rows.push(["Channel hash", packet.channel_hash]);
-  if (packet.ack_crc) rows.push(["ACK checksum", packet.ack_crc]);
-  if (packet.trace_tag) rows.push(["Trace tag", packet.trace_tag], ["Trace SNRs", (packet.trace_snrs || []).map((s) => `${s} dB`).join(", ") || "—"]);
-  rows.push(["Raw", packet.raw]);
-  return el("dl", {}, rows.map(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
+  if (packet.dest_hash) rows.push(["Destination hash", packet.dest_hash, true]);
+  if (packet.src_hash) rows.push(["Source hash", packet.src_hash, true]);
+  if (packet.src_public_key) rows.push(["Source key", packet.src_public_key, true]);
+  if (packet.channel_hash) rows.push(["Channel hash", packet.channel_hash, true]);
+  if (packet.ack_crc) rows.push(["ACK checksum", packet.ack_crc, true]);
+  if (packet.trace_tag) {
+    rows.push(["Trace tag", packet.trace_tag, true], ["Trace SNRs", (packet.trace_snrs || []).map((s) => `${s} dB`).join(", ") || "—"]);
+  }
+  rows.push(["Raw", packet.raw, true]);
+  return el("dl", {}, rows.map(([k, v, mono]) => [el("dt", {}, k), el("dd", { class: mono ? "mono" : null }, v)]));
+}
+
+function fillDetails(card, packet) {
+  const details = card.querySelector(".pkt-details");
+  if (details.childElementCount) return;
+  const stops = routeStops(packet);
+  details.append(detailRows(packet));
+  if (stops.length) {
+    details.append(el("div", { class: "pkt-actions" },
+      el("button", { class: "btn btn-sm", type: "button", "data-action": "replay" },
+        el("span", { html: icon(stops.length > 1 ? "replay" : "locate") }), stops.length > 1 ? "Replay on map" : "Show on map")));
+  }
 }
 
 function packetCard(packet, fresh) {
-  const color = TYPE_COLORS[packet.payload_type_name] || "#8b98a5";
-  const signal = el("div", { class: "signal" },
-    packet.snr != null ? el("span", {}, "SNR ", el("b", { class: snrClass(packet.snr) }, packet.snr), " dB") : null,
-    packet.rssi != null ? el("span", {}, "RSSI ", el("b", { class: rssiClass(packet.rssi) }, packet.rssi), " dBm") : null);
-  const hopsText = packet.payload_type_name === "TRACE" ? `${packet.hops} hop(s) traced`
-    : packet.hops === 0 ? "0 hops (no relay)" : `${packet.hops} hop${packet.hops === 1 ? "" : "s"}`;
-  const card = el("div", { class: `pkt${fresh ? " fresh" : ""}${packet.id === state.selectedId ? " selected" : ""}`, style: `--type-color:${color}`, "data-id": packet.id },
-    el("div", { class: "row" },
-      el("span", { class: "badge" }, packet.payload_type_name),
-      el("span", { class: "who" }, packetTitle(packet)),
-      packet.channel_name ? el("span", { class: "channel" }, `#${packet.channel_name}`) : null,
-      el("span", { class: "time" }, fmtTime(packet.received_at))),
-    el("div", { class: "row" },
-      signal,
-      el("span", { class: "hops" }, hopsText),
-      el("span", { class: "badge route" }, packet.route),
-      packet.advert && packet.advert.lat != null ? el("span", { class: "badge route" }, "GPS") : null,
-      packet.seen_count > 1 ? el("span", { class: "badge dup", title: "Same packet heard via several paths" }, `heard ${packet.seen_count}×`) : null),
-    packet.message ? el("div", { class: "message" }, packet.message) : null,
-    pathView(packet),
-    el("div", { class: "details" }, detailRows(packet)));
+  const meta = packetMeta(packet);
+  const title = packetTitle(packet);
+  const selected = packet.id === state.selectedId;
+  const detailsId = `pkt-${packet.id}-details`;
+  const card = el("li", { class: `pkt${fresh ? " fresh" : ""}${selected ? " selected" : ""}`, style: `--c:${meta.color}`, "data-id": packet.id },
+    el("button", { class: "pkt-head", type: "button", "aria-expanded": String(selected), "aria-controls": detailsId },
+      el("span", { class: "pkt-top" },
+        el("span", { class: "chip", title: packet.payload_type_name }, meta.label),
+        el("span", { class: `pkt-who${title.muted ? " muted" : ""}` }, title.text),
+        packet.channel_name ? el("span", { class: "pkt-chan" }, `#${packet.channel_name}`) : null,
+        el("time", { class: "pkt-time", datetime: new Date(packet.received_at * 1000).toISOString(), title: new Date(packet.received_at * 1000).toLocaleString() },
+          fmtTime(packet.received_at))),
+      packet.message ? el("span", { class: "pkt-msg" }, packet.message) : null,
+      routeChain(packet),
+      el("span", { class: "pkt-meta" },
+        signalView(packet),
+        el("span", {}, hopsText(packet)),
+        packet.advert && packet.advert.lat != null ? el("span", { class: "tag" }, "GPS") : null,
+        packet.seen_count > 1 ? el("span", { class: "tag warn", title: "The same packet was heard over several paths" }, `Heard ${packet.seen_count}×`) : null)),
+    el("div", { class: "pkt-details", id: detailsId, hidden: !selected }));
+  if (selected) fillDetails(card, packet);
   return card;
 }
 
 function matchesFilter(packet) {
-  const type = document.getElementById("type-filter").value;
-  if (type && packet.payload_type_name !== type) return false;
-  const query = document.getElementById("filter").value.trim().toLowerCase();
+  if (state.typeFilter.size && !state.typeFilter.has(packet.payload_type_name)) return false;
+  const query = $("filter").value.trim().toLowerCase();
   if (!query) return true;
-  const haystack = [packetTitle(packet), packet.hash, packet.message, packet.channel_name, packet.raw,
-    ...(packet.path || []), ...(packet.path_nodes || []).map((h) => h.name)].filter(Boolean).join(" ").toLowerCase();
+  const refs = [packet.origin, packet.heard_from, ...(packet.path_nodes || [])].filter(Boolean);
+  const haystack = [packetTitle(packet).text, packetMeta(packet).label, packet.payload_type_name, packet.hash, packet.message,
+    packet.channel_name, packet.raw, ...(packet.path || []), ...refs.flatMap((r) => [r.name, r.node_id])]
+    .filter(Boolean).join(" ").toLowerCase();
   return haystack.includes(query);
 }
 
+function emptyState() {
+  const filtered = state.packets.length > 0;
+  return el("li", { class: "empty" },
+    el("span", { html: icon(filtered ? "search" : "radio") }),
+    el("strong", {}, filtered ? "No matching packets" : "Listening for packets…"),
+    filtered ? "Try a different search or packet type." : "Packets the radio hears will appear here as they arrive.");
+}
+
 function renderList() {
-  const list = document.getElementById("packets");
+  const list = $("packets");
   const visible = state.packets.filter(matchesFilter).slice(-MAX_RENDERED).reverse();
-  list.replaceChildren(...(visible.length ? visible.map((p) => packetCard(p, false)) : [el("div", { class: "empty" }, state.packets.length ? "No packets match the filter" : "Waiting for packets…")]));
+  list.replaceChildren(...(visible.length ? visible.map((p) => packetCard(p, false)) : [emptyState()]));
+  state.unseen = 0;
+  updateNewPill();
 }
 
 function prependPacket(packet) {
-  if (state.paused || !matchesFilter(packet)) return;
-  const list = document.getElementById("packets");
-  const empty = list.querySelector(".empty");
-  if (empty) empty.remove();
-  list.prepend(packetCard(packet, true));
-  while (list.children.length > MAX_RENDERED) list.lastChild.remove();
-}
-
-function refreshTypeFilter() {
-  const select = document.getElementById("type-filter");
-  const known = new Set([...select.options].map((o) => o.value));
-  for (const packet of state.packets) {
-    if (!known.has(packet.payload_type_name)) {
-      known.add(packet.payload_type_name);
-      select.append(el("option", { value: packet.payload_type_name }, packet.payload_type_name));
-    }
+  if (!matchesFilter(packet)) return;
+  if (state.paused) { state.pausedCount++; updatePauseButton(); return; }
+  const list = $("packets");
+  list.querySelector(".empty")?.remove();
+  // Keep what the reader is looking at in place when they've scrolled down the list.
+  const anchored = list.scrollTop > 4;
+  const before = list.scrollHeight;
+  list.prepend(packetCard(packet, !anchored));
+  if (anchored) {
+    list.scrollTop += list.scrollHeight - before;
+    state.unseen++;
+    updateNewPill();
   }
+  while (list.children.length > MAX_RENDERED) list.lastElementChild.remove();
 }
 
-function updatePacketStats() {
-  const cutoff = Date.now() / 1000 - 60;
-  document.getElementById("stat-packets").textContent = state.packets.length;
-  document.getElementById("stat-rate").textContent = state.packets.filter((p) => p.received_at >= cutoff).length;
+function updateNewPill() {
+  const pill = $("new-pill");
+  pill.hidden = state.unseen === 0;
+  pill.innerHTML = `${icon("arrowUp")}${esc(plural(state.unseen, "new packet", "new packets"))}`;
 }
+$("new-pill").addEventListener("click", () => $("packets").scrollTo({ top: 0, behavior: reducedMotion.matches ? "auto" : "smooth" }));
+$("packets").addEventListener("scroll", (event) => {
+  if (state.unseen && event.target.scrollTop <= 4) { state.unseen = 0; updateNewPill(); }
+}, { passive: true });
 
-document.getElementById("packets").addEventListener("click", (event) => {
-  if (event.target.closest(".details")) return;  // let people select text in details
-  const card = event.target.closest(".pkt");
-  if (!card) return;
-  const id = Number(card.dataset.id);
-  state.selectedId = state.selectedId === id ? null : id;
-  document.querySelectorAll(".pkt.selected").forEach((n) => n.classList.remove("selected"));
-  if (state.selectedId !== null) card.classList.add("selected");
-  showSelectedRoute();
-});
-document.getElementById("filter").addEventListener("input", renderList);
-document.getElementById("type-filter").addEventListener("change", renderList);
-document.getElementById("pause").addEventListener("click", (event) => {
+function updatePauseButton() {
+  const button = $("pause");
+  button.setAttribute("aria-pressed", String(state.paused));
+  button.title = state.paused ? "Resume the live list" : "Pause the live list (the map keeps updating)";
+  button.setAttribute("aria-label", state.paused ? `Resume the live list${state.pausedCount ? ` (${state.pausedCount} new)` : ""}` : "Pause the live list");
+  button.replaceChildren(
+    el("span", { html: icon(state.paused ? "play" : "pause") }),
+    el("span", { class: "btn-text" }, state.paused ? "Resume" : "Pause"),
+    ...(state.paused && state.pausedCount ? [el("span", { class: "badge", "aria-hidden": "true" }, state.pausedCount)] : []));
+}
+$("pause").addEventListener("click", () => {
   state.paused = !state.paused;
-  event.target.classList.toggle("active", state.paused);
-  event.target.textContent = state.paused ? "Resume" : "Pause";
+  state.pausedCount = 0;
+  updatePauseButton();
   if (!state.paused) renderList();
 });
 
-// --- Live updates ---------------------------------------------------------------
+const chipEls = new Map();
+function renderTypeChips() {
+  const counts = new Map();
+  for (const packet of state.packets) counts.set(packet.payload_type_name, (counts.get(packet.payload_type_name) || 0) + 1);
+  const rank = (type) => { const i = PACKET_TYPE_ORDER.indexOf(type); return i === -1 ? 99 : i; };
+  const types = [...counts.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  const wrap = $("type-chips");
+  if (types.join() !== [...chipEls.keys()].filter(Boolean).join()) {
+    chipEls.clear();
+    chipEls.set("", el("button", { class: "filter-chip", type: "button", "data-type": "" }, "All"));
+    for (const type of types) {
+      const meta = PACKET_TYPES[type] || { label: type, color: "#8b98a5" };
+      chipEls.set(type, el("button", { class: "filter-chip", type: "button", "data-type": type, title: type },
+        el("i", { style: `--c:${meta.color}`, "aria-hidden": "true" }), meta.label, el("span", { class: "n" }, "0")));
+    }
+    wrap.replaceChildren(...chipEls.values());
+  }
+  for (const [type, chip] of chipEls) {
+    chip.setAttribute("aria-pressed", String(type ? state.typeFilter.has(type) : state.typeFilter.size === 0));
+    if (type) chip.querySelector(".n").textContent = counts.get(type);
+  }
+  wrap.hidden = types.length === 0;
+}
+$("type-chips").addEventListener("click", (event) => {
+  const chip = event.target.closest(".filter-chip");
+  if (!chip) return;
+  const type = chip.dataset.type;
+  if (!type) state.typeFilter.clear();
+  else if (state.typeFilter.has(type)) state.typeFilter.delete(type);
+  else state.typeFilter.add(type);
+  renderTypeChips();
+  renderList();
+});
+
+function setSearch(query) {
+  $("filter").value = query;
+  renderList();
+  $("packets").scrollTop = 0;
+}
+$("filter").addEventListener("input", renderList);
+
+function selectPacket(id, focus) {
+  state.selectedId = id;
+  for (const card of document.querySelectorAll(".pkt.selected")) {
+    card.classList.remove("selected");
+    card.querySelector(".pkt-head").setAttribute("aria-expanded", "false");
+    card.querySelector(".pkt-details").hidden = true;
+  }
+  const packet = findPacket(id);
+  const card = id === null ? null : document.querySelector(`.pkt[data-id="${id}"]`);
+  if (card && packet) {
+    card.classList.add("selected");
+    card.querySelector(".pkt-head").setAttribute("aria-expanded", "true");
+    fillDetails(card, packet);
+    card.querySelector(".pkt-details").hidden = false;
+  }
+  const moved = showSelectedRoute(focus);
+  if (packet && focus) {
+    if (moved) map.once("moveend", () => playFlow(packet, true));
+    else playFlow(packet, true);
+  }
+}
+
+$("packets").addEventListener("click", (event) => {
+  const card = event.target.closest(".pkt");
+  if (!card) return;
+  const id = Number(card.dataset.id);
+  if (event.target.closest('[data-action="replay"]')) {
+    const packet = findPacket(id);
+    if (!packet) return;
+    if (!showSelectedRoute(true)) playFlow(packet, true);
+    else map.once("moveend", () => playFlow(packet, true));
+    return;
+  }
+  if (event.target.closest(".pkt-head")) selectPacket(state.selectedId === id ? null : id, true);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.selectedId !== null && !event.target.closest(".leaflet-popup")) selectPacket(null, false);
+});
+
+function updatePacketStats() {
+  const cutoff = Date.now() / 1000 - 60;
+  $("stat-packets").textContent = state.packets.length;
+  $("stat-rate").textContent = state.packets.filter((p) => p.received_at >= cutoff).length;
+}
+
+// --- Live updates ------------------------------------------------------------------------------
 
 function handleEvent(event) {
   if (event.type === "snapshot") {
     state.selfId = event.self_id;
-    for (const marker of markers.values()) marker.remove();
+    for (const { marker, layer } of markers.values()) layer.removeLayer(marker);
     markers.clear();
     state.nodes.clear();
-    event.nodes.forEach((n) => upsertNode(n));
+    event.nodes.forEach(upsertNode);
     state.packets = event.packets;
-    refreshTypeFilter();
+    renderTypeChips();
     renderList();
-    showSelectedRoute();
-    if (!state.fitted) fitToNodes();
+    showSelectedRoute(false);
   } else if (event.type === "nodes" || event.type === "self") {
     if (event.self_id) state.selfId = event.self_id;
-    (event.nodes || []).forEach((n) => upsertNode(n));
-    if (!state.fitted) fitToNodes();
+    (event.nodes || []).forEach(upsertNode);
   } else if (event.type === "packet") {
-    (event.nodes || []).forEach((n) => upsertNode(n));
+    (event.nodes || []).forEach(upsertNode);
     state.packets.push(event.packet);
     if (state.packets.length > 5000) state.packets.splice(0, state.packets.length - 5000);
-    refreshTypeFilter();
+    renderTypeChips();
     prependPacket(event.packet);
-    flashRoute(event.packet);
-    if (!state.fitted) fitToNodes();
+    playFlow(event.packet);
   }
+  if (!state.viewReady) autoFit();
   updateNodeStats();
   updatePacketStats();
 }
 
 function setStatus(live, text) {
-  document.getElementById("status").classList.toggle("live", live);
-  document.getElementById("status-text").textContent = text;
+  $("status").classList.toggle("live", live);
+  $("status-text").textContent = text;
 }
 
 function connect() {
@@ -491,6 +1242,12 @@ function connect() {
   };
 }
 
+buildTypeList();
+setPanelOpen(store.get("panelOpen", window.innerWidth > 700) !== false);
+applyTheme(currentTheme(), false);
+updatePauseButton();
+renderList();
+updateNodeStats();
 setInterval(updatePacketStats, 5000);
 connect();
 </script>
