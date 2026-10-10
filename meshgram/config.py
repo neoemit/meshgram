@@ -132,7 +132,7 @@ class WebConfig:
         It can reconfigure the radio and the plugins, so it must be behind a
         password unless only this machine can reach it.
         """
-        return bool(self.password) or _is_loopback(self.host)
+        return bool(self.password) or is_loopback_host(self.host)
 
 
 @dataclass(slots=True)
@@ -165,7 +165,7 @@ def canonical_plugin_name(name: Any) -> str:
     return str(name).strip().replace("-", "_")
 
 
-def _is_loopback(host: str) -> bool:
+def is_loopback_host(host: str) -> bool:
     if host.strip().lower() == "localhost":
         return True
     try:

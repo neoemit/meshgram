@@ -3,7 +3,9 @@
 Plugin settings come from config.yaml. Changes made in the web app are saved as
 overrides in ``$MESHGRAM_DATA_DIR/plugins.json`` and win over config.yaml until
 they're reset there. config.yaml itself is never rewritten: it holds secrets
-and is usually mounted read-only.
+and is usually mounted read-only. The web app offers config.yaml with the
+overrides in it instead (``config_export``); once config.yaml says the same as
+an override, the override is dropped on startup.
 
 Reconfiguring a plugin restarts it: the running instance gets ``on_shutdown``,
 a new one is created with the new settings and gets ``on_startup`` (and
@@ -117,6 +119,16 @@ class PluginEntry:
         return schema if isinstance(schema, dict) else {"type": "object"}
 
 
+def _differences(entry: PluginEntry, override: dict[str, Any]) -> dict[str, Any]:
+    """The part of ``override`` that differs from config.yaml."""
+    override = dict(override)
+    if override.get("enabled", entry.config_enabled) == entry.config_enabled:
+        override.pop("enabled", None)
+    if "settings" in override and override["settings"] == entry.config_settings:
+        override.pop("settings")
+    return override
+
+
 class PluginManager:
     def __init__(
         self,
@@ -147,18 +159,30 @@ class PluginManager:
             )
 
         overrides = store.load() if store is not None else {}
+        caught_up: list[str] = []
         for name, override in overrides.items():
             entry = self._entries.get(plugin_key(name))
             if entry is None:
                 LOGGER.warning("Ignoring saved settings for unknown plugin %s", name)
                 continue
-            entry.override = {key: override[key] for key in ("enabled", "settings") if key in override}
+            saved = {key: override[key] for key in ("enabled", "settings") if key in override}
+            entry.override = _differences(entry, saved)
+            if entry.override != saved:
+                caught_up.append(entry.name)
             if entry.override:
                 LOGGER.info(
                     "Plugin %s: using %s saved from the web app (reset it there to use config.yaml)",
                     entry.name,
                     " and ".join("its settings" if key == "settings" else "on/off state" for key in entry.override),
                 )
+
+        if caught_up and store is not None:
+            # config.yaml has the web app's changes now (copied from its export, say).
+            LOGGER.info("Plugin settings saved from the web app that config.yaml now has: dropped (%s)", ", ".join(caught_up))
+            try:
+                store.save(self.overrides())
+            except OSError as exc:
+                LOGGER.warning("Couldn't update %s: %s", store.path, exc)
 
         for entry in self._entries.values():
             self._load_class(entry)
@@ -179,6 +203,10 @@ class PluginManager:
 
     def catalog(self) -> list[dict[str, Any]]:
         return [self._describe(entry) for entry in self._entries.values()]
+
+    def overrides(self) -> dict[str, dict[str, Any]]:
+        """The web app's changes by plugin (``enabled`` and/or ``settings``), secrets included."""
+        return {entry.name: copy.deepcopy(entry.override) for entry in self._entries.values() if entry.override}
 
     def _entry(self, name: str) -> PluginEntry:
         entry = self._entries.get(plugin_key(name))
@@ -307,11 +335,7 @@ class PluginManager:
                 override["settings"] = settings
             if enabled is not None:
                 override["enabled"] = bool(enabled)
-            # Only keep what differs from config.yaml.
-            if override.get("enabled", entry.config_enabled) == entry.config_enabled:
-                override.pop("enabled", None)
-            if "settings" in override and override["settings"] == entry.config_settings:
-                override.pop("settings")
+            override = _differences(entry, override)
 
             self._save(entry.name, override)
             previous_settings = entry.settings

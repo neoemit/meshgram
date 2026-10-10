@@ -566,20 +566,28 @@ web:
 
 **Connections (header):** a status dot for each service Meshgram connects to: the **radio**, the **Telegram** bot and, with the `meshmapper` plugin, the MeshMapper MQTT connections for **publishing** (MQTT ↑) and **subscribing** (MQTT ↓), and the MeshMapper **live feed**. Green is connected, amber is connecting, red is disconnected, and a hollow dot means turned off. Click it for details. If the page loses its connection to Meshgram, the dots turn hollow grey until it reconnects.
 
-**Control panel** (`#control`), in four tabs:
+**Control panel** (`#control`), in five tabs:
 
 - **Radio** — status (name, public key, model and firmware, battery and storage, uptime, noise floor, last RSSI/SNR, airtime, packet counters, clock drift) and actions: send a zero-hop or flood advert, set the radio's clock from the computer, reboot. Forms for the name and position (and whether adverts share it), the LoRa parameters (frequency, bandwidth, spreading factor, coding rate) and TX power, contact auto-add, extra ACKs, telemetry sharing, the path hash size (on firmware that supports it), and the RX delay / airtime factor tuning.
 - **Channels** — the channel slots with each channel's type, hash and which plugins use it. **Add a channel by name**: a hashtag channel (`#local`: the key comes from the name, so everyone who adds the same hashtag shares it), a private channel (paste the key someone shared, or leave it empty for a new random one), or the well-known Public channel. Rename, change a private channel's key, copy a key to share it, remove a channel, and send a message to a channel from the radio.
 - **Contacts** — the radio's contacts with type, key, last advert and route; search and filter by type, reset a route (the next message floods to find a new one), or remove a contact.
 - **Plugins** — every plugin with its state. Turn one on or off, or edit its settings in a form built from the plugin's schema. Saving applies them right away: a plugin that can take the change while running does (the Packet map's shown packet types, for example), the others restart with it. A link like `#control/plugins/packet_map` opens a plugin's settings directly. Secrets (passwords, tokens, API headers) are never sent to the browser: they show as "Saved", and are kept unless you type a new value.
+- **Config file** — your `config.yaml` with the plugin changes made in the panel written into it, to make them the defaults. It lists which plugins differ, shows the changes as a diff (or the whole file), and has **Copy** and **Download** buttons. Only the changed plugins' `enabled` and `settings` are rewritten: comments, quoting and layout stay as they are, and the result is checked by loading it back the way Meshgram does. Replace `config.yaml` with it and restart Meshgram.
 
-Changes to the radio are stored on the radio itself. Plugin changes are saved in `MESHGRAM_DATA_DIR/plugins.json` (mode `600`) and win over `config.yaml` until you click **Reset to config.yaml** on the plugin; a plugin changed this way is tagged *Changed here*. config.yaml is never rewritten (it holds secrets and Docker mounts it read-only).
+Changes to the radio are stored on the radio itself. Plugin changes are saved in `MESHGRAM_DATA_DIR/plugins.json` (mode `600`) and win over `config.yaml` until you click **Reset to config.yaml** on the plugin; a plugin changed this way is tagged *Changed here*. config.yaml is never rewritten (it holds secrets and Docker mounts it read-only); the **Config file** tab gives you the file to put in its place instead. Once `config.yaml` says the same as a saved change, Meshgram drops that change from `plugins.json` when it starts.
+
+Without a browser, the same file comes from `GET /api/config.yaml`, for example on the Meshgram host:
+
+```bash
+curl -fsS -u ":$PASSWORD" http://127.0.0.1:8080/api/config.yaml -o config.new.yaml   # review, then: mv config.new.yaml config.yaml
+```
 
 **Security.**
 
 - The control panel can reconfigure the radio, so it only changes anything when the web app has a **`password`** or listens on `127.0.0.1` only. Otherwise it's read-only and says so (the map and lists still work). Use a TLS reverse proxy when it's reachable beyond your LAN: Basic auth sends the password in the clear over plain HTTP.
 - Changes must come from the page itself: requests that change something need a JSON body and a same-origin `Origin` / `Sec-Fetch-Site`, so another site can't submit them with your saved credentials (CSRF). The page can't be framed (`X-Frame-Options`, CSP `frame-ancestors`).
 - The page shows decrypted channel messages, node positions and (with changes allowed) channel keys; protect it accordingly.
+- The **Config file** tab hands out `config.yaml`, secrets included, so it follows the rules for changes: only with a password or on `127.0.0.1`, only to the page itself (or a client like `curl`), and without a password only when the page is opened as `localhost` / `127.0.0.1` (so a site whose name resolves to your machine can't read it).
 
 The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access. It has light and dark themes, works on phones, and remembers the map position, hidden node types, table sort order, theme and control panel tab across refreshes. The view is part of the URL (`#map`, `#messages`, `#control/channels`, …), so refresh and Back work.
 
@@ -593,7 +601,7 @@ The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from Op
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and chunk sequencing, ping keyword behavior, trace-me responses, DM HTTP command, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / persistence, the web server (auth, CSRF and read-only rules, event stream), the control panel API, radio administration against a simulated radio, settings schemas and secret masking, and runtime plugin management.
+Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and chunk sequencing, ping keyword behavior, trace-me responses, DM HTTP command, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / persistence, the web server (auth, CSRF and read-only rules, event stream), the control panel API, radio administration against a simulated radio, settings schemas and secret masking, runtime plugin management, and exporting config.yaml with the control panel's changes (comments kept, read back the way Meshgram loads it).
 
 ---
 
@@ -623,7 +631,7 @@ Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji 
 - Set `web.password` (or listen on `127.0.0.1` only); the banner at the top of the panel says the same.
 
 ### A plugin ignores what's in `config.yaml`
-- It was changed in the control panel: its card says *Changed here*. Click **Reset to config.yaml** in its settings, or delete its entry from `MESHGRAM_DATA_DIR/plugins.json` while Meshgram is stopped.
+- It was changed in the control panel: its card says *Changed here*. Click **Reset to config.yaml** in its settings, or delete its entry from `MESHGRAM_DATA_DIR/plugins.json` while Meshgram is stopped. To keep the change instead, put it in `config.yaml` from the **Config file** tab.
 
 ### Sender label shows the raw node ID
 - Expected when peer metadata is missing.
@@ -662,6 +670,8 @@ meshgram/
 │   ├── app.py
 │   ├── config.py
 │   ├── migrate_config.py         # one-off .env → config.yaml migration
+│   ├── config_export.py          # config.yaml with the control panel's plugin changes
+│   ├── yaml_round_trip.py        # editing YAML with its comments and layout kept
 │   ├── plugin.py                 # BasePlugin, built-in plugin registry
 │   ├── plugin_manager.py         # runs plugins; runtime on/off and settings (plugins.json)
 │   ├── settings_schema.py        # JSON Schema subset: validation, secret masking

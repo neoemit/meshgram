@@ -28,10 +28,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence, TextIO
 
 import yaml
 from dotenv import dotenv_values
-from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
-from ruamel.yaml.scalarstring import DoubleQuotedScalarString, ScalarString
-from ruamel.yaml.util import load_yaml_guess_indent
 
 from .config import (
     CONFIG_PATH_ENV,
@@ -44,12 +41,12 @@ from .config import (
     build_settings,
 )
 from .plugins.dm_http_command import ENV_TEMPLATE_PATTERN
+from .yaml_round_trip import MISSING, round_trip_yaml, same, yaml_value
 
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_OUTPUT = "config.migrated.yaml"
 PLUGIN_SEGMENT = re.compile(r"plugins\[(\w+)\]")
 STALE_COMMENT = re.compile(r"#.*(?:\.env\b|\b(?:%s)\b)" % "|".join(LEGACY_ENV_VARS))
-MISSING: Any = object()
 
 
 class MigrationError(Exception):
@@ -164,28 +161,6 @@ def _plugin_entries(data: CommentedMap, plugin: str) -> list[CommentedMap]:
     ]
 
 
-def _plain_is_safe(value: str) -> bool:
-    """Whether a YAML 1.1 reader (PyYAML) reads ``value`` back unquoted as the same string."""
-    try:
-        return yaml.safe_load(value) == value
-    except yaml.YAMLError:
-        return False
-
-
-def _yaml_value(value: Any, old: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    if isinstance(old, ScalarString):
-        return type(old)(value)  # Keep the quoting style already in the file.
-    # Quote what PyYAML would take for something else, like "on", "12:30" or "0x1f".
-    return value if _plain_is_safe(value) else DoubleQuotedScalarString(value)
-
-
-def _same(old: Any, new: Any) -> bool:
-    # Keep True apart from 1, which compare equal in Python.
-    return old is not MISSING and isinstance(old, bool) == isinstance(new, bool) and old == new
-
-
 class _Migration:
     """Moves settings from ``env`` into ``data`` (a round-trip YAML mapping), in place."""
 
@@ -244,9 +219,9 @@ class _Migration:
     def _set(self, mapping: CommentedMap, key: str, value: Any, *, path: str, source: str, secret: bool) -> None:
         old = mapping.get(key, MISSING)
         self.report.changes.append(Change(path, source, old, value, secret))
-        if _same(old, value):
+        if same(old, value):
             return  # Leave the original formatting alone.
-        new = _yaml_value(value, old)
+        new = yaml_value(value, old)
         if key in mapping:
             mapping[key] = new
         else:
@@ -346,7 +321,7 @@ class _Migration:
         position = list(auth).index(key)
         comment = auth.ca.items.pop(key, None)
         del auth[key]
-        auth.insert(position, "token", _yaml_value(found[0], MISSING))
+        auth.insert(position, "token", yaml_value(found[0], MISSING))
         if comment is not None:
             auth.ca.items["token"] = comment
         self.report.changes.append(Change(f"{path}.token", f"{name} ({found[1]})", MISSING, found[0], True))
@@ -378,30 +353,6 @@ class _Migration:
 def migrate(data: CommentedMap, env: EnvValues) -> Report:
     """Move the settings ``env`` holds into ``data`` (a round-trip YAML mapping), in place."""
     return _Migration(data, env).run()
-
-
-def _guess_mapping_indent(text: str) -> int:
-    # The first indented key; ruamel's guess only covers sequences.
-    for line in text.splitlines():
-        stripped = line.lstrip(" ")
-        if stripped and len(stripped) < len(line) and not stripped.startswith(("#", "-")):
-            return len(line) - len(stripped)
-    return 2
-
-
-def _round_trip_yaml(text: str) -> YAML:
-    """A YAML loader/dumper that keeps comments, quoting and the file's indentation."""
-    mapping_indent = _guess_mapping_indent(text)
-    _, sequence_indent, sequence_offset = load_yaml_guess_indent(text)
-    round_trip = YAML()
-    round_trip.preserve_quotes = True
-    round_trip.width = 4096
-    round_trip.indent(
-        mapping=mapping_indent,
-        sequence=sequence_indent or mapping_indent,
-        offset=sequence_offset or 0,
-    )
-    return round_trip
 
 
 def _validate(text: str, path: str) -> str | None:
@@ -441,7 +392,7 @@ def _show(value: Any) -> str:
 
 
 def _describe(change: Change) -> str:
-    unchanged = _same(change.old, change.new)
+    unchanged = same(change.old, change.new)
     if change.secret:
         return "(hidden, unchanged)" if unchanged else "(hidden)"
     if unchanged:
@@ -511,7 +462,7 @@ def run(args: argparse.Namespace, *, environ: Mapping[str, str], out: TextIO | N
         )
 
     text = config_path.read_text(encoding="utf-8")
-    round_trip = _round_trip_yaml(text)
+    round_trip = round_trip_yaml(text)
     data = round_trip.load(text)
     if data is None:
         data = CommentedMap()

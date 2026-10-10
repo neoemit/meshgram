@@ -153,6 +153,26 @@ class PluginManagerTests(unittest.IsolatedAsyncioTestCase):
         await restarted.stop_all()
         await manager.stop_all()
 
+    async def test_saved_changes_config_yaml_has_caught_up_with_are_dropped(self):
+        manager = self._manager(enabled=False)
+        await manager.update(TARGET, enabled=True, settings={"greeting": "web", "token": SECRET_MASK})
+        self.assertEqual(manager.overrides(), {TARGET: {"enabled": True, "settings": {"greeting": "web", "token": "s3cret"}}})
+
+        # config.yaml now has the settings (copied from the export), not the on/off state.
+        with self.assertLogs("meshgram.plugin_manager", "INFO") as logs:
+            restarted = self._manager(enabled=False, settings={"greeting": "web", "token": "s3cret"})
+        self.assertIn("now has: dropped (" + TARGET + ")", "\n".join(logs.output))
+        self.assertEqual(restarted.overrides(), {TARGET: {"enabled": True}})
+        self.assertEqual(restarted.describe(TARGET)["overridden"], ["enabled"])
+        self.assertEqual(json.loads(self.path.read_text())["plugins"], {TARGET: {"enabled": True}})
+
+        # And the on/off state too: nothing left.
+        with self.assertLogs("meshgram.plugin_manager", "INFO"):
+            caught_up = self._manager(enabled=True, settings={"greeting": "web", "token": "s3cret"})
+        self.assertEqual(caught_up.overrides(), {})
+        self.assertEqual(json.loads(self.path.read_text())["plugins"], {})
+        await manager.stop_all()
+
     async def test_plugins_that_can_take_settings_live_keep_running(self):
         manager = PluginManager([PluginConfig(name=LIVE_TARGET, settings={"greeting": "config"})], self.host, PluginOverrideStore(self.path))
         await manager.start_all()

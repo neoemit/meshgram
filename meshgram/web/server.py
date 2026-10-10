@@ -8,6 +8,7 @@ Security: with ``web.password`` set, every request needs HTTP Basic auth.
 Requests that change something (POST/PUT/PATCH/DELETE) must also come from the
 page itself (same origin, JSON body), and are refused outright when the server
 listens beyond this machine without a password (see ``WebConfig.allows_changes``).
+Reading secrets (the config export) takes the same, see ``check_secret_access``.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from ..config import WebConfig
+from ..config import WebConfig, is_loopback_host
 from ..status import StatusRegistry
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,10 @@ SSE_QUEUE_SIZE = 500
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 READ_ONLY_REASON = (
     "The control panel is read-only: set web.password in config.yaml to change settings "
+    "from a browser (or listen on 127.0.0.1 only)"
+)
+SECRETS_REASON = (
+    "config.yaml holds secrets: set web.password in config.yaml to see it "
     "from a browser (or listen on 127.0.0.1 only)"
 )
 # Leaflet comes from unpkg; map tiles may come from any server.
@@ -377,6 +382,20 @@ class WebServer:
         if path_matched:
             return _error(405, "Method not allowed")
         return _error(404, "Not found")
+
+    def check_secret_access(self, request: Request) -> None:
+        """Refuse a read that hands out secrets unless it's as safe as a change would be."""
+        if not self._same_origin(request.headers):
+            raise HttpError(403, "Only the Meshgram page itself can read this")
+        if not self.config.allows_changes:
+            raise HttpError(403, SECRETS_REASON)
+        if not self.config.password:
+            # Only this machine can connect, but a page from any site can: if
+            # that site's name resolves to 127.0.0.1 (DNS rebinding), its
+            # requests count as same-origin. The Host header gives it away.
+            host = urlsplit(f"//{request.headers.get('host', '')}").hostname or ""
+            if not is_loopback_host(host):
+                raise HttpError(403, "Open Meshgram as localhost or 127.0.0.1 to read this")
 
     def _check_change_allowed(self, request: Request) -> None:
         if not self._same_origin(request.headers):

@@ -298,6 +298,74 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, plugin["enabled"], plugin["running"]), (200, False, False))
         self.assertEqual(self.announced(), ["plugins", "plugins"])
 
+    def write_config(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        path = Path(tempdir.name) / "config.yaml"
+        path.write_text(
+            'telegram:\n  bot_token: "t"\n  group_id: -1\n\n'
+            "plugins:\n  - name: bridge\n  - name: ping_pong\n    settings:\n      # Slots it answers on.\n      channels: [1]\n",
+            encoding="utf-8",
+        )
+        self.settings.config_path = str(path)
+        return path
+
+    async def test_config_export(self):
+        path = self.write_config()
+        status, body = await self.call("GET", "/api/config")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["yaml"], path.read_text(encoding="utf-8"))
+        self.assertEqual((body["diff"], body["changes"], body["saved"], body["problems"]), ("", [], [], []))
+        self.assertEqual(body["path"], str(path.absolute()))
+
+        await self.call("PATCH", "/api/plugins/ping_pong", {"settings": {"channels": [1, 2]}})
+        await self.call("PATCH", "/api/plugins/trace_me", {"enabled": True})
+        status, body = await self.call("GET", "/api/config")
+        self.assertIn("      # Slots it answers on.\n      channels: [1, 2]\n", body["yaml"])
+        self.assertIn("  - name: trace_me\n    enabled: true\n", body["yaml"])
+        self.assertIn("+      channels: [1, 2]", body["diff"])
+        self.assertEqual(body["changes"], [
+            {"name": "ping_pong", "title": "Keyword replies", "enabled": None, "settings": True},
+            {"name": "trace_me", "title": "Trace replies", "enabled": True, "settings": False},
+        ])
+        self.assertEqual([plugin["name"] for plugin in body["saved"]], ["ping_pong", "trace_me"])
+
+        # The same file as a download.
+        status, headers, payload = await http(self.web.port, "GET", "/api/config.yaml")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "application/yaml; charset=utf-8")
+        self.assertEqual(headers["content-disposition"], 'attachment; filename="config.yaml"')
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(payload.decode("utf-8"), body["yaml"])
+
+        path.unlink()
+        status, error = await self.call("GET", "/api/config")
+        self.assertEqual(status, 409)
+        self.assertIn("Can't read", error["error"])
+
+    async def test_config_export_holds_secrets(self):
+        self.write_config()
+        # Not from another site, nor through a name that resolves to this machine (DNS rebinding).
+        for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Host": f"rebind.example:{self.web.port}"}):
+            for path in ("/api/config", "/api/config.yaml"):
+                status, _, _ = await http(self.web.port, "GET", path, headers=headers)
+                self.assertEqual(status, 403, (headers, path))
+        status, _, _ = await http(self.web.port, "GET", "/api/config", headers={"Host": f"localhost:{self.web.port}"})
+        self.assertEqual(status, 200)
+
+        # Behind a password, any host name will do.
+        self.web.config.password = "pw"
+        auth = {"Authorization": "Basic " + base64.b64encode(b"x:pw").decode()}
+        status, _, _ = await http(self.web.port, "GET", "/api/config", headers={**auth, "Host": "meshgram.lan"})
+        self.assertEqual(status, 200)
+
+        # Read-only: on the network without a password.
+        self.web.config.password = ""
+        self.web.config.host = "0.0.0.0"
+        status, error = await self.call("GET", "/api/config")
+        self.assertEqual(status, 403)
+        self.assertIn("holds secrets", error["error"])
+
 
 class HelperTests(unittest.TestCase):
     def test_message_max_bytes_follows_chunking(self):

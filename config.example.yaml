@@ -77,7 +77,8 @@ chunking:
 
 # Plugins can also be turned on and off and reconfigured in the web app's
 # control panel. Those changes are saved in MESHGRAM_DATA_DIR/plugins.json and
-# win over what's here until you reset them there.
+# win over what's here until you reset them there. To keep them as defaults,
+# its Config file tab gives you this file with them written in.
 plugins:
   - name: bridge
     enabled: true

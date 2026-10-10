@@ -16,6 +16,9 @@
     GET    /api/plugins                               every plugin with its schema and (masked) settings
     PATCH  /api/plugins/{name}                        {"enabled"?, "settings"?}
     DELETE /api/plugins/{name}/overrides              back to config.yaml
+    GET    /api/config                                config.yaml with the plugin changes in it, what
+                                                      changes, and a diff (secrets included)
+    GET    /api/config.yaml                           the same file, as a download
 
 Errors are ``{"error": message, "details"?: ...}`` with a fitting status code.
 Successful changes are announced to every open page as ``{"type": "control",
@@ -23,11 +26,14 @@ Successful changes are announced to every open page as ``{"type": "control",
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..config import MeshgramSettings
+from ..config_export import ConfigExport, ConfigExportError, export_config
 from ..plugin import CHANNEL_FORMAT
 from ..plugin_manager import PluginManager, UnknownPluginError
 from ..radio_admin import RadioAdmin, RadioAdminError
@@ -274,3 +280,49 @@ def register_control_api(
             raise HttpError(500, f"Couldn't save the change: {exc}") from None
         announce("plugins")
         return json_response(plugin)
+
+    # --- Config file ----------------------------------------------------------------------------
+
+    async def exported_config(request: Request) -> ConfigExport:
+        web.check_secret_access(request)
+        path = settings.config_path
+        try:
+            text = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
+        except OSError as exc:
+            raise HttpError(409, f"Can't read {path}: {exc.strerror or exc}") from None
+        try:
+            return await asyncio.to_thread(export_config, text, plugins.overrides(), path=path)
+        except ConfigExportError as exc:
+            raise HttpError(409, str(exc)) from None
+
+    def plugin_title(name: str) -> str:
+        try:
+            return plugins.describe(name)["title"]
+        except UnknownPluginError:
+            return name  # Added to config.yaml since Meshgram started.
+
+    @route("GET", "/api/config")
+    async def get_config(request: Request) -> Response:
+        export = await exported_config(request)
+        return json_response({
+            "path": str(Path(settings.config_path).absolute()),
+            "yaml": export.text,
+            "diff": export.diff,
+            "changes": [
+                {"name": change.name, "title": plugin_title(change.name), "enabled": change.enabled, "settings": change.settings}
+                for change in export.changes
+            ],
+            # Plugins with changes saved in the data directory (config.yaml may have them already).
+            "saved": [{"name": name, "title": plugin_title(name)} for name in plugins.overrides()],
+            "problems": export.problems,
+        })
+
+    @route("GET", "/api/config.yaml")
+    async def get_config_yaml(request: Request) -> Response:
+        export = await exported_config(request)
+        return Response(
+            200,
+            export.text.encode("utf-8"),
+            "application/yaml; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="config.yaml"'},
+        )

@@ -1,11 +1,12 @@
 "use strict";
-// Control panel: the radio's settings, channels and contacts, and the plugins.
+// Control panel: the radio's settings, channels and contacts, the plugins, and
+// config.yaml with the plugin changes made here.
 // Talks to the JSON API in meshgram/web/api.py. Loaded after the page's main
 // script and uses its helpers ($, el, icon, store, fmtAgo, plural, NODE_TYPES)
 // and state (controlState, connections, currentView).
 
 (() => {
-  const SECTIONS = ["radio", "channels", "contacts", "plugins"];
+  const SECTIONS = ["radio", "channels", "contacts", "plugins", "config"];
   const SECRET_MASK = "••••••••";
   const BANDWIDTHS = [7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125, 250, 500];
   const TELEMETRY = [[0, "Nobody"], [1, "Contacts allowed to"], [2, "Everyone"]];
@@ -16,7 +17,7 @@
   const savedSection = store.get("controlSection", "radio");
   const ui = {
     section: SECTIONS.includes(savedSection) ? savedSection : "radio",
-    data: { radio: null, channels: null, contacts: null, plugins: null },
+    data: { radio: null, channels: null, contacts: null, plugins: null, config: null },
     errors: {},
     loading: {},
     stale: new Set(SECTIONS),
@@ -29,6 +30,7 @@
     radioState: null,
     allows: null,
     focusPlugin: null,         // plugin whose settings a #control/plugins/<name> link opened
+    configView: null,          // "diff" or "file": what the config file section shows
   };
   let uid = 0;
   const nextId = (prefix) => `c-${prefix}-${++uid}`;
@@ -316,7 +318,8 @@
     }
     if (location.hash !== `#control/${section}`) history.replaceState(history.state, "", `#control/${section}`);
     render(section);
-    if (ui.stale.has(section) || ui.errors[section]) load(section);
+    // config.yaml can change on disk without anyone saying so.
+    if (ui.stale.has(section) || ui.errors[section] || section === "config") load(section);
   }
 
   const panelDirty = (section) => Boolean($(`cpanel-${section}`).querySelector("form[data-dirty]"));
@@ -341,6 +344,9 @@
         ]);
         ui.data.plugins = plugins;
         if (channels) ui.data.channels = channels;
+      } else if (section === "config") {
+        // It holds secrets, so the server only hands it out where settings can be changed.
+        ui.data.config = canChange() ? await api("GET", "api/config") : { locked: true };
       }
       ui.errors[section] = null;
     } catch (err) {
@@ -358,7 +364,7 @@
     const view = $("view-control");
     const scrollTop = view.scrollTop;
     if (!ui.data[section]) panel.replaceChildren(placeholder(section));
-    else ({ radio: renderRadio, channels: renderChannels, contacts: renderContacts, plugins: renderPlugins })[section](panel);
+    else ({ radio: renderRadio, channels: renderChannels, contacts: renderContacts, plugins: renderPlugins, config: renderConfig })[section](panel);
     view.scrollTop = scrollTop;
     if (section === "plugins") revealLinkedPlugin(panel);
   }
@@ -731,32 +737,53 @@
   }
 
   function composerCard(data) {
-    const channel = selectInput(data.channels.map((c) => [c.index, `${c.name} (slot ${c.index})`]), store.get("composerChannel", data.channels[0].index));
-    const text = el("input", { type: "text", placeholder: "Message", autocomplete: "off", "aria-label": "Message" });
+    const remembered = store.get("composerChannel", data.channels[0].index);
+    const initial = data.channels.some((c) => c.index === remembered) ? remembered : data.channels[0].index;
+    const channel = selectInput(data.channels.map((c) => [c.index, c.name]), initial, { "aria-label": "Channel" });
+    const text = el("textarea", { rows: 2, autocomplete: "off", "aria-label": "Message", "aria-keyshortcuts": "Enter" });
     const counter = el("span", { class: "counter", "aria-live": "polite" });
     const max = data.message_max_bytes;
+    const channelName = () => channel.selectedOptions[0].textContent;
     const update = () => {
-      const bytes = utf8Bytes(text.value);
+      const bytes = utf8Bytes(text.value.trim());
       counter.textContent = `${bytes} / ${max} bytes`;
-      counter.classList.toggle("over", bytes > max);
+      counter.dataset.level = bytes > max ? "over" : bytes >= max * 0.9 ? "near" : "";
+      text.placeholder = `Message ${channelName()}`;
+      // Grow with the text, up to the max-height in the stylesheet.
+      text.style.height = "auto";
+      text.style.height = `${text.scrollHeight}px`;
     };
-    update();
-    const send = el("button", { class: "btn btn-primary", type: "submit", "data-change": "", html: `${icon("send")}<span>Send</span>` });
+    const send = el("button", { class: "btn btn-sm btn-primary", type: "submit", "data-change": "", html: `${icon("send")}<span>Send</span>` });
     const form = el("form", { class: "card" },
       el("div", { class: "card-head" }, el("h3", {}, "Send a message"), el("span", { class: "sub" }, "From this radio, not relayed to Telegram")),
       el("div", { class: "card-body" },
-        el("div", { class: "composer" }, channel, el("div", {}, text, counter), send)));
+        el("div", { class: "composer" },
+          text,
+          el("div", { class: "composer-bar" },
+            el("label", { class: "composer-to" }, el("span", { html: icon("radio") }), channel, el("span", { html: icon("chevron") })),
+            el("span", { class: "composer-send" }, counter, send))),
+        el("p", { class: "hint composer-hint" }, "Enter sends, Shift+Enter starts a new line.")));
     text.addEventListener("input", () => {
       update();
       // Don't wipe a half-written message when the channel list reloads.
       if (text.value) form.dataset.dirty = "1";
       else delete form.dataset.dirty;
     });
+    text.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    channel.addEventListener("change", () => {
+      store.set("composerChannel", Number(channel.value));
+      update();
+      text.focus();
+    });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!text.value.trim()) return;
-      store.set("composerChannel", Number(channel.value));
-      const name = channel.selectedOptions[0].textContent;
+      if (!text.value.trim() || send.disabled) return;
+      const name = channelName();
       const sent = await act(send, () => api("POST", `api/radio/channels/${channel.value}/messages`, { text: text.value }), `Sent to ${name}`);
       if (sent !== undefined) {
         text.value = "";
@@ -766,6 +793,7 @@
       }
     });
     disableIfReadOnly(form);
+    requestAnimationFrame(update);
     return form;
   }
 
@@ -852,7 +880,14 @@
 
   function renderPlugins(panel) {
     const plugins = ui.data.plugins.plugins;
-    panel.replaceChildren(el("div", { class: "plugin-list" }, ...plugins.map(pluginCard)));
+    const changed = plugins.some((plugin) => plugin.overridden.length);
+    const note = changed
+      ? el("div", { class: "notice", role: "note" },
+        el("span", { html: icon("info") }),
+        el("p", {}, "Changes made here are saved in Meshgram's data directory and win over config.yaml. ",
+          el("a", { href: "#control/config" }, "Put them in config.yaml"), " to make them the defaults."))
+      : null;
+    panel.replaceChildren(el("div", { class: "plugin-list" }, note, ...plugins.map(pluginCard)));
   }
 
   // After a #control/plugins/<name> link: bring that plugin's settings into view.
@@ -1403,6 +1438,91 @@
     };
   }
 
+  // --- Config file ----------------------------------------------------------------------------
+
+  function renderConfig(panel) {
+    const data = ui.data.config;
+    if (data.locked) {
+      panel.replaceChildren(card({
+        title: "config.yaml",
+        body: [notice("warn", "config.yaml holds secrets, so it's only shown where the control panel can change settings: set web.password in config.yaml, or listen on 127.0.0.1 only.")],
+      }));
+      return;
+    }
+    const reread = button("Read config.yaml again", { iconName: "refresh", hideLabel: true, onClick: (event) => act(event.currentTarget, () => load("config")) });
+    const copy = button("Copy", { iconName: "copy", onClick: () => copyText(data.yaml, "config.yaml") });
+    const download = el("a", { class: "btn btn-sm", href: "api/config.yaml", download: "config.yaml", html: `${icon("download")}<span>Download</span>` });
+    panel.replaceChildren(card({
+      title: "config.yaml",
+      sub: "With the plugin changes made in this control panel",
+      actions: [reread, copy, download],
+      body: [
+        configStatus(data),
+        data.problems.length
+          ? notice("bad", "This file doesn't load back exactly as intended; check it before using it:", [el("ul", { class: "change-list" }, ...data.problems.map((text) => el("li", {}, text)))])
+          : null,
+        data.changes.length ? configSteps(data) : null,
+        configViewer(data),
+      ],
+    }));
+  }
+
+  function configStatus(data) {
+    if (data.changes.length) {
+      const what = (change) => [change.enabled === null ? null : `turned ${change.enabled ? "on" : "off"}`, change.settings ? "settings changed" : null].filter(Boolean).join(", ");
+      return notice("", `${plural(data.changes.length, "plugin differs", "plugins differ")} from config.yaml:`, [
+        el("ul", { class: "change-list" }, ...data.changes.map((change) =>
+          el("li", {}, el("strong", {}, change.title), el("span", { class: "what" }, ` — ${what(change)}`)))),
+      ]);
+    }
+    if (data.saved.length) {
+      const names = data.saved.map((plugin) => plugin.title).join(", ");
+      return notice("", `config.yaml already has the changes made here (${names}). Restart Meshgram and they'll stop showing as changed.`);
+    }
+    return notice("", "Nothing has been changed in the control panel: this is config.yaml as it is.");
+  }
+
+  function configSteps(data) {
+    return el("ol", { class: "steps" },
+      el("li", {}, el("strong", {}, "Copy or download"), " this file. It holds your secrets, such as the Telegram bot token: keep it private."),
+      el("li", {}, el("strong", {}, "Replace config.yaml"), " with it: ", el("code", {}, data.path),
+        " as Meshgram sees it. With Docker, that's the config.yaml next to docker-compose.yml."),
+      el("li", {}, el("strong", {}, "Restart Meshgram."), " The changes then come from config.yaml, and stop showing as changed here."));
+  }
+
+  function configViewer(data) {
+    let view = ui.configView || (data.diff ? "diff" : null);
+    if (view === "diff" && !data.diff) view = null;
+    const show =(next) => { ui.configView = next; render("config"); };
+    let controls;
+    if (data.diff) {
+      const seg = (value, label) => el("button", { class: "seg", type: "button", "aria-pressed": String(view === value), onclick: () => show(value) }, label);
+      controls = el("div", { class: "view-switch", role: "group", "aria-label": "Show" }, seg("diff", "Changes"), seg("file", "Whole file"));
+    } else {
+      controls = el("button", { class: "disclosure", type: "button", "aria-expanded": String(view === "file"), style: "margin:0 0 10px",
+        html: `${icon("chevron")}<span>Show the file</span>`, onclick: () => show(view === "file" ? "none" : "file") });
+    }
+    if (view !== "diff" && view !== "file") return el("div", {}, controls);
+    const lines = view === "diff" ? diffLines(data.diff) : data.yaml.replace(/\n$/, "").split("\n").map((text) => [text, /^\s*#/.test(text) ? "comment" : ""]);
+    return el("div", {},
+      controls,
+      el("pre", { class: "code-view", tabindex: "0", "aria-label": view === "diff" ? "Changes to config.yaml" : "config.yaml" },
+        el("code", {}, ...lines.map(([text, kind]) => el("span", { class: `ln ${kind}`.trim() }, text || " ")))));
+  }
+
+  // A unified diff without its file header, as [text, kind] lines.
+  function diffLines(diff) {
+    return diff.replace(/\n$/, "").split("\n")
+      .filter((line) => !line.startsWith("--- ") && !line.startsWith("+++ "))
+      .map((line) => {
+        if (line.startsWith("@@")) {
+          const match = /\+(\d+)/.exec(line);
+          return [match ? `Line ${match[1]}` : line, "hunk"];
+        }
+        return [line, { "+": "add", "-": "del" }[line[0]] || ""];
+      });
+  }
+
   // --- Tabs and wiring ------------------------------------------------------------------------
 
   const tablist = document.querySelector(".control-tabs");
@@ -1450,7 +1570,7 @@
     },
     // A change made from this or another open page.
     onChange(what) {
-      const affected = { radio: ["radio"], channels: ["channels", "plugins"], contacts: ["contacts"], plugins: ["plugins", "channels"] }[what];
+      const affected = { radio: ["radio"], channels: ["channels", "plugins"], contacts: ["contacts"], plugins: ["plugins", "channels", "config"] }[what];
       if (affected) invalidate(affected);
     },
   };
