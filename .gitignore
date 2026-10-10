@@ -5,3 +5,7 @@ __pycache__/
 .DS_Store
 data/
 docker-compose.override.yml
+# Local config: holds every setting, secrets included. Start from config.example.yaml.
+/config.yaml
+/config.*.yaml
+!/config.example.yaml

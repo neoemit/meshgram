@@ -51,9 +51,11 @@ Supports both **Meshtastic** and **MeshCore** radios. Speaks serial, TCP, and BL
 
 ```bash
 git clone <this-repo> meshgram && cd meshgram
-cp .env.example .env
-# edit .env — set TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID, and your MESH_* vars
+cp config.example.yaml config.yaml && chmod 600 config.yaml
+# edit config.yaml — set telegram.bot_token, telegram.group_id, mesh.backend and its connection
 ```
+
+Every setting lives in `config.yaml`, secrets included, so the file is gitignored. Upgrading from a version that used `.env`? See [Migrating from `.env`](#-migrating-from-env).
 
 ### 3. Pick how you want to run it
 
@@ -77,37 +79,49 @@ pip install -r requirements.txt
 python main.py
 ```
 
-**Backend selection** — set in `.env`:
+**Backend selection** — set in `config.yaml`:
 
-```dotenv
+```yaml
 # Meshtastic over USB serial
-MESH_BACKEND=meshtastic
-MESH_MODE=serial
-MESH_DEVICE=/dev/ttyUSB0
+mesh:
+  backend: meshtastic
+meshtastic:
+  connection:
+    mode: serial
+    serial_device: /dev/ttyUSB0
 ```
 
-```dotenv
+```yaml
 # MeshCore over USB serial
-MESH_BACKEND=meshcore
-MESH_MODE=serial
-MESH_DEVICE=/dev/ttyACM0
-MESH_BAUDRATE=115200
+mesh:
+  backend: meshcore
+meshcore:
+  connection:
+    mode: serial
+    serial_device: /dev/ttyACM0
+    baudrate: 115200
 ```
 
-```dotenv
+```yaml
 # MeshCore over BLE (Linux/macOS, host Python only)
-MESH_BACKEND=meshcore
-MESH_MODE=ble
-MESH_BLE_ADDRESS=12:34:56:78:90:AB
-# MESH_BLE_PIN=123456     # if your companion needs pairing
+mesh:
+  backend: meshcore
+meshcore:
+  connection:
+    mode: ble
+    ble_address: "12:34:56:78:90:AB"
+    # ble_pin: "123456"      # if your companion needs pairing
 ```
 
-```dotenv
+```yaml
 # Either backend over TCP (e.g. Meshtastic node on the LAN)
-MESH_BACKEND=meshtastic
-MESH_MODE=tcp
-MESH_HOST=192.168.1.50
-MESH_PORT=4403
+mesh:
+  backend: meshtastic
+meshtastic:
+  connection:
+    mode: tcp
+    tcp_host: 192.168.1.50
+    tcp_port: 4403
 ```
 
 **Serial permissions** (one-time):
@@ -121,7 +135,7 @@ sudo usermod -aG dialout $USER
 # /etc/udev/rules.d/99-meshcore.rules
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", SYMLINK+="meshcore"
 ```
-Then reload: `sudo udevadm control --reload && sudo udevadm trigger --action=add`. Use `MESH_DEVICE=/dev/meshcore`.
+Then reload: `sudo udevadm control --reload && sudo udevadm trigger --action=add`. Use `serial_device: /dev/meshcore`.
 
 ---
 
@@ -141,12 +155,15 @@ Find your serial device:
 ls /dev/cu.usbmodem* /dev/cu.usbserial*
 ```
 
-`.env` example:
-```dotenv
-MESH_BACKEND=meshcore
-MESH_MODE=serial
-MESH_DEVICE=/dev/cu.usbmodem34B7DA5AFD281
-MESH_BAUDRATE=115200
+`config.yaml` example:
+```yaml
+mesh:
+  backend: meshcore
+meshcore:
+  connection:
+    mode: serial
+    serial_device: /dev/cu.usbmodem34B7DA5AFD281
+    baudrate: 115200
 ```
 
 For **BLE on macOS**, grant Bluetooth permission to your terminal: System Settings → Privacy & Security → Bluetooth → enable Terminal (or iTerm).
@@ -158,21 +175,20 @@ For **BLE on macOS**, grant Bluetooth permission to your terminal: System Settin
 This is the cleanest production path on Linux.
 
 ```bash
-cp .env.example .env
-# edit .env — make sure MESH_DEVICE points at your radio (e.g. /dev/ttyUSB0 or /dev/meshcore)
+cp config.example.yaml config.yaml && chmod 600 config.yaml
+# edit config.yaml — set serial_device to your radio (e.g. /dev/ttyUSB0 or /dev/meshcore)
 
 docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml up --build -d
 docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml logs -f meshgram
 ```
 
-The `linux-serial` overlay adds:
-- `devices: [${MESH_DEVICE}:${MESH_DEVICE}]` — passes the USB serial device into the container
+`docker-compose.yml` mounts `./config.yaml` into the container read-only; it isn't copied into the image. The `linux-serial` overlay adds:
+- `devices: [${MESH_DEVICE:-/dev/ttyUSB0}:…]` — passes the USB serial device into the container. For another device, set `MESH_DEVICE` for Docker Compose, e.g. `export MESH_DEVICE=/dev/ttyACM0` or a one-line `.env` next to the compose files (Compose reads it to fill in `${…}`; Meshgram doesn't). It must match `serial_device` in `config.yaml`.
 - `group_add: [dialout]` — grants the container access
 
-**Tip — drop the `-f` flags:** copy the overlay to `docker-compose.override.yml` (auto-loaded by compose):
+**Tip — drop the `-f` flags:** copy the overlay to `docker-compose.override.yml` (auto-loaded by compose and gitignored), where you can also write the device path directly:
 ```bash
 cp docker-compose.linux-serial.yml docker-compose.override.yml
-echo "docker-compose.override.yml" >> .gitignore
 docker compose up -d   # uses both files automatically
 ```
 
@@ -189,11 +205,20 @@ brew install socat
 socat -d -d TCP-LISTEN:4403,reuseaddr,fork FILE:/dev/cu.usbmodem34B7DA5AFD281,raw,echo=0,b115200
 
 # In another terminal:
-docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml up --build -d
-docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml logs -f meshgram
+docker compose up --build -d
+docker compose logs -f meshgram
 ```
 
-The `macos-tcp` overlay forces `MESH_MODE=tcp` with `MESH_HOST=host.docker.internal` and `MESH_PORT=4403`.
+Point the connection at the host in `config.yaml`:
+
+```yaml
+meshtastic:
+  connection:
+    mode: tcp
+    tcp_host: host.docker.internal
+    tcp_port: 4403
+    no_nodes: true      # skip the node DB download over the proxied link
+```
 
 > ⚠️ This works for Meshtastic's serial wire protocol. For MeshCore companion radios over TCP, prefer running the companion's TCP firmware directly or use bare-metal Python instead.
 
@@ -213,9 +238,8 @@ sudo chown -R meshgram:meshgram /opt/meshgram
 # 2. venv + dependencies
 sudo -u meshgram bash -lc 'cd /opt/meshgram && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
 
-# 3. Configure
-sudo -u meshgram cp /opt/meshgram/deploy/systemd/meshgram.env.example /opt/meshgram/.env
-sudo -u meshgram nano /opt/meshgram/.env
+# 3. Configure (the file holds the bot token: keep it private to the service user)
+sudo -u meshgram install -m 600 /opt/meshgram/config.example.yaml /opt/meshgram/config.yaml
 sudo -u meshgram nano /opt/meshgram/config.yaml
 
 # 4. Install + enable unit
@@ -238,37 +262,51 @@ sudo systemctl restart meshgram
 sudo systemctl stop meshgram
 ```
 
-If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, and `ReadWritePaths` in the unit file.
+If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `MESHGRAM_CONFIG_PATH`, `ExecStart`, and `ReadWritePaths` in the unit file.
 
 ---
 
-## 🔐 Environment Variables (`.env`)
+## 🔁 Migrating from `.env`
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | ✅ | — | Telegram bot token |
-| `TELEGRAM_GROUP_ID` | ✅ | — | Telegram target chat/group ID |
-| `MESH_BACKEND` | — | `meshtastic` | `meshtastic` or `meshcore` |
-| `MESH_MODE` | — | from YAML | `serial`, `tcp`, or `ble` (BLE = meshcore only) |
-| `MESH_DEVICE` | — | from YAML | Serial device path (e.g. `/dev/ttyUSB0`, `/dev/cu.usbmodemXXX`) |
-| `MESH_BAUDRATE` | — | `115200` | Serial baudrate (MeshCore only; Meshtastic auto-negotiates) |
-| `MESH_HOST` | — | from YAML | TCP host (use `host.docker.internal` on Docker Desktop) |
-| `MESH_PORT` | — | `4403` (Meshtastic) / `5000` (MeshCore) | TCP port |
-| `MESH_BLE_ADDRESS` | — | — | BLE MAC address (MeshCore + `MESH_MODE=ble`) |
-| `MESH_BLE_PIN` | — | — | BLE pairing PIN (optional) |
-| `MESH_NO_NODES` | — | `false` | Skip Meshtastic node DB download — improves resilience on proxied links |
-| `MESHGRAM_CONFIG_PATH` | — | `config.yaml` | Path to YAML config |
-| `LOG_LEVEL` | — | `INFO` | Python logging level |
-| `MESHGRAM_DATA_DIR` | — | `data` (`/app/data` in Docker) | Directory for persistent state (`packet_map` history) |
-| `SOLAR_HOST` / `SOLAR_TOKEN` / `SOLAR_API_KEY` | — | — | Examples for `dm_http_command` URL/auth templating |
-| `MESHMAPPER_IATA` | — | from YAML | MeshMapper region code for the `meshmapper` plugin |
-| `MESHMAPPER_PRIVATE_KEY` | — | — | Optional MeshCore private key (128 hex chars) for `meshmapper` token signing |
-| `MESHMAPPER_SUBSCRIBE_USERNAME` / `MESHMAPPER_SUBSCRIBE_PASSWORD` | — | — | Optional MQTT subscriber account, so `meshmapper` receives other observers' full packets (the live feed works without it) |
-| `PACKET_MAP_HOST` / `PACKET_MAP_PORT` | — | from YAML | Listen address/port for the `packet_map` web app |
-| `PACKET_MAP_PASSWORD` | — | — | Optional HTTP Basic auth password for the `packet_map` web app |
-| `PACKET_MAP_DB_PATH` | — | from YAML | `packet_map` history database (relative to `MESHGRAM_DATA_DIR`) |
+Older versions read settings from `.env` (and environment variables) as well as `config.yaml`, and the environment won. Now every setting, secrets included, lives in `config.yaml`, which git no longer tracks; `config.example.yaml` is the template. Meshgram ignores the old variables and logs a warning if any are still set.
 
-Env vars override YAML for the same field.
+`python -m meshgram.migrate_config` does the merge for you. It applies the old rules (environment over `.env` over YAML; connection variables go to the active backend), inlines the `${VAR}` and `token_env` references of `dm_http_command`, keeps your comments and layout, and writes the result to `config.migrated.yaml` (mode `600`) for you to review. It lists every value it moved and every `.env` entry it left out, and checks that Meshgram can load the result.
+
+1. **Update without losing `config.yaml`.** Upstream stops tracking it, so a plain `git pull` would delete your copy. Move it aside first:
+   ```bash
+   mv config.yaml config.old.yaml && git pull && mv config.old.yaml config.yaml
+   ```
+   (Already pulled and it's gone? `git show ORIG_HEAD:config.yaml > config.yaml`.)
+2. **Merge `.env` into it:**
+   ```bash
+   pip install -r requirements.txt          # adds ruamel.yaml
+   python -m meshgram.migrate_config        # reads config.yaml + .env, writes config.migrated.yaml
+   ```
+   With Docker, run it in the image instead:
+   ```bash
+   docker compose build
+   docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
+     -e PACKET_MAP_HOST=0.0.0.0 meshgram python -m meshgram.migrate_config
+   ```
+   `-e PACKET_MAP_HOST=0.0.0.0` carries over what the old `docker-compose.yml` set. If you used the removed `docker-compose.macos-tcp.yml` overlay, also pass `-e MESH_MODE=tcp -e MESH_HOST=host.docker.internal -e MESH_PORT=4403 -e MESH_NO_NODES=true`.
+3. **Switch over.** Review the file (and the comments the tool flags as still mentioning `.env`), then:
+   ```bash
+   mv config.migrated.yaml config.yaml
+   docker compose up -d --build             # or restart however you run Meshgram
+   rm .env                                  # once it runs
+   ```
+   systemd: reinstall `deploy/systemd/meshgram.service` (it no longer has `EnvironmentFile=`) and run `sudo systemctl daemon-reload`. Docker with the `linux-serial` overlay and a device other than `/dev/ttyUSB0`: keep `MESH_DEVICE=…` as the only line of `.env`, since Compose reads it.
+
+Options: `--config` and `--env-file` pick the inputs, `-o` the output (`-` for stdout), `--force` overwrites it, and `--ignore-environment` reads `.env` only. Run `python -m meshgram.migrate_config --help` for details.
+
+### Environment variables
+
+Only two remain. They say where files are, not how Meshgram behaves, and nothing in `config.yaml` overrides them or is overridden by them:
+
+| Variable | Default | Description |
+|---|---|---|
+| `MESHGRAM_CONFIG_PATH` | `config.yaml` | Path to the config file |
+| `MESHGRAM_DATA_DIR` | `data` (`/app/data` in Docker, `/var/lib/meshgram` with systemd) | Directory for persistent state (`packet_map` history) |
 
 ---
 
@@ -277,6 +315,12 @@ Env vars override YAML for the same field.
 ### Minimal example
 
 ```yaml
+telegram:
+  bot_token: "123456789:ABCDEF_your_bot_token_here"
+  group_id: -1001234567890
+  include_captions: true
+  sender_prefix_template: "[{display_name}] {message}"
+
 mesh:
   backend: meshtastic    # or "meshcore"
 
@@ -286,10 +330,6 @@ meshtastic:
     mode: tcp
     tcp_host: meshtastic.local
     tcp_port: 4403
-
-telegram:
-  include_captions: true
-  sender_prefix_template: "[{display_name}] {message}"
 
 plugins:
   - name: bridge
@@ -321,7 +361,7 @@ meshcore:
 
 ### Full config reference
 
-See [`config.yaml`](./config.yaml) in the repo — it contains every supported field with comments.
+See [`config.example.yaml`](./config.example.yaml) in the repo — it contains every supported field with comments.
 
 ### Sender label resolution order
 
@@ -407,7 +447,7 @@ ff,2e,02 (3 hops)
 
 Notes:
 
-- This plugin is ignored unless `mesh.backend: meshcore` / `MESH_BACKEND=meshcore`.
+- This plugin is ignored unless `mesh.backend: meshcore`.
 - MeshCore receive frames expose hop count metadata; repeater hash lists depend on MeshCore channel-log path enrichment. Meshgram enables channel-log decoding and refreshes channel metadata at startup so `meshcore_py` can correlate RF logs with received channel messages. When hashes are unavailable, the bot replies with the known hop count and `repeater list unavailable`.
 - Path hashes are displayed in MeshCore's reported order and split according to path hash mode (1-, 2-, or 3-byte hashes).
 
@@ -423,18 +463,18 @@ A node sends a single-word DM (e.g. `BATTERY`), the plugin fetches a configured 
     error_message: "Unable to fetch {command}"
     commands:
       BATTERY:
-        url: "http://${SOLAR_HOST}/battery/"
+        url: "http://192.168.0.10/battery/"
         type: "json"           # or "text"
         value: "data.inv1.soc" # dot path; supports list indices
         msg: "{value}%"
         auth:
           type: bearer
-          token_env: SOLAR_TOKEN
+          token: "replace_me"  # or token_env: SOLAR_TOKEN
         headers:
-          X-Api-Key: "${SOLAR_API_KEY}"
+          X-Api-Key: "replace_me"
 ```
 
-Env templating with `${VAR}` works in `url` and `headers`. Auth currently supports `bearer`.
+Auth currently supports `bearer`, with the token in `auth.token`. To keep a value out of `config.yaml`, reference an environment variable instead: `${VAR}` in `url` and `headers`, `auth.token_env: VAR` for the token. Meshgram reads those from its own environment when it runs the command (it doesn't load `.env`).
 
 ### `meshmapper` — MeshMapper observer (MQTT packet upload)
 
@@ -445,7 +485,7 @@ The plugin runs alongside the bridge without affecting it: it only listens to th
 **Setup**
 
 1. Find your **region code** on MeshMapper (usually a 3-letter IATA airport code such as `YOW`). It must match your MeshMapper region exactly, or the observer won't show up.
-2. Run Meshgram with the MeshCore backend (`mesh.backend: meshcore` or `MESH_BACKEND=meshcore`).
+2. Run Meshgram with the MeshCore backend (`mesh.backend: meshcore`).
 3. Enable the plugin in `config.yaml`:
 
    ```yaml
@@ -454,7 +494,7 @@ The plugin runs alongside the bridge without affecting it: it only listens to th
      - name: meshmapper
        enabled: true
        settings:
-         iata: "YOW"        # your MeshMapper region code (or set MESHMAPPER_IATA in .env)
+         iata: "YOW"        # your MeshMapper region code
    ```
 
 4. Restart Meshgram. You should see `MeshMapper: connecting to mqtt.meshmapper.net:443 …` and then `MeshMapper: connected; publishing packets to meshcore/YOW/<PUBLIC_KEY>/packets` in the logs.
@@ -464,7 +504,7 @@ The defaults already point at MeshMapper's broker. Everything else is optional:
 
 | Setting | Default | Description |
 |---|---|---|
-| `iata` | — (**required**) | MeshMapper region code. `MESHMAPPER_IATA` overrides it. |
+| `iata` | — (**required**) | MeshMapper region code |
 | `server` / `port` | `mqtt.meshmapper.net` / `443` | MQTT broker. Use these for a regional broker your MeshMapper admin has set up. |
 | `transport` | `websockets` | `websockets` or `tcp` |
 | `websocket_path` | `/` | WebSocket path on the broker |
@@ -478,13 +518,13 @@ The defaults already point at MeshMapper's broker. Everything else is optional:
 | `subscribe` | `true` | Also receive the packets other observers in your region upload, for the `packet_map` plugin (live feed, plus MQTT with a subscriber account). See **Other observers' packets** below. `false` turns both off. |
 | `live_feed` | `true` | Receive them from MeshMapper's public live feed. Needs no account. |
 | `live_feed_url` | `wss://analyzer.meshmapper.net/ws` | Live feed WebSocket |
-| `subscribe_username` / `subscribe_password` | — | Optional MQTT subscriber account. Prefer `MESHMAPPER_SUBSCRIBE_USERNAME` / `MESHMAPPER_SUBSCRIBE_PASSWORD` in `.env`, which override these. |
+| `subscribe_username` / `subscribe_password` | — | Optional MQTT subscriber account (see **Other observers' packets**) |
 | `subscribe_server` / `subscribe_port` | same as `server` / `port` | Broker to subscribe on, if it's not the one you upload to (e.g. a regional broker) |
 | `subscribe_transport` / `subscribe_tls` | same as `transport` / `tls` | Transport and TLS for the subscriber connection (`websocket_path` and `tls_verify` are shared) |
 | `topic_subscribe` | `meshcore/{IATA}/+/packets` | Topic filter used for that |
-| `private_key` | — | Optional. See **Authentication** below. `MESHMAPPER_PRIVATE_KEY` overrides it. |
+| `private_key` | — | Optional. See **Authentication** below. |
 
-**Authentication.** MeshMapper uses MeshCore's "device signing": the MQTT username is `v1_<PUBLIC_KEY>` and the password is a short-lived Ed25519-signed JWT (`publicKey`, `iat`, `exp`, `aud=mqtt.meshmapper.net`, `client`). By default Meshgram asks the **radio to sign** the token over the companion protocol, so the private key never leaves the device. If your companion firmware is too old to sign on the device, the log shows `could not create auth token`. You can then either update the firmware or set `MESHMAPPER_PRIVATE_KEY` to the radio's 64-byte private key, written as 128 hex characters. Meshgram checks that the key matches the connected radio before using it. Keep that key in `.env`, never in `config.yaml`.
+**Authentication.** MeshMapper uses MeshCore's "device signing": the MQTT username is `v1_<PUBLIC_KEY>` and the password is a short-lived Ed25519-signed JWT (`publicKey`, `iat`, `exp`, `aud=mqtt.meshmapper.net`, `client`). By default Meshgram asks the **radio to sign** the token over the companion protocol, so the private key never leaves the device. If your companion firmware is too old to sign on the device, the log shows `could not create auth token`. You can then either update the firmware or set `private_key` to the radio's 64-byte private key, written as 128 hex characters. Meshgram checks that the key matches the connected radio before using it. Anyone with the key can impersonate the radio, so keep `config.yaml` private (`chmod 600`).
 
 **What gets published**
 
@@ -498,7 +538,7 @@ The defaults already point at MeshMapper's broker. Everything else is optional:
   - *Publishers* log in with a device-signed token, like the uploader above. They may only publish to their own `meshcore/<IATA>/<PUBLIC_KEY>/…` topics, and the broker **closes the connection of a publisher that subscribes** to anything else.
   - *Subscribers* log in with a username and password that the broker operator creates (roles: 1 = admin, 2 = full access, 3 = limited, with SNR/RSSI and some other fields removed). Only they can subscribe, e.g. to `meshcore/<IATA>/+/packets`. A MeshMapper website or admin-panel login is *not* a broker account.
 
-  If the broker operator gives you one, set `MESHMAPPER_SUBSCRIBE_USERNAME` and `MESHMAPPER_SUBSCRIBE_PASSWORD` in `.env`. If it's on a different broker from the one you upload to (for example your region's own broker), also set `subscribe_server` / `subscribe_port`. The plugin then opens a second, read-only MQTT connection next to the upload connection and subscribes to `meshcore/<IATA>/+/packets`. The log says `subscribed to meshcore/<IATA>/+/packets` when it works. A wrong username or password shows `subscriber login refused` (the broker answers the same when the account is already at its connection limit). If the broker refuses the subscription, the log says so and Meshgram doesn't ask again until it restarts. While the MQTT subscription is up, the live feed stands by, so packets aren't shown twice.
+  If the broker operator gives you one, set `subscribe_username` and `subscribe_password` in the plugin settings. If it's on a different broker from the one you upload to (for example your region's own broker), also set `subscribe_server` / `subscribe_port`. The plugin then opens a second, read-only MQTT connection next to the upload connection and subscribes to `meshcore/<IATA>/+/packets`. The log says `subscribed to meshcore/<IATA>/+/packets` when it works. A wrong username or password shows `subscriber login refused` (the broker answers the same when the account is already at its connection limit). If the broker refuses the subscription, the log says so and Meshgram doesn't ask again until it restarts. While the MQTT subscription is up, the live feed stands by, so packets aren't shown twice.
 
 Uploads are never affected by either. Set `subscribe: false` to stop receiving other observers' packets altogether.
 
@@ -535,20 +575,20 @@ Then open `http://<host>:8080/`.
 
 | Setting | Default | Description |
 |---|---|---|
-| `host` | `127.0.0.1` | Listen address. `PACKET_MAP_HOST` overrides it. |
-| `port` | `8080` | Listen port. `PACKET_MAP_PORT` overrides it. |
-| `password` | — | If set, the page requires HTTP Basic auth with this password (any username). Prefer `PACKET_MAP_PASSWORD` in `.env`. |
+| `host` | `127.0.0.1` | Listen address (`0.0.0.0` in Docker) |
+| `port` | `8080` | Listen port |
+| `password` | — | If set, the page requires HTTP Basic auth with this password (any username). |
 | `max_packets` | `500` | Packets kept in memory and sent to newly opened pages |
 | `max_remote_packets` | `1000` | Packets from other MeshMapper observers kept in memory (see above) |
 | `max_messages` | `1000` | Decrypted messages kept for the Messages tab. They're kept separately from `max_packets`, so they survive busy periods of adverts and ACKs. |
 | `persist` | `true` | Save nodes and packet history to disk and restore them on restart (see **Persistence** below). Set `false` to keep everything in memory only. |
-| `db_path` | `packet_map.sqlite3` | History database. A relative path is inside `MESHGRAM_DATA_DIR`. `PACKET_MAP_DB_PATH` overrides it. |
+| `db_path` | `packet_map.sqlite3` | History database. A relative path is inside `MESHGRAM_DATA_DIR`. |
 | `title` | `Meshgram` | Page title |
 | `tile_url` / `tile_attribution` | OpenStreetMap | Leaflet tile layer URL template and attribution. When unset, OpenStreetMap tiles are restyled to match the light or dark theme; a custom tile server is shown as-is. |
 
 Notes:
 
-- **Docker:** set `host: 0.0.0.0` (or `PACKET_MAP_HOST=0.0.0.0`) and publish the port, e.g. add `ports: ["8080:8080"]` to the `meshgram` service.
+- **Docker:** set `host: 0.0.0.0`. `docker-compose.yml` publishes port `8080`; change the mapping there if you change `port`.
 - The page shows decrypted channel messages and node positions. Don't expose it on an untrusted network without `password` and, ideally, a TLS reverse proxy.
 - Path hops are 1–3 byte public-key prefixes, so a hop is matched to a known node by prefix. If several repeaters share the prefix, the one closest to the next hop is picked. Unknown hops are listed by their hash and skipped on the map.
 - For direct-routed packets the path is the remaining route, so it is drawn dashed and isn't connected to your radio.
@@ -569,7 +609,7 @@ Notes:
 
 ## ⚠️ MeshCore Caveats
 
-When `MESH_BACKEND=meshcore`:
+When `mesh.backend: meshcore`:
 
 - **No reactions** — Telegram reactions don't reach the radio; MeshCore packets never produce reaction events.
 - **No reply threading** — `reply_id` is silently dropped; messages still send as plain text.
@@ -587,14 +627,14 @@ Everything else (channel routing, chunking, plugins, sender labels via `contact_
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / HTTP + event stream.
+Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / HTTP + event stream.
 
 ---
 
 ## 🩺 Troubleshooting
 
 ### Mesh connection fails
-- Confirm `MESH_BACKEND`, `MESH_MODE`, and the matching `MESH_DEVICE` / `MESH_HOST` / `MESH_BLE_ADDRESS`.
+- Confirm `mesh.backend` and that backend's `connection` (`mode` and the matching `serial_device` / `tcp_host` / `ble_address`).
 - On Linux: `ls /dev/ttyUSB* /dev/ttyACM*` and check group access (`groups $USER` must include `dialout`).
 - On macOS Docker: confirm `socat` is listening on the configured TCP port.
 - In Docker: container needs `host.docker.internal` reachable (Docker Desktop only — on Linux Docker you may need `--add-host=host.docker.internal:host-gateway`).
@@ -603,7 +643,7 @@ Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token f
 - Only one process can poll a given bot token. Stop the duplicate.
 
 ### Messages not bridging
-- Check `TELEGRAM_GROUP_ID` matches the chat.
+- Check `telegram.group_id` matches the chat.
 - Check `bridge.settings.channel` matches the radio channel index.
 - Telegram side: ensure message has text or an enabled caption, and sender is not a bot.
 
@@ -628,10 +668,10 @@ Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token f
 
 ### MeshMapper observer not showing up
 - Check the logs for lines starting with `MeshMapper:`. `uploads disabled` explains why the plugin is inactive, for example a missing `iata` or the Meshtastic backend.
-- `MQTT connect refused: Not authorized` means the broker rejected the token. Make sure the system clock is correct (the token has `iat`/`exp` timestamps) and that a configured `MESHMAPPER_PRIVATE_KEY` belongs to this radio.
-- `could not create auth token` means the radio couldn't sign the token. Update the companion firmware or set `MESHMAPPER_PRIVATE_KEY`.
+- `MQTT connect refused: Not authorized` means the broker rejected the token. Make sure the system clock is correct (the token has `iat`/`exp` timestamps) and that a configured `private_key` belongs to this radio.
+- `could not create auth token` means the radio couldn't sign the token. Update the companion firmware or set `private_key`.
 - The `iata` value must exactly match your MeshMapper region code.
-- The observer only appears after the radio has heard at least one packet. Run with `LOG_LEVEL=DEBUG` to see each `MeshMapper: published packet …` line.
+- The observer only appears after the radio has heard at least one packet. Set `runtime.log_level: DEBUG` to see each `MeshMapper: published packet …` line.
 - No packets from other observers: check the **Live feed** dot in the `packet_map` header (its panel says why it's down) and that `subscribe` / `live_feed` aren't `false`. Quiet regions can go minutes without a packet. **MQTT ↓** stays off without a subscriber account, which is fine. Device-signed observer logins can only publish (see **Other observers' packets**).
 
 ### Logs appear duplicated
@@ -644,19 +684,17 @@ Coverage includes: config/env precedence, chunking (ASCII + emoji + long-token f
 ```text
 meshgram/
 ├── main.py                       # entrypoint
-├── config.yaml                   # behavior config
-├── .env.example                  # secrets + connection vars
+├── config.example.yaml           # every setting; copy to config.yaml (gitignored)
 ├── Dockerfile
 ├── docker-compose.yml            # base
 ├── docker-compose.linux-serial.yml   # overlay — USB passthrough on Linux
-├── docker-compose.macos-tcp.yml      # overlay — TCP via host socat on macOS
 ├── deploy/
 │   └── systemd/
-│       ├── meshgram.service
-│       └── meshgram.env.example
+│       └── meshgram.service
 ├── meshgram/
 │   ├── app.py
 │   ├── config.py
+│   ├── migrate_config.py         # one-off .env → config.yaml migration
 │   ├── plugin.py
 │   ├── reply_links.py
 │   ├── text_utils.py
@@ -683,7 +721,7 @@ meshgram/
 
 ## 📘 Best Practices
 
-- Keep secrets in `.env`, not `config.yaml`.
+- Keep `config.yaml` private (`chmod 600`): it holds the bot token and any plugin passwords. It's gitignored and kept out of the Docker image.
 - Use `node_name_overrides` / `contact_name_overrides` for deterministic sender labels.
 - Keep `dm_http_command` endpoints on trusted/internal networks.
 - Use short, unambiguous single-word keys for DM commands.

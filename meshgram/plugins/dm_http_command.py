@@ -96,12 +96,14 @@ class DirectMessageHttpCommandPlugin(BasePlugin):
                         headers[header_key] = header_value
 
             auth_type = ""
+            auth_token = ""
             auth_token_env = ""
             auth_header = "Authorization"
             auth_prefix = "Bearer"
             raw_auth = raw_config.get("auth")
             if isinstance(raw_auth, dict):
                 auth_type = str(raw_auth.get("type", "")).strip().lower()
+                auth_token = str(raw_auth.get("token") or "").strip()
                 auth_token_env = str(raw_auth.get("token_env", raw_auth.get("env", ""))).strip()
                 auth_header = str(raw_auth.get("header", "Authorization")).strip() or "Authorization"
                 auth_prefix = str(raw_auth.get("prefix", "Bearer")).strip() or "Bearer"
@@ -114,6 +116,7 @@ class DirectMessageHttpCommandPlugin(BasePlugin):
                 "headers": headers,
                 "timeout_seconds": timeout_seconds,
                 "auth_type": auth_type,
+                "auth_token": auth_token,
                 "auth_token_env": auth_token_env,
                 "auth_header": auth_header,
                 "auth_prefix": auth_prefix,
@@ -262,13 +265,15 @@ def _apply_auth(headers: dict[str, str], command_config: dict[str, Any]) -> dict
     if auth_type != "bearer":
         raise ValueError(f"Unsupported auth type: {auth_type}")
 
-    token_env = str(command_config.get("auth_token_env", "")).strip()
-    if not token_env:
-        raise ValueError("Bearer auth requires token_env")
-
-    token = os.getenv(token_env)
+    token = str(command_config.get("auth_token", "")).strip()
     if not token:
-        raise ValueError(f"Bearer token env var is missing/empty: {token_env}")
+        token_env = str(command_config.get("auth_token_env", "")).strip()
+        if not token_env:
+            raise ValueError("Bearer auth requires token (or token_env)")
+
+        token = os.getenv(token_env)
+        if not token:
+            raise ValueError(f"Bearer token env var is missing/empty: {token_env}")
 
     header_name = str(command_config.get("auth_header", "Authorization")).strip() or "Authorization"
     prefix = str(command_config.get("auth_prefix", "Bearer")).strip() or "Bearer"

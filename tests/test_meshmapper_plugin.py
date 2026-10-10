@@ -234,10 +234,10 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(MeshMapperConfig.from_settings({}).validation_error())
         self.assertIsNotNone(MeshMapperConfig.from_settings({"iata": "XXX"}).validation_error())
 
-    def test_env_overrides(self):
-        with mock.patch.dict(os.environ, {"MESHMAPPER_IATA": "sea", "MESHMAPPER_PRIVATE_KEY": RFC_PRIVATE_KEY.hex()}):
-            config = MeshMapperConfig.from_settings({"iata": "YOW"})
-        self.assertEqual(config.iata, "SEA")
+    def test_settings_only_come_from_config(self):
+        with mock.patch.dict(os.environ, {"MESHMAPPER_IATA": "sea", "MESHMAPPER_PRIVATE_KEY": "00" * 64}):
+            config = MeshMapperConfig.from_settings({"iata": "yow", "private_key": RFC_PRIVATE_KEY.hex()})
+        self.assertEqual(config.iata, "YOW")
         self.assertEqual(config.private_key, RFC_PRIVATE_KEY.hex().upper())
 
     def test_subscriber_settings(self):
@@ -247,11 +247,16 @@ class ConfigTests(unittest.TestCase):
             ("mqtt.meshmapper.net", 8883, "tcp", True),
         )
         self.assertIsNotNone(config.subscriber_disabled_reason())
-        env = {"MESHMAPPER_SUBSCRIBE_USERNAME": "viewer", "MESHMAPPER_SUBSCRIBE_PASSWORD": "secret"}
-        with mock.patch.dict(os.environ, env):
-            config = MeshMapperConfig.from_settings(
-                {"iata": "YOW", "subscribe_server": "broker.example.org", "subscribe_port": 9001, "subscribe_tls": False}
-            )
+        config = MeshMapperConfig.from_settings(
+            {
+                "iata": "YOW",
+                "subscribe_username": "viewer",
+                "subscribe_password": "secret",
+                "subscribe_server": "broker.example.org",
+                "subscribe_port": 9001,
+                "subscribe_tls": False,
+            }
+        )
         self.assertEqual((config.subscribe_username, config.subscribe_password), ("viewer", "secret"))
         self.assertEqual((config.subscribe_server, config.subscribe_port, config.subscribe_tls), ("broker.example.org", 9001, False))
         self.assertIsNone(config.subscriber_disabled_reason())
@@ -632,7 +637,7 @@ class UploaderTests(unittest.TestCase):
             self.plugin.config.live_feed = False
             with self.assertLogs("meshgram.plugins.meshmapper", level="INFO") as logs:
                 await self._connect()
-            self.assertTrue(any("MESHMAPPER_SUBSCRIBE_USERNAME" in line for line in logs.output))
+            self.assertTrue(any("subscribe_username" in line for line in logs.output))
             self.assertEqual(self.feed_sockets, [])
             await self.plugin.on_shutdown()
 

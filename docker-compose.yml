@@ -3,17 +3,12 @@ services:
     build: .
     container_name: meshgram
     restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      MESHGRAM_CONFIG_PATH: /app/config.yaml
-      MESHGRAM_DATA_DIR: /app/data
-      PACKET_MAP_HOST: 0.0.0.0
     volumes:
+      # Every setting, secrets included (copy config.example.yaml to config.yaml).
       - ./config.yaml:/app/config.yaml:ro
       # Persistent state (packet_map history), kept across rebuilds and redeploys.
       - meshgram-data:/app/data
-    # Uncomment to reach the packet_map web app (also set PACKET_MAP_HOST=0.0.0.0):
+    # The packet_map web app; set its host to 0.0.0.0 in config.yaml.
     ports:
       - "8080:8080"
 

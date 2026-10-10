@@ -33,7 +33,6 @@ import base64
 import contextlib
 import json
 import logging
-import os
 import random
 import re
 import ssl
@@ -153,16 +152,16 @@ class MeshMapperConfig:
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "MeshMapperConfig":
-        iata = os.getenv("MESHMAPPER_IATA") or settings.get("iata") or ""
-        private_key = os.getenv("MESHMAPPER_PRIVATE_KEY") or settings.get("private_key") or ""
+        iata = settings.get("iata") or ""
+        private_key = settings.get("private_key") or ""
         server = str(settings.get("server") or DEFAULT_SERVER).strip()
         transport = str(settings.get("transport") or "websockets").strip().lower()
         transport = transport if transport in {"websockets", "tcp"} else "websockets"
         port = _as_int(settings.get("port"), 443)
         tls = _as_bool(settings.get("tls"), True)
         subscribe_transport = str(settings.get("subscribe_transport") or transport).strip().lower()
-        subscribe_username = os.getenv("MESHMAPPER_SUBSCRIBE_USERNAME") or settings.get("subscribe_username") or ""
-        subscribe_password = os.getenv("MESHMAPPER_SUBSCRIBE_PASSWORD") or settings.get("subscribe_password") or ""
+        subscribe_username = settings.get("subscribe_username") or ""
+        subscribe_password = settings.get("subscribe_password") or ""
         return cls(
             iata=str(iata).strip().upper(),
             server=server,
@@ -193,7 +192,7 @@ class MeshMapperConfig:
 
     def validation_error(self) -> Optional[str]:
         if self.iata in PLACEHOLDER_IATA_CODES:
-            return "set plugins[meshmapper].settings.iata (or MESHMAPPER_IATA) to your MeshMapper region code"
+            return "set plugins[meshmapper].settings.iata to your MeshMapper region code"
         if not self.server:
             return "settings.server must not be empty"
         if self.private_key and (len(self.private_key) != 128 or not HEX_RE.match(self.private_key)):
@@ -207,7 +206,7 @@ class MeshMapperConfig:
         if not self.subscribe_username or not self.subscribe_password:
             return (
                 "Needs a subscriber account: device-signed observers can only publish. "
-                "Set MESHMAPPER_SUBSCRIBE_USERNAME and MESHMAPPER_SUBSCRIBE_PASSWORD"
+                "Set subscribe_username and subscribe_password in the meshmapper plugin settings"
             )
         return None
 
@@ -830,7 +829,7 @@ class MeshMapperSubscriber:
             self._connected = False
             if _reason_code_value(reason_code) in MQTT_AUTH_FAILURE_CODES:
                 LOGGER.error(
-                    "MeshMapper: subscriber login refused (%s); check MESHMAPPER_SUBSCRIBE_USERNAME/PASSWORD",
+                    "MeshMapper: subscriber login refused (%s); check subscribe_username/subscribe_password",
                     reason_code,
                 )
                 self._set_status(DISCONNECTED, f"Login refused ({reason_code}); check subscriber credentials")

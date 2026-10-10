@@ -199,6 +199,40 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
         self.assertEqual(actions[0].text, "77%")
         self.assertEqual(plugin.last_headers.get("Authorization"), "Bearer secret-token")
 
+    def test_bearer_auth_from_config_token(self):
+        plugin = _FakeHttpPlugin(
+            {
+                "commands": {
+                    "BATTERY": {
+                        "url": "http://example.local/battery",
+                        "type": "json",
+                        "value": "value",
+                        "msg": "{value}%",
+                        "auth": {
+                            "type": "bearer",
+                            "token": "config-token",
+                            "token_env": "SOLAR_TOKEN",
+                        },
+                    }
+                }
+            },
+            payload=b'{"value":77}',
+        )
+        event = MeshtasticTextEvent(
+            from_id="!f00d0001",
+            to_id="!abcd0001",
+            packet_id=48,
+            reply_id=None,
+            channel_index=0,
+            text="BATTERY",
+            sender_label="node",
+        )
+        with patch.dict(os.environ, {"SOLAR_TOKEN": "env-token"}, clear=False):
+            actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+
+        self.assertEqual(actions[0].text, "77%")
+        self.assertEqual(plugin.last_headers.get("Authorization"), "Bearer config-token")
+
     def test_env_template_expansion_for_url_and_headers(self):
         plugin = _FakeHttpPlugin(
             {
