@@ -198,7 +198,7 @@
   .panel-note { margin: 2px 8px 2px; font-size: 12.5px; color: var(--text-3); }
 
   /* --- Sidebar ------------------------------------------------------------- */
-  .sidebar-head { display: flex; gap: 8px; padding: 12px 12px 10px; }
+  .sidebar-head { display: flex; flex: none; gap: 8px; padding: 12px 12px 10px; }
   .search { position: relative; flex: 1; min-width: 0; }
   .search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--text-3); pointer-events: none; }
   .search input { width: 100%; height: 38px; padding: 0 12px 0 34px; border: 1px solid var(--border); border-radius: 10px;
@@ -214,8 +214,8 @@
   .btn .badge { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-contrast);
     font-size: 12px; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums; }
 
-  .type-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid var(--border); }
-  .source-filter { display: flex; gap: 2px; margin: 0 12px 10px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-3); }
+  .type-chips { display: flex; flex: none; flex-wrap: wrap; gap: 6px; padding: 0 12px 12px; border-bottom: 1px solid var(--border); }
+  .source-filter { display: flex; flex: none; gap: 2px; margin: 0 12px 10px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-3); }
   .seg { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 28px; padding: 0 8px; border: 0; border-radius: 7px;
     background: none; color: var(--text-2); font-size: 13px; font-weight: 600; white-space: nowrap; }
   .seg:hover { color: var(--text); }
@@ -227,6 +227,10 @@
   .filter-chip .n { color: var(--text-3); font-weight: 500; font-variant-numeric: tabular-nums; }
   .filter-chip:hover { background: var(--surface-3); color: var(--text); }
   .filter-chip[aria-pressed="true"] { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--text); }
+  /* Leads to the setting that hides packet types (control panel). */
+  .chip-manage { border-style: dashed; color: var(--text-3); text-decoration: none; white-space: nowrap; }
+  .chip-manage svg { width: 15px; height: 15px; }
+  .chip-manage:not(:has(span)) { padding: 0 9px; }
 
   .list-wrap { position: relative; flex: 1 1 auto; min-height: 0; background: var(--list-bg); }
   .packets { list-style: none; margin: 0; padding: 12px 12px 20px; height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
@@ -533,6 +537,9 @@
   .data-table .name { font-weight: 650; }
   .plugin-list { display: grid; gap: 12px; }
   .plugin-card .card-head { padding-bottom: 2px; }
+  .plugin-head { flex-wrap: nowrap; align-items: flex-start; }
+  .plugin-title { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+  .plugin-head .switch { flex: none; margin-top: 2px; }
   .plugin-card .plugin-id { font: 12px var(--mono); color: var(--text-3); }
   .plugin-card .desc { margin: 4px 16px 0; color: var(--text-2); }
   .plugin-card .switch { margin-left: 0; width: 40px; height: 22px; }
@@ -611,6 +618,20 @@
     .path-item { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "when sig action" "chain chain chain"; }
   }
   @media (max-width: 700px) {
+    /* One swipeable row of filter chips instead of several wrapped rows above the list. */
+    .type-chips, .channel-chips { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity;
+      scroll-padding-inline: 12px; scrollbar-width: none; padding-right: 32px;
+      -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+      mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+    .type-chips::-webkit-scrollbar, .channel-chips::-webkit-scrollbar { display: none; }
+    .type-chips .filter-chip, .channel-chips .filter-chip { flex: none; scroll-snap-align: start; }
+    /* The fade would take the divider with it; the list draws it instead. */
+    .type-chips { padding-bottom: 10px; border-bottom: 0; }
+    .type-chips:not([hidden]) + .list-wrap { border-top: 1px solid var(--border); }
+    /* The control panel's sections fill the width as text tabs. */
+    .control-tabs { width: 100%; }
+    .control-tabs .seg { flex: 1 1 0; min-width: 0; padding: 0 6px; }
+    .control-tabs .seg svg { display: none; }
     .app-header { gap: 10px; padding: 0 12px; }
     .stats { display: none; }
     .status { padding: 0 10px; }
@@ -621,9 +642,15 @@
     .sidebar-head { padding: 10px 12px 8px; }
     .btn .btn-text { display: none; }
   }
+  @media (max-width: 560px) {
+    /* Icons only, except the current view's label; the others stay readable to screen readers. */
+    .view-tab { padding: 0 10px; }
+    .view-tab:not([aria-current="page"]) .tab-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  }
   @media (max-width: 480px) {
     .brand h1 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-    .view-tab { padding: 0 10px; }
+    .app-header { gap: 8px; padding: 0 10px; }
+    .header-actions { gap: 6px; }
   }
 </style>
 </head>
@@ -640,9 +667,9 @@
     <h1 id="title">Meshgram</h1>
   </div>
   <nav class="view-tabs" aria-label="Views">
-    <a class="view-tab" href="#map" data-view="map" aria-current="page"><span data-icon="map"></span>Map</a>
-    <a class="view-tab" href="#messages" data-view="messages" id="messages-tab"><span data-icon="chat"></span>Messages<span class="tab-badge" id="messages-badge" aria-hidden="true" hidden></span></a>
-    <a class="view-tab" href="#control" data-view="control" id="control-tab"><span data-icon="sliders"></span>Control</a>
+    <a class="view-tab" href="#map" data-view="map" title="Map" aria-current="page"><span data-icon="map"></span><span class="tab-label">Map</span></a>
+    <a class="view-tab" href="#messages" data-view="messages" id="messages-tab" title="Messages"><span data-icon="chat"></span><span class="tab-label">Messages</span><span class="tab-badge" id="messages-badge" aria-hidden="true" hidden></span></a>
+    <a class="view-tab" href="#control" data-view="control" id="control-tab" title="Control panel"><span data-icon="sliders"></span><span class="tab-label">Control</span></a>
   </nav>
   <div class="stats">
     <span class="stat"><b id="stat-nodes">0</b> nodes</span>
@@ -922,6 +949,8 @@ const hasPos = (node) => Boolean(node) && Number.isFinite(node.lat) && Number.is
 const shortId = (id) => (id || "").slice(0, 8);
 // Packets other MeshMapper observers heard (relayed by the meshmapper plugin) rather than this radio.
 const isRemote = (packet) => packet.source === "meshmapper";
+// Packet types hidden in the control panel (Packet map plugin) are left out of the list, filters and flows.
+const isShown = (packet) => !state.hiddenPacketTypes.has(packet.payload_type_name);
 // Hashtag channels may or may not be stored with their "#".
 const channelLabel = (name) => (name.startsWith("#") ? name : `#${name}`);
 const nodeLabel = (ref) => (ref && (ref.name || (ref.node_id ? shortId(ref.node_id) : ref.hash))) || "?";
@@ -961,6 +990,7 @@ const state = {
   sourceFilter: ["all", "local", "remote"].includes(store.get("source", "all")) ? store.get("source", "all") : "all",
   viewReady: false,
   mapAvailable: true,     // the packet_map plugin feeds the map and messages
+  hiddenPacketTypes: new Set(),  // packet_map setting: left out of the list, filters and flows
   messages: new Map(),   // packet id -> packet with decrypted text
   expanded: new Set(),   // message hashes whose details are open
   channelFilter: new Set(),
@@ -1312,7 +1342,7 @@ let frame = null;
 
 function playFlow(packet, force = false) {
   const remote = isRemote(packet);
-  if (((!state.showFlow || (remote && !state.showRemoteFlow)) && !force) || document.hidden) return;
+  if (((!state.showFlow || (remote && !state.showRemoteFlow) || !isShown(packet)) && !force) || document.hidden) return;
   const stops = routeStops(packet);
   if (!stops.length) return;
   const color = packetMeta(packet).color;
@@ -1541,7 +1571,7 @@ function packetCard(packet, fresh) {
 const matchesSource = (packet) => state.sourceFilter === "all" || (state.sourceFilter === "remote") === isRemote(packet);
 
 function matchesFilter(packet) {
-  if (!matchesSource(packet)) return false;
+  if (!isShown(packet) || !matchesSource(packet)) return false;
   if (state.typeFilter.size && !state.typeFilter.has(packet.payload_type_name)) return false;
   const query = $("filter").value.trim().toLowerCase();
   if (!query) return true;
@@ -1623,17 +1653,20 @@ $("pause").addEventListener("click", () => {
 
 // Filter chips ("All" plus one per option). The buttons are only rebuilt when the set of
 // options changes, so counts can update live without losing keyboard focus.
-function syncChips(wrap, options, selected, minOptions = 1) {
+// ``leading``: an element kept before the chips (not a filter itself).
+function syncChips(wrap, options, selected, minOptions = 1, leading = null) {
   const keys = options.map((o) => o.key).join("\n");
   if (wrap.dataset.keys !== keys) {
     wrap.dataset.keys = keys;
     wrap.replaceChildren(
+      leading,
       el("button", { class: "filter-chip", type: "button", "data-key": "" }, "All"),
       ...options.map((o) => el("button", { class: "filter-chip", type: "button", "data-key": o.key, title: o.title },
         o.color ? el("i", { style: `--c:${o.color}`, "aria-hidden": "true" }) : null, o.label, el("span", { class: "n" }))));
   }
   const counts = new Map(options.map((o) => [o.key, o.count]));
   for (const chip of wrap.children) {
+    if (!chip.matches("button.filter-chip")) continue;
     const key = chip.dataset.key;
     chip.setAttribute("aria-pressed", String(key ? selected.has(key) : selected.size === 0));
     if (key) chip.querySelector(".n").textContent = counts.get(key);
@@ -1651,17 +1684,46 @@ function toggleChip(event, selected) {
   return true;
 }
 
+const typesManage = el("a", { class: "filter-chip chip-manage", href: "#control/plugins/packet_map" });
+
+function updateTypesManage() {
+  const hidden = state.hiddenPacketTypes.size;
+  const label = hidden ? `${plural(hidden, "packet type", "packet types")} hidden. Choose which are shown` : "Choose which packet types are shown";
+  // Just the icon until something is hidden, to keep the row short.
+  typesManage.innerHTML = `${icon("sliders")}${hidden ? `<span>${hidden} hidden</span>` : ""}`;
+  typesManage.title = label;
+  typesManage.setAttribute("aria-label", label);
+}
+
 function renderTypeChips() {
   const counts = new Map();
   for (const packet of state.packets) {
-    if (matchesSource(packet)) counts.set(packet.payload_type_name, (counts.get(packet.payload_type_name) || 0) + 1);
+    if (isShown(packet) && matchesSource(packet)) counts.set(packet.payload_type_name, (counts.get(packet.payload_type_name) || 0) + 1);
   }
   const rank = (type) => { const i = PACKET_TYPE_ORDER.indexOf(type); return i === -1 ? 99 : i; };
   const types = [...counts.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  updateTypesManage();
   syncChips($("type-chips"), types.map((type) => {
     const meta = PACKET_TYPES[type] || { label: type, color: "#8b98a5" };
     return { key: type, label: meta.label, color: meta.color, title: type, count: counts.get(type) };
-  }), state.typeFilter);
+  }), state.typeFilter, 1, typesManage);
+}
+
+// The Packet map plugin's "Packet types shown" setting (snapshot, or changed live).
+function setHiddenPacketTypes(types) {
+  state.hiddenPacketTypes = new Set(types || []);
+  for (const type of state.hiddenPacketTypes) state.typeFilter.delete(type);
+  const selected = findPacket(state.selectedId);
+  if (selected && !isShown(selected)) state.selectedId = null;
+}
+
+function applyHiddenPacketTypes(types) {
+  setHiddenPacketTypes(types);
+  if (state.selectedId === null) showSelectedRoute(false);
+  updateSourceFilter();
+  renderTypeChips();
+  renderList();
+  updatePacketStats();
 }
 $("type-chips").addEventListener("click", (event) => {
   if (!toggleChip(event, state.typeFilter)) return;
@@ -1671,7 +1733,7 @@ $("type-chips").addEventListener("click", (event) => {
 
 // The source switch appears once another observer's packet has arrived.
 function updateSourceFilter() {
-  const remote = state.packets.filter(isRemote);
+  const remote = state.packets.filter((packet) => isRemote(packet) && isShown(packet));
   $("source-filter").hidden = remote.length === 0 && state.sourceFilter === "all";
   $("remote-count").textContent = remote.length || "";
   for (const button of $("source-filter").children) button.setAttribute("aria-pressed", String(button.dataset.source === state.sourceFilter));
@@ -1743,8 +1805,9 @@ document.addEventListener("keydown", (event) => {
 
 function updatePacketStats() {
   const cutoff = Date.now() / 1000 - 60;
-  $("stat-packets").textContent = state.packets.length;
-  $("stat-rate").textContent = state.packets.filter((p) => p.received_at >= cutoff).length;
+  const shown = state.packets.filter(isShown);
+  $("stat-packets").textContent = shown.length;
+  $("stat-rate").textContent = shown.filter((p) => p.received_at >= cutoff).length;
 }
 
 // --- Messages view ------------------------------------------------------------------------------
@@ -2296,6 +2359,7 @@ function handleEvent(event) {
     // The map's data comes from the packet_map plugin, which may be off.
     state.mapAvailable = Boolean(event.map);
     const data = event.map || { self_id: null, nodes: [], packets: [], remote_packets: [], messages: [] };
+    setHiddenPacketTypes(data.hidden_types);
     state.selfId = data.self_id;
     for (const { marker, layer } of markers.values()) layer.removeLayer(marker);
     markers.clear();
@@ -2318,6 +2382,8 @@ function handleEvent(event) {
     updateConnection(event.connection);
   } else if (event.type === "control") {
     if (window.MeshgramControl) window.MeshgramControl.onChange(event.what);
+  } else if (event.type === "map_settings") {
+    applyHiddenPacketTypes(event.hidden_types);
   } else if (event.type === "nodes" || event.type === "self") {
     if (event.self_id) state.selfId = event.self_id;
     (event.nodes || []).forEach(upsertNode);

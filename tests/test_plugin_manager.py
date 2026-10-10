@@ -39,7 +39,21 @@ class RecordingPlugin(BasePlugin):
         EVENTS.append(("shutdown", self.settings.get("greeting")))
 
 
+class LivePlugin(RecordingPlugin):
+    """Takes a new greeting while running; anything else needs a restart."""
+
+    async def apply_settings(self, settings):
+        if settings.get("greeting") == "crash":
+            raise RuntimeError("bad")
+        if set(settings) - {"greeting", "token"}:
+            return False
+        EVENTS.append(("applied", settings.get("greeting")))
+        self.settings = settings
+        return True
+
+
 TARGET = f"{__name__}:RecordingPlugin"
+LIVE_TARGET = f"{__name__}:LivePlugin"
 
 
 class _Host:
@@ -137,6 +151,34 @@ class PluginManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(EVENTS[-2:], [("shutdown", "web"), ("startup", "config")])
         self.assertEqual(json.loads(self.path.read_text())["plugins"], {})
         await restarted.stop_all()
+        await manager.stop_all()
+
+    async def test_plugins_that_can_take_settings_live_keep_running(self):
+        manager = PluginManager([PluginConfig(name=LIVE_TARGET, settings={"greeting": "config"})], self.host, PluginOverrideStore(self.path))
+        await manager.start_all()
+        plugin = await manager.update(LIVE_TARGET, settings={"greeting": "live"})
+        self.assertFalse(plugin["restarted"])
+        self.assertTrue(plugin["running"])
+        self.assertEqual(EVENTS, [("startup", "config"), ("applied", "live")])
+
+        # Same settings again: nothing to do.
+        plugin = await manager.update(LIVE_TARGET, settings={"greeting": "live"})
+        self.assertEqual(EVENTS[-1], ("applied", "live"))
+
+        # It can't take these live: restarted.
+        plugin = await manager.update(LIVE_TARGET, settings={"greeting": "live", "other": 1})
+        self.assertTrue(plugin["restarted"])
+        self.assertEqual(EVENTS[-2:], [("shutdown", "live"), ("startup", "live")])
+
+        # A failing live change falls back to a restart.
+        with self.assertLogs("meshgram.plugin_manager", "ERROR"):
+            plugin = await manager.update(LIVE_TARGET, settings={"greeting": "crash"})
+        self.assertTrue(plugin["restarted"])
+        self.assertEqual(EVENTS[-1], ("startup", "crash"))
+
+        # Resetting applies config.yaml's settings the same way.
+        plugin = await manager.reset(LIVE_TARGET)
+        self.assertEqual((plugin["restarted"], EVENTS[-1]), (False, ("applied", "config")))
         await manager.stop_all()
 
     async def test_invalid_settings_change_nothing(self):

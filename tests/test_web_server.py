@@ -284,7 +284,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("packet_map", names)
 
         status, plugin = await self.call("PATCH", "/api/plugins/trace-me", {"enabled": True, "settings": {"keywords": ["route"]}})
-        self.assertEqual((status, plugin["name"], plugin["running"]), (200, "trace_me", True))
+        self.assertEqual((status, plugin["name"], plugin["running"], plugin["restarted"]), (200, "trace_me", True, True))
         self.assertEqual(plugin["settings"], {"keywords": ["route"]})
 
         status, error = await self.call("PATCH", "/api/plugins/trace_me", {"settings": {"keywords": "route"}})

@@ -140,6 +140,11 @@ plugins:
       # Feeds the web app's Map and Messages views: nodes and repeaters with a
       # position, every packet the radio hears, decrypted channel messages.
       # (Its address and password are in the web section.)
+      # Packet types left out of the packet list, its filters and the map's
+      # live flow (display only: they're still recorded). Easier to pick in the
+      # control panel. Names: ADVERT GRP_TXT GRP_DATA TXT_MSG ACK REQ RESPONSE
+      # PATH ANON_REQ TRACE MULTIPART CONTROL RAW_CUSTOM TYPE_12 TYPE_13 TYPE_14
+      # hidden_packet_types: [ACK, PATH]
       # max_packets: 500
       # max_remote_packets: 1000 # packets from other MeshMapper observers
       max_messages: 1000

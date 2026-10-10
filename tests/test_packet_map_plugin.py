@@ -12,7 +12,9 @@ from unittest import mock
 from meshgram.config import WebConfig
 from meshgram.meshcore_packets import decode_advert, decode_packet, decrypt_group_text
 from meshgram.plugin import load_plugin_class
-from meshgram.plugins.packet_map import PacketMapConfig, PacketMapPlugin, PacketMapState
+from meshgram.meshcore_packets import PAYLOAD_TYPE_NAMES
+from meshgram.plugins.packet_map import PACKET_TYPE_LABELS, PacketMapConfig, PacketMapPlugin, PacketMapState
+from meshgram.settings_schema import SettingsError, validate
 from meshgram.plugins.packet_map_store import (
     SCHEMA_VERSION,
     PacketMapStore,
@@ -384,6 +386,46 @@ class PluginTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
         await plugin.on_shutdown()
         self.assertNotIn("map", web.events.snapshot())
         self.assertNotIn("map", queue.get_nowait())
+
+
+class HiddenPacketTypeTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._use_temp_data_dir()
+
+    def test_every_payload_type_can_be_hidden(self):
+        # Payload types are 4 bits; the decoder names unassigned ones TYPE_<n>.
+        names = {PAYLOAD_TYPE_NAMES.get(value, f"TYPE_{value}") for value in range(16)}
+        self.assertEqual(set(PACKET_TYPE_LABELS), names)
+        schema = PacketMapPlugin.settings_schema
+        validate({"hidden_packet_types": ["ACK", "TYPE_13"]}, schema)
+        with self.assertRaises(SettingsError):
+            validate({"hidden_packet_types": ["ACKS"]}, schema)
+
+    def test_config_accepts_loose_values(self):
+        self.assertEqual(PacketMapConfig.from_settings({}).hidden_types, ())
+        # In the page's order, whatever order or case config.yaml uses.
+        self.assertEqual(PacketMapConfig.from_settings({"hidden_packet_types": "path, ack"}).hidden_types, ("ACK", "PATH"))
+        self.assertEqual(PacketMapConfig.from_settings({"hidden_packet_types": ["PATH", "ADVERT"]}).hidden_types, ("ADVERT", "PATH"))
+
+    async def test_hidden_types_change_live(self):
+        web = WebServer(WebConfig(port=0))
+        plugin = PacketMapPlugin({"persist": False, "hidden_packet_types": ["ACK"]})
+        await plugin.on_startup(_context(web))
+        self.addAsyncCleanup(plugin.on_shutdown)
+        self.assertEqual(web.events.snapshot()["map"]["hidden_types"], ["ACK"])
+        await plugin.handle_rx_log({"payload": _flood(5, [], "11" + "2233" + "44")})
+
+        queue = web.events.subscribe()
+        self.assertTrue(await plugin.apply_settings({"persist": False, "hidden_packet_types": ["PATH", "ACK"]}))
+        self.assertEqual(queue.get_nowait(), {"type": "map_settings", "hidden_types": ["ACK", "PATH"]})
+        self.assertEqual(web.events.snapshot()["map"]["hidden_types"], ["ACK", "PATH"])
+        # Nothing was dropped: hiding is for display only.
+        self.assertEqual(len(plugin.state.packets), 1)
+
+        # Buffer sizes or storage need a restart.
+        self.assertFalse(await plugin.apply_settings({"persist": False, "max_packets": 50}))
+        self.assertFalse(await plugin.apply_settings({"hidden_packet_types": ["ACK"]}))  # persist back on
+        self.assertEqual(plugin.config.hidden_types, ("ACK", "PATH"))
 
 
 class StoreTests(_DataDirMixin, unittest.TestCase):

@@ -56,6 +56,14 @@ class BasePlugin:
         Release background resources and unregister transport listeners here.
         """
 
+    async def apply_settings(self, settings: dict[str, Any]) -> bool:
+        """Take new settings (from the web app) while running, if the plugin can.
+
+        Return True once applied (also update ``self.settings``); False, the
+        default, has the plugin restarted with them instead.
+        """
+        return False
+
     async def on_telegram_message(
         self,
         event: TelegramMessageEvent,

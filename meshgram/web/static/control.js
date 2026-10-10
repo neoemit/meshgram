@@ -28,6 +28,7 @@
     contactType: "all",
     radioState: null,
     allows: null,
+    focusPlugin: null,         // plugin whose settings a #control/plugins/<name> link opened
   };
   let uid = 0;
   const nextId = (prefix) => `c-${prefix}-${++uid}`;
@@ -289,10 +290,18 @@
 
   // --- Sections ---------------------------------------------------------------------------
 
-  const sectionFromHash = () => {
-    const match = /^#control\/(\w+)/.exec(location.hash);
-    return match && SECTIONS.includes(match[1]) ? match[1] : null;
+  // #control/<section>, or #control/plugins/<name> to open a plugin's settings.
+  const parseHash = () => {
+    const match = /^#control\/(\w+)(?:\/([\w.:-]+))?/.exec(location.hash);
+    if (!match || !SECTIONS.includes(match[1])) return { section: null, plugin: null };
+    return { section: match[1], plugin: match[1] === "plugins" ? match[2] || null : null };
   };
+
+  function openPluginFromLink(plugin) {
+    if (!plugin) return;
+    ui.openPlugins.add(plugin);
+    ui.focusPlugin = plugin;
+  }
 
   function selectSection(section, { focus = false } = {}) {
     ui.section = section;
@@ -345,11 +354,13 @@
   function render(section) {
     const panel = $(`cpanel-${section}`);
     if (!panel) return;
-    if (!ui.data[section]) {
-      panel.replaceChildren(placeholder(section));
-      return;
-    }
-    ({ radio: renderRadio, channels: renderChannels, contacts: renderContacts, plugins: renderPlugins })[section](panel);
+    // Swapping the content would otherwise clamp the scroll position while the panel is empty.
+    const view = $("view-control");
+    const scrollTop = view.scrollTop;
+    if (!ui.data[section]) panel.replaceChildren(placeholder(section));
+    else ({ radio: renderRadio, channels: renderChannels, contacts: renderContacts, plugins: renderPlugins })[section](panel);
+    view.scrollTop = scrollTop;
+    if (section === "plugins") revealLinkedPlugin(panel);
   }
 
   // Something changed (here or in another tab): reload what's on screen, mark the rest.
@@ -844,6 +855,16 @@
     panel.replaceChildren(el("div", { class: "plugin-list" }, ...plugins.map(pluginCard)));
   }
 
+  // After a #control/plugins/<name> link: bring that plugin's settings into view.
+  function revealLinkedPlugin(panel) {
+    if (!ui.focusPlugin || !ui.data.plugins) return;
+    const card = panel.querySelector(`[data-plugin="${CSS.escape(ui.focusPlugin)}"]`);
+    ui.focusPlugin = null;
+    if (!card) return;
+    card.scrollIntoView({ block: "start" });
+    (card.querySelector(".plugin-settings input, .plugin-settings select") || card.querySelector(".disclosure")).focus({ preventScroll: true });
+  }
+
   function pluginState(plugin) {
     if (ui.busyPlugins.has(plugin.name)) return ["busy", plugin.enabled ? "Starting…" : "Stopping…"];
     if (plugin.running) return ["running", "Running"];
@@ -898,13 +919,13 @@
     const changed = plugin.overridden.length
       ? el("span", { class: "tag", title: "Saved by Meshgram in its data directory; config.yaml says otherwise" }, "Changed here")
       : null;
-    const article = el("article", { class: "card plugin-card", "aria-labelledby": `${settingsId}-title` },
-      el("div", { class: "card-head" },
-        el("h3", { id: `${settingsId}-title` }, plugin.title),
-        el("span", { class: "plugin-id" }, plugin.name),
-        el("span", { class: "badge-state", "data-state": stateKey }, stateLabel),
-        changed,
-        el("span", { class: "spacer" }),
+    const article = el("article", { class: "card plugin-card", "data-plugin": plugin.name, "aria-labelledby": `${settingsId}-title` },
+      el("div", { class: "card-head plugin-head" },
+        el("div", { class: "plugin-title" },
+          el("h3", { id: `${settingsId}-title` }, plugin.title),
+          el("span", { class: "plugin-id" }, plugin.name),
+          el("span", { class: "badge-state", "data-state": stateKey }, stateLabel),
+          changed),
         toggle),
       plugin.description ? el("p", { class: "desc" }, plugin.description) : null,
       plugin.error ? notice("bad", plugin.error) : null,
@@ -932,7 +953,7 @@
     const hasForm = schema.properties && Object.keys(schema.properties).length;
     const root = hasForm ? objectEditor(schema, plugin.settings || {}, "", ctx, { top: true }) : jsonEditor(plugin.settings || {}, "", ctx, "Settings (JSON)");
     const errors = el("ul", { class: "form-errors", role: "alert", hidden: true });
-    const save = el("button", { class: "btn btn-sm btn-primary", type: "submit", "data-change": "" }, "Save and restart");
+    const save = el("button", { class: "btn btn-sm btn-primary", type: "submit", "data-change": "" }, "Save");
     const cancel = el("button", { class: "btn btn-sm", type: "button" }, "Discard changes");
     const reset = plugin.overridden.includes("settings")
       ? el("button", { class: "btn btn-sm btn-danger", type: "button", "data-change": "" }, "Reset to config.yaml") : null;
@@ -982,7 +1003,7 @@
         ui.editors.delete(plugin.name);
         render("plugins");
         invalidate(["channels"]);
-        toast(updated.running ? `${plugin.title} saved and restarted` : `${plugin.title} saved`);
+        toast(updated.restarted ? `${plugin.title} saved and restarted` : `${plugin.title} saved`);
       } catch (err) {
         if (err.details) showErrors(ctx, errors, err.details);
         else toast(err.message, "error");
@@ -1075,7 +1096,9 @@
     if (t.includes("integer") || t.includes("number")) return numberEditor(schema, value, path, ctx, key, required);
     if (t.includes("string")) return stringEditor(schema, value, path, ctx, key, required);
     if (t.includes("array")) {
-      return isChannel(schema.items) ? channelListEditor(schema, value, path, ctx, key) : listEditor(schema, value, path, ctx, key);
+      if (isChannel(schema.items)) return channelListEditor(schema, value, path, ctx, key);
+      if (schema.items && schema.items.enum) return enumListEditor(schema, value, path, ctx, key);
+      return listEditor(schema, value, path, ctx, key);
     }
     if (t.includes("object") && schema.properties) return objectEditor(schema, value || {}, path, ctx, { key });
     if (t.includes("object") && schema.additionalProperties && typeof schema.additionalProperties === "object") {
@@ -1202,6 +1225,40 @@
     };
   }
 
+  // A pick from a fixed set, as ticks. With ``x-inverted`` the setting lists what's left
+  // unticked (hidden packet types, say), so new options start out ticked.
+  function enumListEditor(schema, value, path, ctx, key) {
+    const items = schema.items;
+    const titles = items["x-enum-titles"] || [];
+    const inverted = Boolean(schema["x-inverted"]);
+    const known = (raw) => items.enum.find((option) => String(option).toLowerCase() === String(raw).trim().toLowerCase());
+    const listed = new Set((Array.isArray(value) ? value : []).map(known).filter((option) => option !== undefined));
+    const inputs = items.enum.map((option, index) => {
+      const input = el("input", { type: "checkbox", value: String(option), checked: (inverted ? !listed.has(option) : listed.has(option)) || null });
+      return { option, input, chip: el("label", { class: "check-chip" }, input, titles[index] || String(option)) };
+    });
+    const groupId = nextId("el");
+    const node = register(ctx, path, el("div", { class: "field wide" },
+      el("span", { class: "label", id: groupId }, labelOf(schema, key)),
+      el("div", { class: "check-list", role: "group", "aria-labelledby": groupId }, ...inputs.map(({ chip }) => chip)),
+      hintFor(schema) ? el("p", { class: "hint" }, hintFor(schema)) : null));
+    const reset = button(inverted ? "Tick all" : "Clear", {
+      onClick: () => {
+        inputs.forEach(({ input }) => { input.checked = inverted; });
+        node.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+    });
+    reset.dataset.change = "";
+    node.querySelector(".check-list").append(reset);
+    return {
+      el: node,
+      get: () => {
+        const picked = inputs.filter(({ input }) => input.checked !== inverted).map(({ option }) => option);
+        return picked.length ? picked : undefined;
+      },
+    };
+  }
+
   function listEditor(schema, value, path, ctx, key) {
     const items = schema.items || { type: "string" };
     const numeric = types(items).some((t) => t === "integer" || t === "number");
@@ -1230,7 +1287,7 @@
       [name, editorFor(propertySchema, value[name], join(path, name), ctx, name, required.has(name))]);
     // Settings the schema doesn't describe are kept as they are.
     const extras = Object.fromEntries(Object.entries(value).filter(([name]) => !(name in properties)));
-    const isWide = (s) => types(s).includes("object") || (types(s).includes("array") && isChannel(s.items));
+    const isWide = (s) => types(s).includes("object") || (types(s).includes("array") && (isChannel(s.items) || Boolean(s.items && s.items.enum)));
     for (const [name, child] of children) if (isWide(properties[name])) child.el.classList.add("wide");
     const grid = el("div", { class: "form-grid" }, ...children.map(([, child]) => child.el));
     const node = top ? grid : el("fieldset", { class: "wide" }, el("legend", {}, labelOf(schema, key)), schema.description ? el("p", { class: "hint" }, schema.description) : null, grid);
@@ -1365,12 +1422,16 @@
     // The view became visible.
     show() {
       renderReadOnly();
-      selectSection(sectionFromHash() || ui.section);
+      const { section, plugin } = parseHash();
+      openPluginFromLink(plugin);
+      selectSection(section || ui.section);
     },
     // The URL changed while the view is visible (#control/channels, say).
     route() {
-      const section = sectionFromHash();
-      if (section && section !== ui.section && currentView === "control") selectSection(section);
+      if (currentView !== "control") return;
+      const { section, plugin } = parseHash();
+      openPluginFromLink(plugin);
+      if (section && (section !== ui.section || plugin)) selectSection(section);
     },
     // A fresh snapshot: the page (re)connected, or plugins changed what it shows.
     onSnapshot() {

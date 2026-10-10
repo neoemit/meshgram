@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import math
 import re
@@ -63,6 +64,26 @@ PERSIST_INTERVAL_SECONDS = 5.0
 DEFAULT_DB_FILE = "packet_map.sqlite3"
 # The web app's snapshot section this plugin fills.
 SNAPSHOT_KEY = "map"
+# Every payload type a packet can have (4 bits; unassigned ones decode as
+# TYPE_<n>), in the order the page lists them and with its labels.
+PACKET_TYPE_LABELS = {
+    "ADVERT": "Advert",
+    "GRP_TXT": "Channel msg",
+    "GRP_DATA": "Channel data",
+    "TXT_MSG": "Direct msg",
+    "ACK": "Ack",
+    "REQ": "Request",
+    "RESPONSE": "Response",
+    "PATH": "Path",
+    "ANON_REQ": "Anon request",
+    "TRACE": "Trace",
+    "MULTIPART": "Multipart",
+    "CONTROL": "Control",
+    "RAW_CUSTOM": "Custom",
+    "TYPE_12": "Type 12",
+    "TYPE_13": "Type 13",
+    "TYPE_14": "Type 14",
+}
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -72,6 +93,19 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _packet_types(value: Any) -> tuple[str, ...]:
+    """A list (or "ACK, PATH" string) of packet type names, in the page's order."""
+    if isinstance(value, str):
+        items: Any = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = []
+    wanted = {str(item).strip().upper() for item in items if str(item).strip()}
+    known = [name for name in PACKET_TYPE_LABELS if name in wanted]
+    return tuple(known + sorted(wanted - set(known)))
+
+
 @dataclass(slots=True)
 class PacketMapConfig:
     max_packets: int = 500
@@ -79,6 +113,9 @@ class PacketMapConfig:
     max_remote_packets: int = 1000
     # Where nodes and packet history are kept across restarts; None keeps them in memory only.
     db_path: Optional[Path] = None
+    # Packet types the page leaves out of its packet list, filters and live flow.
+    # Display only: they're still recorded, so showing them again brings them back.
+    hidden_types: tuple[str, ...] = ()
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "PacketMapConfig":
@@ -91,6 +128,7 @@ class PacketMapConfig:
             max_messages=max(10, _as_int(settings.get("max_messages"), 1000)),
             max_remote_packets=max(10, _as_int(settings.get("max_remote_packets"), 1000)),
             db_path=db_path,
+            hidden_types=_packet_types(settings.get("hidden_packet_types")),
         )
 
 
@@ -519,6 +557,22 @@ class PacketMapPlugin(BasePlugin):
     settings_schema = {
         "type": "object",
         "properties": {
+            "hidden_packet_types": {
+                "type": "array",
+                "title": "Packet types shown",
+                "description": (
+                    "Untick a type to leave its packets out of the packet list, its filters and the map's live flow. "
+                    "Nothing is deleted: tick it again and they're back. Nodes and the Messages tab aren't affected."
+                ),
+                "items": {
+                    "type": "string",
+                    "enum": list(PACKET_TYPE_LABELS),
+                    "x-enum-titles": list(PACKET_TYPE_LABELS.values()),
+                },
+                "uniqueItems": True,
+                # Stored as the types to hide; the form ticks the ones shown.
+                "x-inverted": True,
+            },
             "max_packets": {"type": "integer", "minimum": 10, "title": "Packets kept", "default": 500},
             "max_remote_packets": {
                 "type": "integer",
@@ -571,7 +625,20 @@ class PacketMapPlugin(BasePlugin):
         return []
 
     def _snapshot(self) -> dict[str, Any]:
-        return {SNAPSHOT_KEY: self.state.snapshot()}
+        return {SNAPSHOT_KEY: {**self.state.snapshot(), **self._display_settings()}}
+
+    def _display_settings(self) -> dict[str, Any]:
+        return {"hidden_types": list(self.config.hidden_types)}
+
+    async def apply_settings(self, settings: dict[str, Any]) -> bool:
+        """Which packet types are shown changes live; anything else needs a restart."""
+        config = PacketMapConfig.from_settings(settings)
+        if dataclasses.replace(config, hidden_types=self.config.hidden_types) != self.config:
+            return False
+        self.settings = settings
+        self.config = config
+        self.state.publish({"type": "map_settings", **self._display_settings()})
+        return True
 
     async def _open_store(self) -> None:
         if self.config.db_path is None:

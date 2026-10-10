@@ -7,7 +7,8 @@ and is usually mounted read-only.
 
 Reconfiguring a plugin restarts it: the running instance gets ``on_shutdown``,
 a new one is created with the new settings and gets ``on_startup`` (and
-``on_mesh_connected`` when the radio is connected).
+``on_mesh_connected`` when the radio is connected). A plugin that can take the
+new settings while running says so from ``apply_settings``, and keeps running.
 """
 from __future__ import annotations
 
@@ -313,21 +314,22 @@ class PluginManager:
                 override.pop("settings")
 
             self._save(entry.name, override)
-            restart = settings is not None and entry.instance is not None
+            previous_settings = entry.settings
             entry.override = override
-            await self._apply(entry, restart=restart)
-            return self._describe(entry)
+            restarted = await self._apply(entry, settings_changed=entry.settings != previous_settings)
+            return {**self._describe(entry), "restarted": restarted}
 
     async def reset(self, name: str) -> dict[str, Any]:
         """Drop the web app's changes to a plugin and go back to config.yaml."""
         async with self._lock:
             entry = self._entry(name)
+            restarted = False
             if entry.override:
                 self._save(entry.name, {})
-                restart = "settings" in entry.override
+                previous_settings = entry.settings
                 entry.override = {}
-                await self._apply(entry, restart=restart)
-            return self._describe(entry)
+                restarted = await self._apply(entry, settings_changed=entry.settings != previous_settings)
+            return {**self._describe(entry), "restarted": restarted}
 
     def _save(self, name: str, override: dict[str, Any]) -> None:
         if self.store is None:
@@ -340,10 +342,32 @@ class PluginManager:
         # Raises OSError when it can't be saved; nothing has changed then.
         self.store.save(overrides)
 
-    async def _apply(self, entry: PluginEntry, *, restart: bool) -> None:
-        if entry.instance is not None and (restart or not entry.enabled):
+    async def _apply(self, entry: PluginEntry, *, settings_changed: bool) -> bool:
+        """Bring the running instance in line with the entry; True if it was (re)started."""
+        if entry.instance is not None and not entry.enabled:
             await self._stop(entry)
-        if entry.enabled and entry.instance is None:
-            await self._start(entry)
-        elif not entry.enabled:
+        elif entry.instance is not None and settings_changed:
+            if await self._apply_live(entry):
+                return False
+            await self._stop(entry)
+        if not entry.enabled:
             entry.error = None
+            return False
+        if entry.instance is None:
+            await self._start(entry)
+            return entry.instance is not None
+        return False
+
+    async def _apply_live(self, entry: PluginEntry) -> bool:
+        """Hand the new settings to the running instance; False when it has to be restarted."""
+        hook = getattr(entry.instance, "apply_settings", None)
+        if not callable(hook):
+            return False
+        try:
+            applied = bool(await hook(copy.deepcopy(entry.settings)))
+        except Exception:
+            LOGGER.exception("Plugin %s failed to apply new settings; restarting it", entry.name)
+            return False
+        if applied:
+            LOGGER.info("Plugin %s took its new settings without a restart", entry.name)
+        return applied
