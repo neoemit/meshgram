@@ -10,7 +10,8 @@
 #
 # Two environment variables say where files are (they aren't settings):
 #   MESHGRAM_CONFIG_PATH  this file (default: config.yaml)
-#   MESHGRAM_DATA_DIR     persistent state such as packet_map history
+#   MESHGRAM_DATA_DIR     persistent state: packet_map history and plugin
+#                         settings changed in the web app's control panel
 #                         (default: data; /app/data in Docker)
 
 telegram:
@@ -24,33 +25,12 @@ telegram:
 runtime:
   log_level: INFO   # DEBUG | INFO | WARNING | ERROR
 
-# Selects which radio backend the bridge speaks to.
-mesh:
-  backend: meshtastic   # or "meshcore"
-
-# Only used when mesh.backend = meshtastic.
-meshtastic:
-  bridge_channel: 0
-  node_name_overrides: {}
-  # Example:
-  # node_name_overrides:
-  #   "!1234abcd": "RTR-A"
-  connection:
-    mode: serial               # serial | tcp
-    serial_device: /dev/ttyUSB0
-    tcp_host: localhost
-    tcp_port: 4403
-    # Skip the full node DB download at startup; helps on proxied links.
-    # Docker Desktop on macOS (serial bridged over TCP by socat on the host):
-    #   mode: tcp, tcp_host: host.docker.internal, no_nodes: true
-    no_nodes: false
-
-# Only used when mesh.backend = meshcore.
-# MeshCore has no native packet-level reactions and no reply threading;
-# the bridge silently drops reaction syncs and reply-id metadata in that mode.
+# The MeshCore companion radio. MeshCore has no packet-level reactions and no
+# reply threading, so the bridge relays messages only.
 meshcore:
+  # The channel slot bridged to the Telegram group.
   bridge_channel: 0
-  # Map pubkey prefix → display name (similar to meshtastic.node_name_overrides):
+  # Map pubkey prefix → display name:
   contact_name_overrides: {}
   # Optional fallback for identity-less channel echoes. Keep disabled unless
   # your MeshCore feed omits sender identity and you observe self-echo loops.
@@ -66,6 +46,22 @@ meshcore:
     # ble_pin: "123456"
     auto_reconnect: true
 
+# The web app: live packet map, messages, and a control panel for the radio
+# (settings, channels, contacts) and the plugins. Open http://<host>:<port>/.
+web:
+  enabled: true
+  # 127.0.0.1 keeps it on this machine. Use 0.0.0.0 to reach it from other
+  # machines; in Docker it must be 0.0.0.0 (docker-compose.yml publishes 8080).
+  host: 127.0.0.1
+  port: 8080
+  # HTTP Basic auth (any username). Required for the control panel to change
+  # anything unless host is 127.0.0.1: without it the panel is read-only.
+  # password: ""
+  # title: Meshgram
+  # Map tiles; empty uses OpenStreetMap, restyled for the light/dark theme.
+  # tile_url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+  # tile_attribution: ""
+
 chunking:
   enabled: true
   prefix_template: "({index}/{total}) "
@@ -77,21 +73,17 @@ chunking:
   retry_max_attempts: 3
   retry_initial_delay_ms: 500
   retry_backoff_factor: 2.0
-  wait_for_ack: true
-  ack_timeout_ms: 20000
   abort_on_chunk_failure: true
 
+# Plugins can also be turned on and off and reconfigured in the web app's
+# control panel. Those changes are saved in MESHGRAM_DATA_DIR/plugins.json and
+# win over what's here until you reset them there.
 plugins:
   - name: bridge
     enabled: true
     settings:
+      # Overrides meshcore.bridge_channel when set.
       channel: 0
-      reply_link_ttl_hours: 24
-      reactions_enabled: true
-      meshtastic_want_ack: true
-      missing_target_policy: fallback_message
-      reply_missing_suffix: "(reply target not found)"
-      reaction_missing_notice_template: "(reaction target not found)"
 
   - name: ping_pong
     enabled: true
@@ -107,17 +99,17 @@ plugins:
   - name: trace_me  # "trace-me" also works
     enabled: false
     settings:
-      # MeshCore only. Reply when a MeshCore channel message is exactly "trace".
+      # Reply when a channel message is exactly "trace".
       keywords: ["trace"]
-      # Omit or set to "same" to reply on the incoming MeshCore channel.
+      # Omit or set to "same" to reply on the incoming channel.
       response_channel: same
-      # Optional allowlist of incoming MeshCore channels that can trigger trace responses.
+      # Optional allowlist of incoming channels that can trigger trace responses.
       # channels: [0]
 
   - name: meshmapper
     enabled: false
     settings:
-      # MeshCore only. Uploads every packet the radio hears to MeshMapper's
+      # Uploads every packet the radio hears to MeshMapper's
       # MQTT broker (mqtt.meshmapper.net:443, WebSockets + TLS) as an observer.
       # Required: your MeshMapper region code.
       iata: "XXX"
@@ -145,12 +137,9 @@ plugins:
   - name: packet_map
     enabled: false
     settings:
-      # MeshCore only. Web app with a live map of nodes/repeaters and every
-      # packet the radio hears. Open http://<host>:<port>/ in a browser.
-      # Use 0.0.0.0 to reach it from other machines; in Docker it must be
-      # 0.0.0.0 (docker-compose.yml publishes port 8080).
-      host: 127.0.0.1
-      port: 8080
+      # Feeds the web app's Map and Messages views: nodes and repeaters with a
+      # position, every packet the radio hears, decrypted channel messages.
+      # (Its address and password are in the web section.)
       # max_packets: 500
       # max_remote_packets: 1000 # packets from other MeshMapper observers
       max_messages: 1000
@@ -158,8 +147,6 @@ plugins:
       # on restart (inside MESHGRAM_DATA_DIR, default ./data; /app/data in Docker).
       persist: true
       db_path: packet_map.sqlite3
-      # Optional HTTP Basic auth (any username):
-      # password: ""
 
   - name: dm_http_command
     enabled: false

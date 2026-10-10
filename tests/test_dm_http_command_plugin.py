@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from meshgram.config import MeshgramSettings
 from meshgram.plugins.dm_http_command import DirectMessageHttpCommandPlugin
-from meshgram.types import MeshtasticTextEvent, PluginContext
+from meshgram.types import MeshTextEvent, PluginContext
 
 
 class _FakeHttpPlugin(DirectMessageHttpCommandPlugin):
@@ -52,22 +52,20 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             },
             payload=b'{"data":{"inv1":{"name":"asd","soc":99}}}',
         )
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!ABCD0001",
             packet_id=41,
-            reply_id=None,
             channel_index=0,
             text="battery?",
             sender_label="node",
         )
 
-        actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+        actions = asyncio.run(plugin.on_mesh_message(event, self.context))
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].text, "99%")
         self.assertEqual(actions[0].destination_id, "!f00d0001")
         self.assertEqual(actions[0].channel_index, 0)
-        self.assertEqual(actions[0].reply_id, 41)
         self.assertEqual(plugin.calls, 1)
 
     def test_non_dm_message_is_ignored(self):
@@ -84,17 +82,16 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             },
             payload=b'{"data":{"inv1":{"soc":99}}}',
         )
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!ffffffff",
             packet_id=42,
-            reply_id=None,
             channel_index=0,
             text="BATTERY",
             sender_label="node",
         )
 
-        actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+        actions = asyncio.run(plugin.on_mesh_message(event, self.context))
         self.assertEqual(actions, [])
         self.assertEqual(plugin.calls, 0)
 
@@ -103,17 +100,16 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             {"commands": {"BATTERY": {"url": "http://example.local/battery", "type": "json"}}},
             payload=b'{"value":99}',
         )
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!abcd0001",
             packet_id=43,
-            reply_id=None,
             channel_index=0,
             text="TEMP",
             sender_label="node",
         )
 
-        actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+        actions = asyncio.run(plugin.on_mesh_message(event, self.context))
         self.assertEqual(actions, [])
         self.assertEqual(plugin.calls, 0)
 
@@ -122,17 +118,16 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             {"commands": {"BATTERY": {"url": "http://example.local/battery", "type": "json"}}},
             payload=b'{"value":99}',
         )
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!abcd0001",
             packet_id=44,
-            reply_id=None,
             channel_index=0,
             text="BATTERY NOW",
             sender_label="node",
         )
 
-        actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+        actions = asyncio.run(plugin.on_mesh_message(event, self.context))
         self.assertEqual(actions, [])
         self.assertEqual(plugin.calls, 0)
 
@@ -151,17 +146,16 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             }
         )
         plugin._http_get = lambda url, timeout_seconds, headers: b"not-json"
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!abcd0001",
             packet_id=45,
-            reply_id=None,
             channel_index=0,
             text="BATTERY",
             sender_label="node",
         )
 
-        actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+        actions = asyncio.run(plugin.on_mesh_message(event, self.context))
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].text, "Unable to fetch BATTERY")
 
@@ -183,17 +177,16 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             },
             payload=b'{"data":{"inv1":{"soc":77}}}',
         )
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!abcd0001",
             packet_id=46,
-            reply_id=None,
             channel_index=0,
             text="BATTERY",
             sender_label="node",
         )
         with patch.dict(os.environ, {"SOLAR_TOKEN": "secret-token"}, clear=False):
-            actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+            actions = asyncio.run(plugin.on_mesh_message(event, self.context))
 
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].text, "77%")
@@ -218,17 +211,16 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             },
             payload=b'{"value":77}',
         )
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!abcd0001",
             packet_id=48,
-            reply_id=None,
             channel_index=0,
             text="BATTERY",
             sender_label="node",
         )
         with patch.dict(os.environ, {"SOLAR_TOKEN": "env-token"}, clear=False):
-            actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+            actions = asyncio.run(plugin.on_mesh_message(event, self.context))
 
         self.assertEqual(actions[0].text, "77%")
         self.assertEqual(plugin.last_headers.get("Authorization"), "Bearer config-token")
@@ -250,11 +242,10 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             },
             payload=b'{"value":55}',
         )
-        event = MeshtasticTextEvent(
+        event = MeshTextEvent(
             from_id="!f00d0001",
             to_id="!abcd0001",
             packet_id=47,
-            reply_id=None,
             channel_index=0,
             text="BATTERY",
             sender_label="node",
@@ -267,7 +258,7 @@ class DirectMessageHttpCommandPluginTests(unittest.TestCase):
             },
             clear=False,
         ):
-            actions = asyncio.run(plugin.on_meshtastic_message(event, self.context))
+            actions = asyncio.run(plugin.on_mesh_message(event, self.context))
 
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].text, "55")

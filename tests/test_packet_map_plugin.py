@@ -1,5 +1,3 @@
-import asyncio
-import base64
 import hashlib
 import hmac
 import json
@@ -11,17 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from meshgram.config import MESHCORE_BACKEND, MESHTASTIC_BACKEND, PluginConfig
+from meshgram.config import WebConfig
 from meshgram.meshcore_packets import decode_advert, decode_packet, decrypt_group_text
-from meshgram.plugin import load_plugins
-from meshgram.plugins.packet_map import PacketMapConfig, PacketMapPlugin, PacketMapServer, PacketMapState
+from meshgram.plugin import load_plugin_class
+from meshgram.plugins.packet_map import PacketMapConfig, PacketMapPlugin, PacketMapState
 from meshgram.plugins.packet_map_store import (
     SCHEMA_VERSION,
     PacketMapStore,
     PacketMapStoreError,
     RetentionLimits,
 )
-from meshgram.status import StatusRegistry
+from meshgram.web import WebServer
 
 SELF_KEY = "AA" * 32
 REPEATER_KEY = "B1" + "11" * 31
@@ -62,8 +60,8 @@ def _flood(payload_type: int, path: list[str], payload_hex: str) -> str:
     return f"{header:02X}{len(path):02X}" + "".join(path) + payload_hex
 
 
-def _context(backend: str = MESHCORE_BACKEND) -> SimpleNamespace:
-    return SimpleNamespace(settings=SimpleNamespace(mesh=SimpleNamespace(backend=backend)))
+def _context(web=None) -> SimpleNamespace:
+    return SimpleNamespace(settings=SimpleNamespace(), web=web, status=None)
 
 
 class DecodeTests(unittest.TestCase):
@@ -288,74 +286,18 @@ class StateTests(unittest.TestCase):
         # This radio's own packets always come with their bytes.
         self.assertIsNone(self.state.ingest_rx_log({"decoded": decoded}))
 
-    def test_subscribers_receive_packets(self):
-        queue = self.state.subscribe()
+    def test_changes_are_published(self):
+        events = []
+        self.state.publish = events.append
         self.state.ingest_rx_log({"payload": _flood(4, [], _advert(REPEATER_KEY, 2, "Hilltop", 45.1, -73.1))})
-        event = queue.get_nowait()
-        self.assertEqual(event["type"], "packet")
-        self.assertEqual(event["nodes"][0]["id"], REPEATER_KEY)
-        self.state.unsubscribe(queue)
-        self.state.ingest_rx_log({"payload": _flood(4, [], _advert(REPEATER_KEY, 2, "Hilltop", 45.1, -73.1))})
-        self.assertTrue(queue.empty())
-
-
-async def _http(port: int, path: str, headers: str = "") -> tuple[str, bytes]:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(f"GET {path} HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n".encode())
-    await writer.drain()
-    data = await reader.read()
-    writer.close()
-    head, _, body = data.partition(b"\r\n\r\n")
-    return head.decode().split("\r\n")[0], body
-
-
-class ServerTests(unittest.IsolatedAsyncioTestCase):
-    async def _start(self, **settings) -> PacketMapServer:
-        state = PacketMapState()
-        state.update_self({"public_key": SELF_KEY, "name": "Base"})
-        server = PacketMapServer(PacketMapConfig.from_settings({"port": 0, **settings}), state)
-        await server.start()
-        self.addAsyncCleanup(server.stop)
-        return server
-
-    async def test_serves_page_and_state(self):
-        server = await self._start(title="My </script> map")
-        status, body = await _http(server.port, "/")
-        self.assertIn("200", status)
-        self.assertIn(b"leaflet", body)
-        self.assertIn(b"My <\\/script> map", body)
-        self.assertNotIn(b"__MESHGRAM_CONFIG__", body)
-
-        status, body = await _http(server.port, "/api/state")
-        self.assertEqual(json.loads(body)["self_id"], SELF_KEY)
-        status, _ = await _http(server.port, "/nope")
-        self.assertIn("404", status)
-
-    async def test_password_protection(self):
-        server = await self._start(password="s3cret")
-        status, _ = await _http(server.port, "/api/state")
-        self.assertIn("401", status)
-        token = base64.b64encode(b"anyone:s3cret").decode()
-        status, _ = await _http(server.port, "/api/state", f"Authorization: Basic {token}\r\n")
-        self.assertIn("200", status)
-
-    async def test_event_stream_sends_snapshot_then_packets(self):
-        server = await self._start()
-        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-        writer.write(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        await writer.drain()
-
-        async def next_event() -> dict:
-            while True:
-                line = await asyncio.wait_for(reader.readline(), timeout=2)
-                if line.startswith(b"data: "):
-                    return json.loads(line[6:])
-
-        self.assertEqual((await next_event())["type"], "snapshot")
-        server.state.ingest_rx_log({"payload": _flood(5, [], "11" + "2233" + "44")})
-        event = await next_event()
-        self.assertEqual((event["type"], event["packet"]["payload_type_name"]), ("packet", "GRP_TXT"))
-        writer.close()
+        self.assertEqual(events[-1]["type"], "packet")
+        self.assertEqual(events[-1]["nodes"][0]["id"], REPEATER_KEY)
+        # The radio's own info, re-applied unchanged, isn't news.
+        count = len(events)
+        self.state.apply_self({"public_key": SELF_KEY, "name": "Base"})
+        self.assertEqual(len(events), count)
+        self.state.apply_self({"public_key": SELF_KEY, "name": "Base 2"})
+        self.assertEqual(events[-1]["type"], "self")
 
 
 class _FakeTransport:
@@ -374,6 +316,12 @@ class _FakeTransport:
         if listener not in self.remote_listeners:
             self.remote_listeners.append(listener)
 
+    def remove_rx_log_listener(self, listener):
+        self.listeners.remove(listener)
+
+    def remove_remote_rx_log_listener(self, listener):
+        self.remote_listeners.remove(listener)
+
 
 class _DataDirMixin:
     def _use_temp_data_dir(self) -> Path:
@@ -390,19 +338,11 @@ class PluginTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
         self.data_dir = self._use_temp_data_dir()
 
     def test_plugin_is_registered(self):
-        plugins = load_plugins([PluginConfig(name="packet_map", enabled=True, settings={})])
-        self.assertIsInstance(plugins[0].instance, PacketMapPlugin)
-
-    async def test_disabled_on_meshtastic(self):
-        plugin = PacketMapPlugin({"port": 0})
-        await plugin.on_startup(_context(MESHTASTIC_BACKEND))
-        transport = _FakeTransport()
-        await plugin.on_mesh_connected(transport, _context(MESHTASTIC_BACKEND))
-        self.assertEqual(transport.listeners, [])
-        self.assertIsNone(plugin.server.port)
+        self.assertIs(load_plugin_class("packet_map"), PacketMapPlugin)
+        self.assertIs(load_plugin_class("packet-map"), PacketMapPlugin)
 
     async def test_lifecycle(self):
-        plugin = PacketMapPlugin({"port": 0})
+        plugin = PacketMapPlugin({})
         await plugin.on_startup(_context())
         self.addAsyncCleanup(plugin.on_shutdown)
         transport = _FakeTransport()
@@ -422,29 +362,28 @@ class PluginTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(plugin.state.remote_packets[-1]["message"], "hi")
 
+        # Turned off (or restarted with new settings): it lets go of the transport.
         await plugin.on_shutdown()
-        self.assertIsNone(plugin.server.port)
+        self.assertEqual((transport.listeners, transport.remote_listeners), ([], []))
 
-    async def test_connection_status_is_streamed(self):
-        status = StatusRegistry()
-        status.set_state("radio", "connected", "meshcore serial", label="Radio")
-        context = _context()
-        context.status = status
-        plugin = PacketMapPlugin({"port": 0})
-        await plugin.on_startup(context)
+    async def test_feeds_the_web_app(self):
+        web = WebServer(WebConfig(port=0))
+        queue = web.events.subscribe()
+        plugin = PacketMapPlugin({"persist": False})
+        await plugin.on_startup(_context(web))
         self.addAsyncCleanup(plugin.on_shutdown)
-        self.assertEqual([entry["key"] for entry in plugin.state.snapshot()["connections"]], ["radio"])
+        # Open pages get a snapshot with the map in it right away.
+        self.assertIn("map", queue.get_nowait())
+        await plugin.on_mesh_connected(_FakeTransport(), _context(web))
+        self.assertEqual(web.events.snapshot()["map"]["self_id"], SELF_KEY)
 
-        queue = plugin.state.subscribe()
-        status.set_state("mqtt_publish", "disconnected", "refused", label="MQTT")
-        event = await asyncio.wait_for(queue.get(), timeout=1)
-        self.assertEqual(event["type"], "connection")
-        self.assertEqual((event["connection"]["key"], event["connection"]["state"]), ("mqtt_publish", "disconnected"))
+        await plugin.handle_rx_log({"payload": _flood(5, [], "11" + "2233" + "44")})
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual(events[-1]["type"], "packet")
 
         await plugin.on_shutdown()
-        status.set_state("radio", "disconnected")
-        await asyncio.sleep(0)
-        self.assertTrue(queue.empty())
+        self.assertNotIn("map", web.events.snapshot())
+        self.assertNotIn("map", queue.get_nowait())
 
 
 class StoreTests(_DataDirMixin, unittest.TestCase):
@@ -560,7 +499,7 @@ class PluginPersistenceTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
         self.data_dir = self._use_temp_data_dir()
 
     async def test_history_survives_restart(self):
-        plugin = PacketMapPlugin({"port": 0})
+        plugin = PacketMapPlugin({})
         await plugin.on_startup(_context())
         transport = _FakeTransport()
         await plugin.on_mesh_connected(transport, _context())
@@ -572,7 +511,7 @@ class PluginPersistenceTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
         await plugin.on_shutdown()
         self.assertTrue((self.data_dir / "packet_map.sqlite3").exists())
 
-        restarted = PacketMapPlugin({"port": 0})
+        restarted = PacketMapPlugin({})
         await restarted.on_startup(_context())
         self.addAsyncCleanup(restarted.on_shutdown)
         self.assertEqual(restarted.state.snapshot(), snapshot)
@@ -580,7 +519,7 @@ class PluginPersistenceTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted.state.remote_packets[-1]["message"], "hi")
 
     async def test_persist_false_writes_nothing(self):
-        plugin = PacketMapPlugin({"port": 0, "persist": False})
+        plugin = PacketMapPlugin({"persist": False})
         await plugin.on_startup(_context())
         await plugin.handle_rx_log({"payload": _flood(2, [], "C3AA" + "0011")})
         await plugin.on_shutdown()
@@ -589,11 +528,10 @@ class PluginPersistenceTests(_DataDirMixin, unittest.IsolatedAsyncioTestCase):
     async def test_unusable_data_dir_keeps_map_running(self):
         blocker = self.data_dir / "file"
         blocker.write_text("x")
-        plugin = PacketMapPlugin({"port": 0, "db_path": str(blocker / "map.sqlite3")})
+        plugin = PacketMapPlugin({"db_path": str(blocker / "map.sqlite3")})
         with self.assertLogs("meshgram.plugins.packet_map", "ERROR"):
             await plugin.on_startup(_context())
         self.addAsyncCleanup(plugin.on_shutdown)
-        self.assertIsNotNone(plugin.server.port)
         await plugin.handle_rx_log({"payload": _flood(2, [], "C3AA" + "0011")})
         self.assertEqual(len(plugin.state.packets), 1)
 

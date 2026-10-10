@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p /app/data
 
-# Persistent state (packet_map history); mount a volume here.
+# Persistent state (packet_map history, plugin settings changed in the web app); mount a volume here.
 VOLUME ["/app/data"]
 
 CMD ["python", "main.py"]

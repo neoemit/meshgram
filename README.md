@@ -1,20 +1,21 @@
 # Meshgram 🌐
 
-Plugin-based bridge between a **mesh radio network** and **Telegram**.
+Plugin-based bridge between a **MeshCore mesh radio network** and **Telegram**, with a web app to watch the mesh and control the radio.
 
-Supports both **Meshtastic** and **MeshCore** radios. Speaks serial, TCP, and BLE. Runs on Linux, macOS, and Docker.
+Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, macOS, and Docker.
+
+> Meshtastic support was removed. Meshgram now only works with MeshCore companion radios; a config that still selects Meshtastic is refused at startup with a hint.
 
 ---
 
 ## ✨ Highlights
 
-- 🔁 Bidirectional message bridge — Telegram ↔ mesh
-- 🧵 Cross-platform reply linking (Meshtastic)
-- ❤️ Bidirectional emoji reaction sync for linked messages (Meshtastic)
+- 🔁 Bidirectional message bridge — Telegram ↔ a radio channel
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
+- 🎛️ Web control panel: radio settings, channels (add them by name), contacts, and every plugin — turned on/off and configured live
 - 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `packet_map`)
-- 🗺️ Optional MeshMapper observer uploads over MQTT (MeshCore)
-- 📡 Optional live web map of packet propagation with a packet inspector (MeshCore)
+- 🗺️ Optional MeshMapper observer uploads over MQTT
+- 📡 Live web map of packet propagation with a packet inspector
 - 🐳 First-class Docker deployment with platform-specific overlays
 - 🛠️ Linux `systemd` service templates included
 
@@ -22,20 +23,18 @@ Supports both **Meshtastic** and **MeshCore** radios. Speaks serial, TCP, and BL
 
 ## 🧭 What Works Where
 
-| Backend       | Serial / USB | TCP                          | BLE          |
-|---------------|--------------|------------------------------|--------------|
-| Meshtastic    | ✅ Linux, macOS, Docker (Linux only) | ✅ all platforms | ❌ not supported by bridge |
-| MeshCore      | ✅ Linux, macOS, Docker (Linux only) | ✅ all platforms | ✅ Linux, macOS (host Python only — not Docker) |
+| Transport    | Linux | macOS | Docker |
+|--------------|-------|-------|--------|
+| Serial / USB | ✅ | ✅ | ✅ Linux hosts only |
+| TCP          | ✅ | ✅ | ✅ |
+| BLE          | ✅ | ✅ | ❌ |
 
 **Platform notes:**
 - **Linux:** every combination works, including USB passthrough into Docker.
-- **macOS:** Docker Desktop **cannot** pass through USB or Bluetooth. Use bare-metal Python for serial/BLE, or run a host-side serial→TCP bridge (`socat`) and use the TCP overlay.
-- **Docker:** USB passthrough requires Linux host. BLE never works in Docker.
+- **macOS:** Docker Desktop **cannot** pass through USB or Bluetooth. Use bare-metal Python for serial/BLE, or run a host-side serial→TCP bridge (`socat`) and point Meshgram at it over TCP.
+- **Docker:** USB passthrough requires a Linux host. BLE never works in Docker.
 
-**Backend differences:**
-- MeshCore has **no packet-level reactions** — Telegram→MeshCore reaction actions are dropped silently.
-- MeshCore has **no reply threading** — replies are forwarded as plain text.
-- MeshCore identifiers are opaque strings, Meshtastic uses 32-bit packet IDs. The bridge handles both.
+**MeshCore limits:** the protocol has no packet-level reactions and no reply threading, so the bridge relays messages only (a Telegram reply goes out as a plain message). Message identifiers are opaque strings.
 
 ---
 
@@ -52,7 +51,7 @@ Supports both **Meshtastic** and **MeshCore** radios. Speaks serial, TCP, and BL
 ```bash
 git clone <this-repo> meshgram && cd meshgram
 cp config.example.yaml config.yaml && chmod 600 config.yaml
-# edit config.yaml — set telegram.bot_token, telegram.group_id, mesh.backend and its connection
+# edit config.yaml — set telegram.bot_token, telegram.group_id and meshcore.connection
 ```
 
 Every setting lives in `config.yaml`, secrets included, so the file is gitignored. Upgrading from a version that used `.env`? See [Migrating from `.env`](#-migrating-from-env).
@@ -70,7 +69,7 @@ Jump to one of:
 
 ## 🐧 Linux — Bare-Metal Python
 
-Works for any backend, any transport (including BLE).
+Works for any transport (including BLE).
 
 ```bash
 python3 -m venv .venv
@@ -79,22 +78,10 @@ pip install -r requirements.txt
 python main.py
 ```
 
-**Backend selection** — set in `config.yaml`:
+**Radio connection** — set in `config.yaml`:
 
 ```yaml
-# Meshtastic over USB serial
-mesh:
-  backend: meshtastic
-meshtastic:
-  connection:
-    mode: serial
-    serial_device: /dev/ttyUSB0
-```
-
-```yaml
-# MeshCore over USB serial
-mesh:
-  backend: meshcore
+# USB serial
 meshcore:
   connection:
     mode: serial
@@ -103,9 +90,7 @@ meshcore:
 ```
 
 ```yaml
-# MeshCore over BLE (Linux/macOS, host Python only)
-mesh:
-  backend: meshcore
+# BLE (Linux/macOS, host Python only)
 meshcore:
   connection:
     mode: ble
@@ -114,14 +99,12 @@ meshcore:
 ```
 
 ```yaml
-# Either backend over TCP (e.g. Meshtastic node on the LAN)
-mesh:
-  backend: meshtastic
-meshtastic:
+# TCP (a companion with Wi-Fi firmware on the LAN, or a serial→TCP bridge)
+meshcore:
   connection:
     mode: tcp
     tcp_host: 192.168.1.50
-    tcp_port: 4403
+    tcp_port: 5000
 ```
 
 **Serial permissions** (one-time):
@@ -157,8 +140,6 @@ ls /dev/cu.usbmodem* /dev/cu.usbserial*
 
 `config.yaml` example:
 ```yaml
-mesh:
-  backend: meshcore
 meshcore:
   connection:
     mode: serial
@@ -196,13 +177,13 @@ docker compose up -d   # uses both files automatically
 
 ## 🐳 Docker on macOS (TCP Bridge)
 
-Docker Desktop on macOS cannot pass `/dev/cu.*` devices into the container. Workaround: run `socat` on the host to expose the serial port as TCP, then point the container at it.
+Docker Desktop on macOS cannot pass `/dev/cu.*` devices into the container. Workaround: run `socat` on the host to expose the serial port as TCP, then point the container at it. MeshCore frames its companion protocol the same way over serial and TCP, so the bytes can be relayed as they are.
 
 ```bash
 brew install socat
 
 # In one terminal — keep running:
-socat -d -d TCP-LISTEN:4403,reuseaddr,fork FILE:/dev/cu.usbmodem34B7DA5AFD281,raw,echo=0,b115200
+socat -d -d TCP-LISTEN:5000,reuseaddr,fork FILE:/dev/cu.usbmodem34B7DA5AFD281,raw,echo=0,b115200
 
 # In another terminal:
 docker compose up --build -d
@@ -212,15 +193,12 @@ docker compose logs -f meshgram
 Point the connection at the host in `config.yaml`:
 
 ```yaml
-meshtastic:
+meshcore:
   connection:
     mode: tcp
     tcp_host: host.docker.internal
-    tcp_port: 4403
-    no_nodes: true      # skip the node DB download over the proxied link
+    tcp_port: 5000
 ```
-
-> ⚠️ This works for Meshtastic's serial wire protocol. For MeshCore companion radios over TCP, prefer running the companion's TCP firmware directly or use bare-metal Python instead.
 
 ---
 
@@ -268,9 +246,9 @@ If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `MESHGRAM_C
 
 ## 🔁 Migrating from `.env`
 
-Older versions read settings from `.env` (and environment variables) as well as `config.yaml`, and the environment won. Now every setting, secrets included, lives in `config.yaml`, which git no longer tracks; `config.example.yaml` is the template. Meshgram ignores the old variables and logs a warning if any are still set.
+Older versions read settings from `.env` (and environment variables) as well as `config.yaml`, and the environment won. Now every setting, secrets included, lives in `config.yaml`, which git no longer tracks; `config.example.yaml` is the template. Meshgram ignores the old variables and logs a warning if any are still set. (Settings changed in the web app's control panel are the one exception: they're saved separately, see [Control panel](#-web-app-and-control-panel).)
 
-`python -m meshgram.migrate_config` does the merge for you. It applies the old rules (environment over `.env` over YAML; connection variables go to the active backend), inlines the `${VAR}` and `token_env` references of `dm_http_command`, keeps your comments and layout, and writes the result to `config.migrated.yaml` (mode `600`) for you to review. It lists every value it moved and every `.env` entry it left out, and checks that Meshgram can load the result.
+`python -m meshgram.migrate_config` does the merge for you. It applies the old rules (environment over `.env` over YAML; `MESH_*` connection variables go to `meshcore.connection`), inlines the `${VAR}` and `token_env` references of `dm_http_command`, keeps your comments and layout, and writes the result to `config.migrated.yaml` (mode `600`) for you to review. It lists every value it moved and every `.env` entry it left out, and checks that Meshgram can load the result.
 
 1. **Update without losing `config.yaml`.** Upstream stops tracking it, so a plain `git pull` would delete your copy. Move it aside first:
    ```bash
@@ -288,7 +266,7 @@ Older versions read settings from `.env` (and environment variables) as well as 
    docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
      -e PACKET_MAP_HOST=0.0.0.0 meshgram python -m meshgram.migrate_config
    ```
-   `-e PACKET_MAP_HOST=0.0.0.0` carries over what the old `docker-compose.yml` set. If you used the removed `docker-compose.macos-tcp.yml` overlay, also pass `-e MESH_MODE=tcp -e MESH_HOST=host.docker.internal -e MESH_PORT=4403 -e MESH_NO_NODES=true`.
+   `-e PACKET_MAP_HOST=0.0.0.0` carries over what the old `docker-compose.yml` set. `MESH_BACKEND=meshtastic` is refused: Meshtastic isn't supported any more.
 3. **Switch over.** Review the file (and the comments the tool flags as still mentioning `.env`), then:
    ```bash
    mv config.migrated.yaml config.yaml
@@ -306,7 +284,7 @@ Only two remain. They say where files are, not how Meshgram behaves, and nothing
 | Variable | Default | Description |
 |---|---|---|
 | `MESHGRAM_CONFIG_PATH` | `config.yaml` | Path to the config file |
-| `MESHGRAM_DATA_DIR` | `data` (`/app/data` in Docker, `/var/lib/meshgram` with systemd) | Directory for persistent state (`packet_map` history) |
+| `MESHGRAM_DATA_DIR` | `data` (`/app/data` in Docker, `/var/lib/meshgram` with systemd) | Directory for persistent state (`packet_map` history, plugin settings changed in the control panel) |
 
 ---
 
@@ -321,29 +299,6 @@ telegram:
   include_captions: true
   sender_prefix_template: "[{display_name}] {message}"
 
-mesh:
-  backend: meshtastic    # or "meshcore"
-
-meshtastic:
-  bridge_channel: 1
-  connection:
-    mode: tcp
-    tcp_host: meshtastic.local
-    tcp_port: 4403
-
-plugins:
-  - name: bridge
-    enabled: true
-    settings:
-      channel: 1
-```
-
-### MeshCore example
-
-```yaml
-mesh:
-  backend: meshcore
-
 meshcore:
   bridge_channel: 0
   contact_name_overrides:
@@ -357,25 +312,30 @@ meshcore:
     # ble_address: "12:34:56:78:90:AB"
     # ble_pin: "123456"
     auto_reconnect: true
-```
 
+web:
+  host: 127.0.0.1    # 0.0.0.0 to reach it from other machines / Docker
+  port: 8080
+  # password: "…"    # needed for the control panel to change anything over the network
+
+plugins:
+  - name: bridge
+    enabled: true
 ### Full config reference
 
 See [`config.example.yaml`](./config.example.yaml) in the repo — it contains every supported field with comments.
 
 ### Sender label resolution order
 
-Meshtastic: `node_name_overrides` → `shortName` → `longName` → normalized node ID.
-MeshCore: `contact_name_overrides[pubkey_prefix]` → contact `adv_name` → pubkey prefix.
+Channel messages carry the sender's name in the text (`"<name>: <message>"`), which is used as is. Direct messages: `contact_name_overrides[pubkey_prefix]` → contact `adv_name` → pubkey prefix.
 
-### Chunking (relevant on both backends)
+### Chunking
 
 UTF-8 byte-aware splitting for radio MTU. Key knobs:
 - `max_chunk_bytes` (default `160`) — hard cap per chunk
-- `broadcast_max_chunk_bytes` (default `120`) — stricter cap for `^all` channels
+- `broadcast_max_chunk_bytes` (default `120`) — stricter cap for channel messages (broadcasts)
 - `inter_chunk_delay_ms` / `broadcast_min_inter_chunk_delay_ms` — spacing between chunks
 - `retry_max_attempts`, `retry_initial_delay_ms`, `retry_backoff_factor` — retry policy
-- `wait_for_ack` + `ack_timeout_ms` — gate next chunk on Meshtastic ACK (auto-skipped for broadcast and ignored on MeshCore)
 - `abort_on_chunk_failure` — stop remaining chunks after terminal failure
 - `payload_safety_margin_bytes` — reserve bytes below SDK max to avoid edge drops
 
@@ -383,14 +343,14 @@ UTF-8 byte-aware splitting for radio MTU. Key knobs:
 
 ## 🧩 Plugins
 
+Plugins are listed in `config.yaml` and can also be turned on and off and reconfigured at runtime in the web app's [control panel](#-web-app-and-control-panel). Each built-in plugin describes its settings with a JSON Schema (`settings_schema`), from which the control panel builds its form.
+
 ### `bridge` — Telegram ↔ Mesh relay
 
 - Forwards text both directions, with sender prefix from `sender_prefix_template`
 - Forwards Telegram media captions when `telegram.include_captions: true`
 - Ignores bot-authored Telegram messages (loop prevention)
-- Filters by channel: `bridge.settings.channel` (fallback to `<backend>.bridge_channel`)
-- Reply linking (Meshtastic only): replies on either side map back to the original
-- Reaction sync (Meshtastic only, requires `reactions_enabled: true`): linked messages only, first Unicode emoji, anonymous count fallback for Telegram
+- Filters by channel: `bridge.settings.channel` (fallback to `meshcore.bridge_channel`)
 
 Settings:
 
@@ -399,12 +359,6 @@ Settings:
   enabled: true
   settings:
     channel: 1
-    reply_link_ttl_hours: 24
-    reactions_enabled: true                      # Meshtastic only
-    meshtastic_want_ack: true                    # Meshtastic only
-    missing_target_policy: fallback_message
-    reply_missing_suffix: "(reply target not found)"
-    reaction_missing_notice_template: "(reaction target not found)"
 ```
 
 ### `ping_pong` — keyword auto-responder
@@ -428,9 +382,9 @@ Settings:
     response_dedupe_ttl_seconds: 30             # used by sender_keyword_window mode
 ```
 
-### `trace_me` — MeshCore route trace responder
+### `trace_me` — route trace responder
 
-MeshCore only. Replies to an exact channel message like `Trace` with the path hashes of repeaters that forwarded that message before it reached Meshgram:
+Replies to an exact channel message like `Trace` with the path hashes of repeaters that forwarded that message before it reached Meshgram:
 
 ```text
 ff,2e,02 (3 hops)
@@ -441,13 +395,12 @@ ff,2e,02 (3 hops)
   enabled: true
   settings:
     keywords: ["trace"]
-    response_channel: same     # or a concrete MeshCore channel index, e.g. 0
+    response_channel: same     # or a channel index, e.g. 0
     # channels: [0]            # optional incoming-channel allowlist
 ```
 
 Notes:
 
-- This plugin is ignored unless `mesh.backend: meshcore`.
 - MeshCore receive frames expose hop count metadata; repeater hash lists depend on MeshCore channel-log path enrichment. Meshgram enables channel-log decoding and refreshes channel metadata at startup so `meshcore_py` can correlate RF logs with received channel messages. When hashes are unavailable, the bot replies with the known hop count and `repeater list unavailable`.
 - Path hashes are displayed in MeshCore's reported order and split according to path hash mode (1-, 2-, or 3-byte hashes).
 
@@ -478,15 +431,14 @@ Auth currently supports `bearer`, with the token in `auth.token`. To keep a valu
 
 ### `meshmapper` — MeshMapper observer (MQTT packet upload)
 
-MeshCore only. Turns the radio connected to Meshgram into a [MeshMapper](https://meshmapper.net) **observer**: every RF packet the radio hears is uploaded to MeshMapper's MQTT broker so it can be plotted on your region's coverage map. It uses the same broker, topics, payload format and authentication as the observer clients listed in the [MeshMapper MQTT guide](https://wiki.meshmapper.net/mqtt-main/) (meshcoretomqtt, MeshCore-HA, pyMC), so MeshMapper processes it like any other observer.
+Turns the radio connected to Meshgram into a [MeshMapper](https://meshmapper.net) **observer**: every RF packet the radio hears is uploaded to MeshMapper's MQTT broker so it can be plotted on your region's coverage map. It uses the same broker, topics, payload format and authentication as the observer clients listed in the [MeshMapper MQTT guide](https://wiki.meshmapper.net/mqtt-main/) (meshcoretomqtt, MeshCore-HA, pyMC), so MeshMapper processes it like any other observer.
 
 The plugin runs alongside the bridge without affecting it: it only listens to the radio's raw RF log, sends nothing over the mesh or to Telegram, and if MeshMapper is unreachable the rest of Meshgram keeps working.
 
 **Setup**
 
 1. Find your **region code** on MeshMapper (usually a 3-letter IATA airport code such as `YOW`). It must match your MeshMapper region exactly, or the observer won't show up.
-2. Run Meshgram with the MeshCore backend (`mesh.backend: meshcore`).
-3. Enable the plugin in `config.yaml`:
+2. Enable the plugin in `config.yaml` (or in the control panel's **Plugins** tab):
 
    ```yaml
    plugins:
@@ -497,8 +449,8 @@ The plugin runs alongside the bridge without affecting it: it only listens to th
          iata: "YOW"        # your MeshMapper region code
    ```
 
-4. Restart Meshgram. You should see `MeshMapper: connecting to mqtt.meshmapper.net:443 …` and then `MeshMapper: connected; publishing packets to meshcore/YOW/<PUBLIC_KEY>/packets` in the logs.
-5. Once the radio hears a packet, your node shows as **Online** with a MeshMapper broker badge under **Region → Observers** on the map.
+3. Restart Meshgram (not needed when you turn it on in the control panel). You should see `MeshMapper: connecting to mqtt.meshmapper.net:443 …` and then `MeshMapper: connected; publishing packets to meshcore/YOW/<PUBLIC_KEY>/packets` in the logs.
+4. Once the radio hears a packet, your node shows as **Online** with a MeshMapper broker badge under **Region → Observers** on the map.
 
 The defaults already point at MeshMapper's broker. Everything else is optional:
 
@@ -546,50 +498,39 @@ Notes:
 
 - Only received packets are uploaded. The packet contents are the over-the-air bytes, so messages stay encrypted. Your radio's name, public key and radio settings are shared with MeshMapper, as with any observer.
 - MeshMapper wants **fixed, always-on** observers. Mobile observers are strongly discouraged and may be dropped at ingest, so don't enable this on a radio that moves around.
-- The plugin is ignored, with an error in the log, on the Meshtastic backend or when `iata` is missing. MeshMapper only accepts MeshCore data.
+- The plugin is ignored, with an error in the log, when `iata` is missing.
 - It needs `paho-mqtt` and `websockets` (for the live feed), which are included in `requirements.txt`. If you installed Meshgram before they were added, rerun `pip install -r requirements.txt` or rebuild the Docker image.
 
-### `packet_map` — live packet propagation map (web app)
+### `packet_map` — live packet propagation map
 
-MeshCore only. Serves a small web app showing what your radio hears in real time:
+Feeds the web app's **Map** and **Messages** views with what your radio hears in real time (the web app itself is configured in the `web` section, see [Web app and control panel](#-web-app-and-control-panel)):
 
 - **Map (left):** every node that shares a GPS position, from adverts the radio hears and from its contact list. Each node type has its own shape and colour (repeaters ◆, room servers ■, companions ●, sensors ▲) and your own radio is pink. When a packet arrives, a glowing dot follows its real route (originator → each repeater in its path → your radio), pausing briefly at each relay, and the trail fades once it arrives. Hops that couldn't be placed on the map are drawn dotted. In the **Nodes on map** panel, click a node type to show or hide it (Alt-click shows only that type), and turn the live packet flow on or off.
 - **Packet list (right):** every received RF packet, newest first. Each card shows the packet type, the sender, SNR/RSSI (colour-coded, with signal bars), hop count, the route as a chain of named stops, the channel and decrypted text for channel messages Meshgram has the key for, and a "Heard N×" badge when the same packet arrives over several paths. Click a card to see all decoded metadata (hash, route type, transport codes, advert key/position, source/destination hashes, raw hex), draw its route on the map with direction arrows, and replay its flow. You can search, filter by one or more packet types, and pause the list. If you scroll down, new packets don't move the list; a "new packets" button takes you back to the top.
 - **Other MeshMapper observers:** with the `meshmapper` plugin enabled, packets other observers in your region upload appear too. They carry a teal **MeshMapper** tag, their route ends at the observer that heard them, and on the map their flows are lighter and end with a teal ripple. Observers are drawn with a teal ring. A switch above the list shows **All**, **This radio** or **MeshMapper** packets, and a **MeshMapper packets** switch on the map turns their flows off. When MeshMapper knows a packet's sender, it becomes the packet's origin, and a node your radio hasn't placed yet gets MeshMapper's name and position. Packets that arrive over MQTT (with a subscriber account) carry their bytes: channel messages in them are decrypted with your radio's channel keys, and adverts they carry add node positions. Live feed packets have no bytes, so they stay undecrypted. They're kept in a separate buffer (`max_remote_packets`), so a busy region can't push out your radio's own packets.
 - **Messages (second tab):** a table of every channel message Meshgram could decrypt, newest first. Each row shows time, channel, sender, the text, the route (hops and last relay), the best SNR/RSSI and how many copies were heard. Copies of the same message heard over different paths are grouped into one row; expand it to see each path with its time offset and signal. **Replay** switches to the map and replays every path with its real timing (or one path from the expanded row), and a "Back to messages" link returns you to the same row. Columns are sortable, and you can search or filter by channel. While you're pointing at or tabbing through the table, new messages wait behind a "new messages" button so rows don't move under you. The tab shows a count of messages that arrived while you were on the map.
-- **Connections (header):** a status dot for each service Meshgram connects to: the **radio**, the **Telegram** bot and, with the `meshmapper` plugin, the MeshMapper MQTT connections for **publishing** (MQTT ↑) and **subscribing** (MQTT ↓), and the MeshMapper **live feed**. Green is connected, amber is connecting, red is disconnected, and a hollow dot means turned off (for example no subscriber account). Click it for details: what each one is connected to, since when, and why it's down. If the page itself loses its connection to Meshgram, the dots turn hollow grey until it reconnects.
-- The page has light and dark themes (following the system setting until you pick one), works on phones, and remembers the map position and zoom, hidden node types, table sort order, and theme in the browser across refreshes. The current tab is part of the URL (`#map` / `#messages`), so refresh and the browser's Back button work.
 
-It only listens to the radio's raw RF log. It sends nothing over the mesh or to Telegram, and needs no extra Python packages. The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access. Routes can only end at your radio on the map if it has a position: set one in the radio's advert settings (e.g. from the MeshCore app).
+When the plugin is off, the Map and Messages views say so and link to the control panel's **Plugins** tab.
+
+It only listens to the radio's raw RF log. It sends nothing over the mesh or to Telegram, and needs no extra Python packages. Routes can only end at your radio on the map if it has a position: set one in the control panel's **Radio** tab (or a MeshCore app).
 
 ```yaml
 plugins:
   - name: packet_map
     enabled: true
-    settings:
-      host: 127.0.0.1   # use 0.0.0.0 to reach it from other machines / Docker
-      port: 8080
 ```
-
-Then open `http://<host>:8080/`.
 
 | Setting | Default | Description |
 |---|---|---|
-| `host` | `127.0.0.1` | Listen address (`0.0.0.0` in Docker) |
-| `port` | `8080` | Listen port |
-| `password` | — | If set, the page requires HTTP Basic auth with this password (any username). |
 | `max_packets` | `500` | Packets kept in memory and sent to newly opened pages |
 | `max_remote_packets` | `1000` | Packets from other MeshMapper observers kept in memory (see above) |
 | `max_messages` | `1000` | Decrypted messages kept for the Messages tab. They're kept separately from `max_packets`, so they survive busy periods of adverts and ACKs. |
 | `persist` | `true` | Save nodes and packet history to disk and restore them on restart (see **Persistence** below). Set `false` to keep everything in memory only. |
 | `db_path` | `packet_map.sqlite3` | History database. A relative path is inside `MESHGRAM_DATA_DIR`. |
-| `title` | `Meshgram` | Page title |
-| `tile_url` / `tile_attribution` | OpenStreetMap | Leaflet tile layer URL template and attribution. When unset, OpenStreetMap tiles are restyled to match the light or dark theme; a custom tile server is shown as-is. |
 
 Notes:
 
-- **Docker:** set `host: 0.0.0.0`. `docker-compose.yml` publishes port `8080`; change the mapping there if you change `port`.
-- The page shows decrypted channel messages and node positions. Don't expose it on an untrusted network without `password` and, ideally, a TLS reverse proxy.
+- `host`, `port`, `password`, `title`, `tile_url` and `tile_attribution` used to be `packet_map` settings. They're now in the `web` section; while config.yaml has no `web` section, Meshgram still reads them from here.
 - Path hops are 1–3 byte public-key prefixes, so a hop is matched to a known node by prefix. If several repeaters share the prefix, the one closest to the next hop is picked. Unknown hops are listed by their hash and skipped on the map.
 - For direct-routed packets the path is the remaining route, so it is drawn dashed and isn't connected to your radio.
 - Nodes appear on the map once they share a position (in an advert or in the radio's contact list). The **Nodes on map** panel shows how many repeaters have no position.
@@ -607,17 +548,40 @@ Notes:
 
 ---
 
-## ⚠️ MeshCore Caveats
+## 🎛️ Web App and Control Panel
 
-When `mesh.backend: meshcore`:
+Meshgram serves a web app (stdlib asyncio HTTP server, no extra packages) with three views: **Map** and **Messages** (fed by the `packet_map` plugin) and the **Control** panel. Open `http://<host>:<port>/`.
 
-- **No reactions** — Telegram reactions don't reach the radio; MeshCore packets never produce reaction events.
-- **No reply threading** — `reply_id` is silently dropped; messages still send as plain text.
-- **Opaque packet IDs** — internal IDs become strings (derived from MeshCore's `expected_ack` codes).
-- **`meshtastic_want_ack` / `wait_for_ack`** — ignored by the MeshCore transport.
-- **Echo suppression policy** — self-echo detection is identity-based; optional text fallback is configurable via `meshcore.outbound_echo_text_fallback_*`.
+```yaml
+web:
+  enabled: true
+  host: 127.0.0.1        # 0.0.0.0 to reach it from other machines; must be 0.0.0.0 in Docker
+  port: 8080
+  password: "…"          # HTTP Basic auth, any username
+  # title: Meshgram
+  # tile_url / tile_attribution: a custom Leaflet tile server (default: OpenStreetMap)
+```
 
-Everything else (channel routing, chunking, plugins, sender labels via `contact_name_overrides`) works the same.
+**Connections (header):** a status dot for each service Meshgram connects to: the **radio**, the **Telegram** bot and, with the `meshmapper` plugin, the MeshMapper MQTT connections for **publishing** (MQTT ↑) and **subscribing** (MQTT ↓), and the MeshMapper **live feed**. Green is connected, amber is connecting, red is disconnected, and a hollow dot means turned off. Click it for details. If the page loses its connection to Meshgram, the dots turn hollow grey until it reconnects.
+
+**Control panel** (`#control`), in four tabs:
+
+- **Radio** — status (name, public key, model and firmware, battery and storage, uptime, noise floor, last RSSI/SNR, airtime, packet counters, clock drift) and actions: send a zero-hop or flood advert, set the radio's clock from the computer, reboot. Forms for the name and position (and whether adverts share it), the LoRa parameters (frequency, bandwidth, spreading factor, coding rate) and TX power, contact auto-add, extra ACKs, telemetry sharing, the path hash size (on firmware that supports it), and the RX delay / airtime factor tuning.
+- **Channels** — the channel slots with each channel's type, hash and which plugins use it. **Add a channel by name**: a hashtag channel (`#local`: the key comes from the name, so everyone who adds the same hashtag shares it), a private channel (paste the key someone shared, or leave it empty for a new random one), or the well-known Public channel. Rename, change a private channel's key, copy a key to share it, remove a channel, and send a message to a channel from the radio.
+- **Contacts** — the radio's contacts with type, key, last advert and route; search and filter by type, reset a route (the next message floods to find a new one), or remove a contact.
+- **Plugins** — every plugin with its state. Turn one on or off, or edit its settings in a form built from the plugin's schema; saving restarts it with the new settings. Secrets (passwords, tokens, API headers) are never sent to the browser: they show as "Saved", and are kept unless you type a new value.
+
+Changes to the radio are stored on the radio itself. Plugin changes are saved in `MESHGRAM_DATA_DIR/plugins.json` (mode `600`) and win over `config.yaml` until you click **Reset to config.yaml** on the plugin; a plugin changed this way is tagged *Changed here*. config.yaml is never rewritten (it holds secrets and Docker mounts it read-only).
+
+**Security.**
+
+- The control panel can reconfigure the radio, so it only changes anything when the web app has a **`password`** or listens on `127.0.0.1` only. Otherwise it's read-only and says so (the map and lists still work). Use a TLS reverse proxy when it's reachable beyond your LAN: Basic auth sends the password in the clear over plain HTTP.
+- Changes must come from the page itself: requests that change something need a JSON body and a same-origin `Origin` / `Sec-Fetch-Site`, so another site can't submit them with your saved credentials (CSRF). The page can't be framed (`X-Frame-Options`, CSP `frame-ancestors`).
+- The page shows decrypted channel messages, node positions and (with changes allowed) channel keys; protect it accordingly.
+
+The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access. It has light and dark themes, works on phones, and remembers the map position, hidden node types, table sort order, theme and control panel tab across refreshes. The view is part of the URL (`#map`, `#messages`, `#control/channels`, …), so refresh and Back work.
+
+**API.** The panel uses a small JSON API under `/api` (radio, channels, contacts, plugins) plus a Server-Sent Events stream at `/api/events`; see the docstring of `meshgram/web/api.py` for the endpoints.
 
 ---
 
@@ -627,14 +591,14 @@ Everything else (channel routing, chunking, plugins, sender labels via `contact_
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and reply mapping, Telegram + Meshtastic reaction parsing, ping keyword behavior, MeshCore trace-me responses, DM HTTP command, sender label resolution, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / HTTP + event stream.
+Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and chunk sequencing, ping keyword behavior, trace-me responses, DM HTTP command, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / persistence, the web server (auth, CSRF and read-only rules, event stream), the control panel API, radio administration against a simulated radio, settings schemas and secret masking, and runtime plugin management.
 
 ---
 
 ## 🩺 Troubleshooting
 
 ### Mesh connection fails
-- Confirm `mesh.backend` and that backend's `connection` (`mode` and the matching `serial_device` / `tcp_host` / `ble_address`).
+- Confirm `meshcore.connection` (`mode` and the matching `serial_device` / `tcp_host` / `ble_address`, and `baudrate` for serial).
 - On Linux: `ls /dev/ttyUSB* /dev/ttyACM*` and check group access (`groups $USER` must include `dialout`).
 - On macOS Docker: confirm `socat` is listening on the configured TCP port.
 - In Docker: container needs `host.docker.internal` reachable (Docker Desktop only — on Linux Docker you may need `--add-host=host.docker.internal:host-gateway`).
@@ -644,7 +608,7 @@ Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji 
 
 ### Messages not bridging
 - Check `telegram.group_id` matches the chat.
-- Check `bridge.settings.channel` matches the radio channel index.
+- Check `bridge.settings.channel` matches the radio channel index (the control panel's **Channels** tab shows which slot the bridge uses).
 - Telegram side: ensure message has text or an enabled caption, and sender is not a bot.
 
 ### Long Telegram messages arrive partial on the radio
@@ -653,26 +617,27 @@ Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji 
 - For broadcast channels, lower `broadcast_max_chunk_bytes` and raise `broadcast_min_inter_chunk_delay_ms`.
 - Watch logs for `Mesh send exhausted retries` and adjust retry settings.
 
-### Reactions not syncing (Meshtastic)
-- Confirm `bridge.settings.reactions_enabled: true`.
-- Reactions only work on **already linked** messages — test by reacting to a message that was just bridged.
-- For MeshCore: reactions are intentionally unsupported.
+### The control panel is read-only
+- Set `web.password` (or listen on `127.0.0.1` only); the banner at the top of the panel says the same.
+
+### A plugin ignores what's in `config.yaml`
+- It was changed in the control panel: its card says *Changed here*. Click **Reset to config.yaml** in its settings, or delete its entry from `MESHGRAM_DATA_DIR/plugins.json` while Meshgram is stopped.
 
 ### Sender label shows the raw node ID
 - Expected when peer metadata is missing.
-- Set `meshtastic.node_name_overrides` or `meshcore.contact_name_overrides` for deterministic labels.
+- Set `meshcore.contact_name_overrides` for deterministic labels.
 
 ### MeshCore "could not open port"
 - Verify the symlink/device path actually exists: `ls -l /dev/meshcore` (or whatever you set).
 - For udev SYMLINK rules to fire, trigger an `add` action: `sudo udevadm trigger --action=add --sysname-match=ttyACM0`.
 
 ### MeshMapper observer not showing up
-- Check the logs for lines starting with `MeshMapper:`. `uploads disabled` explains why the plugin is inactive, for example a missing `iata` or the Meshtastic backend.
+- Check the logs for lines starting with `MeshMapper:`. `uploads disabled` explains why the plugin is inactive, for example a missing `iata`.
 - `MQTT connect refused: Not authorized` means the broker rejected the token. Make sure the system clock is correct (the token has `iat`/`exp` timestamps) and that a configured `private_key` belongs to this radio.
 - `could not create auth token` means the radio couldn't sign the token. Update the companion firmware or set `private_key`.
 - The `iata` value must exactly match your MeshMapper region code.
 - The observer only appears after the radio has heard at least one packet. Set `runtime.log_level: DEBUG` to see each `MeshMapper: published packet …` line.
-- No packets from other observers: check the **Live feed** dot in the `packet_map` header (its panel says why it's down) and that `subscribe` / `live_feed` aren't `false`. Quiet regions can go minutes without a packet. **MQTT ↓** stays off without a subscriber account, which is fine. Device-signed observer logins can only publish (see **Other observers' packets**).
+- No packets from other observers: check the **Live feed** dot in the web app's header (its panel says why it's down) and that `subscribe` / `live_feed` aren't `false`. Quiet regions can go minutes without a packet. **MQTT ↓** stays off without a subscriber account, which is fine. Device-signed observer logins can only publish (see **Other observers' packets**).
 
 ### Logs appear duplicated
 - Check there's only one container (`docker ps -a`) and one Python process (`docker exec meshgram sh -c 'ls /proc | grep "^[0-9]*$"'`). If output is duplicated only in your terminal but the raw container log (`docker inspect <name> --format '{{.LogPath}}'`) shows one copy per line, it's a transient compose/terminal artifact — restart with `docker compose up -d` and re-attach with `docker compose logs -f`.
@@ -695,25 +660,28 @@ meshgram/
 │   ├── app.py
 │   ├── config.py
 │   ├── migrate_config.py         # one-off .env → config.yaml migration
-│   ├── plugin.py
-│   ├── reply_links.py
+│   ├── plugin.py                 # BasePlugin, built-in plugin registry
+│   ├── plugin_manager.py         # runs plugins; runtime on/off and settings (plugins.json)
+│   ├── settings_schema.py        # JSON Schema subset: validation, secret masking
+│   ├── radio_admin.py            # radio settings, channels and contacts
+│   ├── status.py                 # connection status registry
 │   ├── text_utils.py
 │   ├── types.py
-│   ├── _mesh_helpers.py
 │   ├── meshcore_packets.py       # raw MeshCore RF packet decoding
 │   ├── transport/
-│   │   ├── __init__.py           # MeshTransport ABC + create_transport()
-│   │   ├── meshtastic.py
-│   │   └── meshcore.py
+│   │   └── meshcore.py           # MeshCoreTransport
+│   ├── web/
+│   │   ├── server.py             # HTTP server, auth/CSRF, SSE event hub
+│   │   ├── api.py                # control panel JSON API
+│   │   └── static/               # the page (index.html) and control.js
 │   └── plugins/
 │       ├── bridge.py
 │       ├── ping_pong.py
 │       ├── trace_me.py
 │       ├── dm_http_command.py
 │       ├── meshmapper.py         # MeshMapper MQTT observer uploads
-│       ├── packet_map.py         # live packet map web app (server)
-│       ├── packet_map_store.py   # packet map SQLite persistence
-│       └── packet_map_static/    # packet map web app (page)
+│       ├── packet_map.py         # map/messages data for the web app
+│       └── packet_map_store.py   # packet map SQLite persistence
 └── tests/
 ```
 
@@ -722,7 +690,8 @@ meshgram/
 ## 📘 Best Practices
 
 - Keep `config.yaml` private (`chmod 600`): it holds the bot token and any plugin passwords. It's gitignored and kept out of the Docker image.
-- Use `node_name_overrides` / `contact_name_overrides` for deterministic sender labels.
+- Use `contact_name_overrides` for deterministic sender labels.
+- Set `web.password` before exposing the web app; put it behind a TLS reverse proxy beyond your LAN.
 - Keep `dm_http_command` endpoints on trusted/internal networks.
 - Use short, unambiguous single-word keys for DM commands.
 - Only one polling process per bot token.

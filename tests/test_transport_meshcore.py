@@ -7,7 +7,7 @@ import unittest
 from typing import Any
 
 from meshgram.config import MeshgramSettings
-from meshgram.types import SendMeshAction, SendMeshReactionAction
+from meshgram.types import SendMeshAction
 
 
 def _install_meshcore_stub() -> tuple[types.ModuleType, type, type, list]:
@@ -124,7 +124,6 @@ class MeshCoreTransportTests(unittest.TestCase):
             config_path="config.yaml",
             plugins=[],
         )
-        self.settings.mesh.backend = "meshcore"
         self.settings.meshcore.bridge_channel = 0
         self.settings.meshcore.connection.mode = "serial"
 
@@ -141,7 +140,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, _noop_callback))
             action = SendMeshAction(text="hello mesh", channel_index=0)
             loop.run_until_complete(transport.asend_text(action))
         finally:
@@ -156,7 +155,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, _noop_callback))
             action = SendMeshAction(
                 text="hi",
                 destination_id="deadbeefdeadbeef",
@@ -169,21 +168,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         self.assertEqual(len(self._sent), 1)
         self.assertEqual(self._sent[0]["kind"], "dm")
         self.assertEqual(self._sent[0]["dst"], "deadbeefdeadbeef")
-        self.assertEqual(result, {"id": "deadbeef"})
-
-    def test_send_reaction_is_dropped_with_debug_log(self):
-        transport = self._make_transport()
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
-            action = SendMeshReactionAction(emoji="❤", target_packet_id="mc-ch-abc123")
-            with self.assertLogs("meshgram.transport.meshcore", level="DEBUG") as ctx:
-                result = loop.run_until_complete(transport.asend_reaction(action))
-        finally:
-            loop.close()
-
-        self.assertIsNone(result)
-        self.assertTrue(any("does not support reactions" in line for line in ctx.output))
+        self.assertEqual(result, "deadbeef")
 
     def test_inbound_channel_message_dispatches_event(self):
         received: list = []
@@ -194,7 +179,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, collector))
             channel_callback = next(
                 cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
             )
@@ -216,7 +201,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, collector))
             channel_callback = next(
                 cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
             )
@@ -243,7 +228,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, collector))
             loop.run_until_complete(transport.asend_text(SendMeshAction(text="status", channel_index=1)))
             channel_callback = next(
                 cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
@@ -275,7 +260,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, collector))
             loop.run_until_complete(transport.asend_text(SendMeshAction(text="status", channel_index=1)))
             channel_callback = next(
                 cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
@@ -293,17 +278,11 @@ class MeshCoreTransportTests(unittest.TestCase):
 
         self.assertEqual(received, [])
 
-    def test_backend_capabilities(self):
-        transport = self._make_transport()
-        self.assertEqual(transport.backend_name, "meshcore")
-        self.assertFalse(transport.supports_reactions)
-        self.assertFalse(transport.supports_reply_threading)
-
     def test_connect_enables_channel_log_path_enrichment_when_supported(self):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, _noop_callback))
             self.assertTrue(transport._mc.decrypt_channel_logs_enabled)
         finally:
             loop.close()
@@ -312,7 +291,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, _noop_callback))
             self.assertEqual(transport._mc.commands.channel_requests, list(range(8)))
         finally:
             loop.close()
@@ -326,7 +305,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, collector, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, collector))
             channel_callback = next(
                 cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
             )
@@ -367,7 +346,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         loop = asyncio.new_event_loop()
         try:
             for _ in range(2):
-                loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+                loop.run_until_complete(transport.connect(loop, _noop_callback))
                 rx_callback = next(
                     cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.RX_LOG_DATA
                 )
@@ -387,7 +366,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, _noop_callback))
         finally:
             loop.close()
         secret = bytes(range(16))
@@ -421,7 +400,7 @@ class MeshCoreTransportTests(unittest.TestCase):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(transport.connect(loop, _noop_callback, _noop_callback))
+            loop.run_until_complete(transport.connect(loop, _noop_callback))
             signature = loop.run_until_complete(transport.sign_with_device(b"header.payload"))
         finally:
             loop.close()

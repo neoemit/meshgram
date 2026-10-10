@@ -6,9 +6,10 @@ services:
     volumes:
       # Every setting, secrets included (copy config.example.yaml to config.yaml).
       - ./config.yaml:/app/config.yaml:ro
-      # Persistent state (packet_map history), kept across rebuilds and redeploys.
+      # Persistent state (packet_map history, plugin settings changed in the web
+      # app), kept across rebuilds and redeploys.
       - meshgram-data:/app/data
-    # The packet_map web app; set its host to 0.0.0.0 in config.yaml.
+    # The web app; set web.host to 0.0.0.0 (and web.password) in config.yaml.
     ports:
       - "8080:8080"
 

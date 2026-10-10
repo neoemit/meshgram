@@ -107,14 +107,12 @@ class MigrateConfigTests(unittest.TestCase):
         settings = load_settings(str(self.output))
         self.assertEqual(settings.telegram_bot_token, "123456789:ABCDEF")
         self.assertEqual(settings.telegram_group_id, -1001234567890)
-        self.assertEqual(settings.mesh.backend, "meshcore")
         self.assertEqual(settings.meshcore.connection.mode, "ble")
         self.assertEqual(settings.meshcore.connection.tcp_port, 5001)
         self.assertEqual(settings.meshcore.connection.ble_address, "12:34:56:78:90:AB")
         self.assertEqual(settings.meshcore.connection.ble_pin, "012345")
-        # Shared connection variables only apply to the active backend.
-        self.assertEqual(settings.meshtastic.connection.tcp_port, 4403)
-        self.assertEqual(settings.meshtastic.connection.mode, "serial")
+        # The MESH_* connection variables go to the MeshCore radio.
+        self.assertIn("    tcp_port: 4403\n", self.output.read_text(encoding="utf-8"))
 
         packet_map = settings.plugins[1].settings
         self.assertEqual(packet_map["host"], "0.0.0.0")
@@ -209,10 +207,20 @@ class MigrateConfigTests(unittest.TestCase):
         self.env_file.write_text("MESH_PORT=abc\n", encoding="utf-8")
         with self.assertRaisesRegex(MigrationError, "MESH_PORT"):
             self._run()
-        self.env_file.write_text("MESH_MODE=ble\n", encoding="utf-8")
-        with self.assertRaisesRegex(MigrationError, "meshtastic backend"):
+        self.env_file.write_text("MESH_MODE=lora\n", encoding="utf-8")
+        with self.assertRaisesRegex(MigrationError, "MESH_MODE must be one of"):
+            self._run()
+        self.env_file.write_text("MESH_BACKEND=meshtastic\n", encoding="utf-8")
+        with self.assertRaisesRegex(MigrationError, "Meshtastic support was removed"):
             self._run()
         self.assertFalse(self.output.exists())
+
+    def test_meshtastic_only_variables_are_noted(self):
+        self.env_file.write_text(ENV + "MESH_NO_NODES=true\n", encoding="utf-8")
+        status, report = self._run()
+        self.assertEqual(status, 0, report)
+        self.assertIn("MESH_NO_NODES", report.split("Not moved:")[1])
+        self.assertNotIn("no_nodes", self.output.read_text(encoding="utf-8"))
 
     def test_reports_a_config_meshgram_would_refuse(self):
         self.env_file.write_text("LOG_LEVEL=DEBUG\n", encoding="utf-8")

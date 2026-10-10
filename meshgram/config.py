@@ -4,11 +4,13 @@ Every setting, secrets included, lives in that file. The only environment
 variables Meshgram reads say where files are, not how it behaves:
 
 - ``MESHGRAM_CONFIG_PATH``: the config file (default ``config.yaml``).
-- ``MESHGRAM_DATA_DIR``: where persistent state goes (see ``packet_map``).
+- ``MESHGRAM_DATA_DIR``: where persistent state goes (packet_map history and
+  plugin settings changed in the web app).
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,18 +19,19 @@ from typing import Any, Mapping
 import yaml
 
 
-MESHTASTIC_BACKEND = "meshtastic"
-MESHCORE_BACKEND = "meshcore"
-SUPPORTED_BACKENDS = {MESHTASTIC_BACKEND, MESHCORE_BACKEND}
-
-MESHTASTIC_MODES = {"serial", "tcp"}
 MESHCORE_MODES = {"serial", "tcp", "ble"}
 
 CONFIG_PATH_ENV = "MESHGRAM_CONFIG_PATH"
+DATA_DIR_ENV = "MESHGRAM_DATA_DIR"
 DEFAULT_CONFIG_PATH = "config.yaml"
+DEFAULT_DATA_DIR = "data"
 MIGRATION_HINT = (
     "Settings are no longer read from .env or environment variables; "
     "run `python -m meshgram.migrate_config` to move them into config.yaml"
+)
+MESHTASTIC_REMOVED_HINT = (
+    "Meshtastic support was removed: Meshgram only talks to MeshCore companion radios. "
+    "Configure the radio in the meshcore section and drop mesh.backend"
 )
 
 # Environment variables that older versions read as settings. They're ignored
@@ -57,25 +60,13 @@ LEGACY_ENV_VARS = (
     "PACKET_MAP_DB_PATH",
 )
 
+# Web app settings that used to be packet_map plugin settings; still read from
+# there when config.yaml has no ``web`` section.
+LEGACY_PACKET_MAP_WEB_KEYS = ("host", "port", "password", "title", "tile_url", "tile_attribution")
+
 
 class ConfigError(ValueError):
     """The config file is missing or holds an invalid value."""
-
-
-@dataclass(slots=True)
-class MeshtasticConnectionConfig:
-    mode: str = "serial"
-    serial_device: str | None = None
-    tcp_host: str = "localhost"
-    tcp_port: int = 4403
-    no_nodes: bool = False
-
-
-@dataclass(slots=True)
-class MeshtasticConfig:
-    bridge_channel: int = 0
-    node_name_overrides: dict[str, str] = field(default_factory=dict)
-    connection: MeshtasticConnectionConfig = field(default_factory=MeshtasticConnectionConfig)
 
 
 @dataclass(slots=True)
@@ -100,11 +91,6 @@ class MeshCoreConfig:
 
 
 @dataclass(slots=True)
-class MeshConfig:
-    backend: str = MESHTASTIC_BACKEND
-
-
-@dataclass(slots=True)
 class TelegramConfig:
     include_captions: bool = True
     sender_prefix_template: str = "[{display_name}] {message}"
@@ -121,10 +107,32 @@ class ChunkingConfig:
     retry_max_attempts: int = 3
     retry_initial_delay_ms: int = 500
     retry_backoff_factor: float = 2.0
-    wait_for_ack: bool = True
-    ack_timeout_ms: int = 20000
     abort_on_chunk_failure: bool = True
     payload_safety_margin_bytes: int = 12
+
+
+@dataclass(slots=True)
+class WebConfig:
+    """The web app: packet map, messages and the control panel."""
+
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8080
+    # HTTP Basic auth (any username); empty means no password.
+    password: str = ""
+    title: str = "Meshgram"
+    # Empty: the page restyles OpenStreetMap tiles to match its light or dark theme.
+    tile_url: str = ""
+    tile_attribution: str = ""
+
+    @property
+    def allows_changes(self) -> bool:
+        """Whether the control panel may change anything.
+
+        It can reconfigure the radio and the plugins, so it must be behind a
+        password unless only this machine can reach it.
+        """
+        return bool(self.password) or _is_loopback(self.host)
 
 
 @dataclass(slots=True)
@@ -140,12 +148,30 @@ class MeshgramSettings:
     telegram_group_id: int
     config_path: str
     log_level: str = "INFO"
-    mesh: MeshConfig = field(default_factory=MeshConfig)
-    meshtastic: MeshtasticConfig = field(default_factory=MeshtasticConfig)
     meshcore: MeshCoreConfig = field(default_factory=MeshCoreConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     plugins: list[PluginConfig] = field(default_factory=list)
+
+
+def data_dir() -> Path:
+    """Where persistent state lives (``$MESHGRAM_DATA_DIR``, default ``data``)."""
+    return Path(os.getenv(DATA_DIR_ENV) or DEFAULT_DATA_DIR)
+
+
+def canonical_plugin_name(name: Any) -> str:
+    """Plugin names accept dashes for underscores ("trace-me" is "trace_me")."""
+    return str(name).strip().replace("-", "_")
+
+
+def _is_loopback(host: str) -> bool:
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip()).is_loopback
+    except ValueError:
+        return False
 
 
 def _default_plugins() -> list[PluginConfig]:
@@ -229,40 +255,22 @@ def _as_optional_string(value: Any) -> str | None:
     return text or None
 
 
-def _connection_mode(connection_data: dict[str, Any], *, section: str, allowed: set[str], active: bool) -> str:
-    raw_mode = connection_data.get("mode", "serial")
-    mode = str(raw_mode).strip().lower() or "serial"
-    # Only the active backend's connection has to be usable.
-    if active and mode not in allowed:
-        raise ConfigError(f"{section}.connection.mode must be one of: {sorted(allowed)}; got {raw_mode!r}")
-    return mode
+def _check_backend(config_data: dict[str, Any]) -> None:
+    backend = _section(config_data, "mesh").get("backend")
+    if backend is not None and str(backend).strip().lower() != "meshcore":
+        raise ConfigError(f"mesh.backend {backend!r} isn't supported. {MESHTASTIC_REMOVED_HINT}")
+    if "meshtastic" in config_data and "meshcore" not in config_data:
+        raise ConfigError(f"config.yaml only configures a Meshtastic radio. {MESHTASTIC_REMOVED_HINT}")
 
 
-def _build_meshtastic_config(config_data: dict[str, Any], *, backend: str) -> MeshtasticConfig:
-    meshtastic_data = _section(config_data, "meshtastic")
-    connection_data = _section(meshtastic_data, "connection")
-
-    return MeshtasticConfig(
-        bridge_channel=_as_int(meshtastic_data.get("bridge_channel"), 0),
-        node_name_overrides=_as_string_dict(meshtastic_data.get("node_name_overrides")),
-        connection=MeshtasticConnectionConfig(
-            mode=_connection_mode(
-                connection_data,
-                section="meshtastic",
-                allowed=MESHTASTIC_MODES,
-                active=backend == MESHTASTIC_BACKEND,
-            ),
-            serial_device=_as_optional_string(connection_data.get("serial_device")),
-            tcp_host=_as_optional_string(connection_data.get("tcp_host")) or "localhost",
-            tcp_port=_as_int(connection_data.get("tcp_port"), 4403),
-            no_nodes=_as_bool(connection_data.get("no_nodes"), False),
-        ),
-    )
-
-
-def _build_meshcore_config(config_data: dict[str, Any], *, backend: str) -> MeshCoreConfig:
+def _build_meshcore_config(config_data: dict[str, Any]) -> MeshCoreConfig:
     meshcore_data = _section(config_data, "meshcore")
     connection_data = _section(meshcore_data, "connection")
+
+    raw_mode = connection_data.get("mode", "serial")
+    mode = str(raw_mode).strip().lower() or "serial"
+    if mode not in MESHCORE_MODES:
+        raise ConfigError(f"meshcore.connection.mode must be one of: {sorted(MESHCORE_MODES)}; got {raw_mode!r}")
 
     return MeshCoreConfig(
         bridge_channel=_as_int(meshcore_data.get("bridge_channel"), 0),
@@ -276,12 +284,7 @@ def _build_meshcore_config(config_data: dict[str, Any], *, backend: str) -> Mesh
             _as_float(meshcore_data.get("outbound_echo_text_fallback_ttl_seconds"), 2.0),
         ),
         connection=MeshCoreConnectionConfig(
-            mode=_connection_mode(
-                connection_data,
-                section="meshcore",
-                allowed=MESHCORE_MODES,
-                active=backend == MESHCORE_BACKEND,
-            ),
+            mode=mode,
             serial_device=_as_optional_string(connection_data.get("serial_device")),
             baudrate=_as_int(connection_data.get("baudrate"), 115200),
             tcp_host=_as_optional_string(connection_data.get("tcp_host")) or "localhost",
@@ -290,6 +293,25 @@ def _build_meshcore_config(config_data: dict[str, Any], *, backend: str) -> Mesh
             ble_pin=_as_optional_string(connection_data.get("ble_pin")),
             auto_reconnect=_as_bool(connection_data.get("auto_reconnect"), True),
         ),
+    )
+
+
+def _build_web_config(config_data: dict[str, Any], plugins: list[PluginConfig]) -> WebConfig:
+    web_data = _section(config_data, "web")
+    if "web" not in config_data:
+        # Older configs set the web app's address and password on the packet_map plugin.
+        legacy = next((p.settings for p in plugins if canonical_plugin_name(p.name) == "packet_map"), {})
+        web_data = {key: legacy[key] for key in LEGACY_PACKET_MAP_WEB_KEYS if key in legacy}
+
+    defaults = WebConfig()
+    return WebConfig(
+        enabled=_as_bool(web_data.get("enabled"), defaults.enabled),
+        host=_as_optional_string(web_data.get("host")) or defaults.host,
+        port=_as_int(web_data.get("port"), defaults.port),
+        password=str(web_data.get("password") or ""),
+        title=_as_optional_string(web_data.get("title")) or defaults.title,
+        tile_url=str(web_data.get("tile_url") or ""),
+        tile_attribution=str(web_data.get("tile_attribution") or ""),
     )
 
 
@@ -323,7 +345,6 @@ def build_settings(config_data: dict[str, Any], *, config_path: str = DEFAULT_CO
     runtime_data = _section(config_data, "runtime")
     telegram_data = _section(config_data, "telegram")
     chunking_data = _section(config_data, "chunking")
-    mesh_data = _section(config_data, "mesh")
 
     token = _as_optional_string(telegram_data.get("bot_token"))
     if not token:
@@ -337,18 +358,15 @@ def build_settings(config_data: dict[str, Any], *, config_path: str = DEFAULT_CO
     except ValueError as exc:
         raise ConfigError(f"telegram.group_id must be an integer; got {group_id_raw!r}") from exc
 
-    backend = str(mesh_data.get("backend", MESHTASTIC_BACKEND)).strip().lower()
-    if backend not in SUPPORTED_BACKENDS:
-        raise ConfigError(f"mesh.backend must be one of: {sorted(SUPPORTED_BACKENDS)}; got {backend!r}")
+    _check_backend(config_data)
+    plugins = _build_plugins(config_data.get("plugins"))
 
     return MeshgramSettings(
         telegram_bot_token=token,
         telegram_group_id=group_id,
         config_path=config_path,
         log_level=str(runtime_data.get("log_level", "INFO")).strip().upper(),
-        mesh=MeshConfig(backend=backend),
-        meshtastic=_build_meshtastic_config(config_data, backend=backend),
-        meshcore=_build_meshcore_config(config_data, backend=backend),
+        meshcore=_build_meshcore_config(config_data),
         telegram=TelegramConfig(
             include_captions=_as_bool(telegram_data.get("include_captions"), True),
             sender_prefix_template=str(
@@ -368,12 +386,11 @@ def build_settings(config_data: dict[str, Any], *, config_path: str = DEFAULT_CO
             retry_max_attempts=max(1, _as_int(chunking_data.get("retry_max_attempts"), 3)),
             retry_initial_delay_ms=max(0, _as_int(chunking_data.get("retry_initial_delay_ms"), 500)),
             retry_backoff_factor=max(1.0, _as_float(chunking_data.get("retry_backoff_factor"), 2.0)),
-            wait_for_ack=_as_bool(chunking_data.get("wait_for_ack"), True),
-            ack_timeout_ms=max(1000, _as_int(chunking_data.get("ack_timeout_ms"), 20000)),
             abort_on_chunk_failure=_as_bool(chunking_data.get("abort_on_chunk_failure"), True),
             payload_safety_margin_bytes=max(0, _as_int(chunking_data.get("payload_safety_margin_bytes"), 12)),
         ),
-        plugins=_build_plugins(config_data.get("plugins")),
+        web=_build_web_config(config_data, plugins),
+        plugins=plugins,
     )
 
 

@@ -1,11 +1,11 @@
 import unittest
 
-from meshgram.text_utils import normalized_exact_word, split_for_meshtastic, utf8_len
+from meshgram.text_utils import normalized_exact_word, split_for_mesh, utf8_len
 
 
 class TextUtilsTests(unittest.TestCase):
     def test_no_chunk_when_message_fits(self):
-        chunks = split_for_meshtastic(
+        chunks = split_for_mesh(
             text="hello mesh",
             payload_limit=50,
             prefix_template="({index}/{total}) ",
@@ -15,7 +15,7 @@ class TextUtilsTests(unittest.TestCase):
 
     def test_chunking_is_byte_aware(self):
         message = "hello 😀😀😀😀 world"
-        chunks = split_for_meshtastic(
+        chunks = split_for_mesh(
             text=message,
             payload_limit=18,
             prefix_template="({index}/{total}) ",
@@ -27,7 +27,7 @@ class TextUtilsTests(unittest.TestCase):
             self.assertLessEqual(utf8_len(chunk), 18)
 
     def test_chunk_prefix_added(self):
-        chunks = split_for_meshtastic(
+        chunks = split_for_mesh(
             text="alpha beta gamma delta",
             payload_limit=15,
             prefix_template="({index}/{total}) ",
@@ -38,7 +38,7 @@ class TextUtilsTests(unittest.TestCase):
         self.assertIn("1/", chunks[0])
 
     def test_hard_split_for_long_single_token(self):
-        chunks = split_for_meshtastic(
+        chunks = split_for_mesh(
             text="supercalifragilisticexpialidocious",
             payload_limit=12,
             prefix_template="({index}/{total}) ",
@@ -51,7 +51,7 @@ class TextUtilsTests(unittest.TestCase):
 
     def test_prefix_indices_are_consistent_after_convergence(self):
         message = " ".join(["😀emoji"] * 120)
-        chunks = split_for_meshtastic(
+        chunks = split_for_mesh(
             text=message,
             payload_limit=32,
             prefix_template="({index}/{total}) ",

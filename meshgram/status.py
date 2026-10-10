@@ -1,6 +1,6 @@
 """Connection status of everything Meshgram talks to (radio, Telegram, MQTT, ...).
 
-The app and plugins report state changes here; the packet_map web app shows them.
+The app and plugins report state changes here; the web app shows them.
 ``set_state`` may be called from any thread (paho's network thread, for example):
 listeners always run on the event loop they were registered from.
 """
@@ -45,6 +45,18 @@ class StatusRegistry:
             entry = {"key": key, "label": label, "state": state, "detail": detail, "since": since}
             self._services[key] = entry
             listeners = list(self._listeners)
+        self._notify(listeners, entry)
+
+    def remove(self, key: str) -> None:
+        """Forget a service (its plugin was turned off); listeners get ``{"key": key, "removed": True}``."""
+        with self._lock:
+            if self._services.pop(key, None) is None:
+                return
+            listeners = list(self._listeners)
+        self._notify(listeners, {"key": key, "removed": True})
+
+    @staticmethod
+    def _notify(listeners: list[tuple[StatusListener, asyncio.AbstractEventLoop]], entry: dict[str, Any]) -> None:
         for listener, loop in listeners:
             if loop.is_closed():
                 continue

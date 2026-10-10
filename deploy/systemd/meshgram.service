@@ -1,5 +1,5 @@
 [Unit]
-Description=Meshgram Telegram<->Meshtastic bridge
+Description=Meshgram Telegram<->MeshCore bridge
 After=network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,8 @@ Group=meshgram
 WorkingDirectory=/opt/meshgram
 # Every setting lives in this file (copy config.example.yaml; chmod 600).
 Environment=MESHGRAM_CONFIG_PATH=/opt/meshgram/config.yaml
-# Persistent state (packet_map history) lives in /var/lib/meshgram.
+# Persistent state (packet_map history, plugin settings changed in the web app)
+# lives in /var/lib/meshgram.
 StateDirectory=meshgram
 Environment=MESHGRAM_DATA_DIR=/var/lib/meshgram
 ExecStart=/opt/meshgram/.venv/bin/python /opt/meshgram/main.py

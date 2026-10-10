@@ -16,8 +16,57 @@ LOGGER = logging.getLogger(__name__)
 ENV_TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+_SECRET = {"type": "string", "writeOnly": True}
+
+
 class DirectMessageHttpCommandPlugin(BasePlugin):
     name = "dm_http_command"
+    title = "HTTP commands by direct message"
+    description = (
+        "A direct message to the radio that is exactly a command name fetches a URL and "
+        "replies with a value from the response."
+    )
+    settings_schema = {
+        "type": "object",
+        "properties": {
+            "commands": {
+                "type": "object",
+                "title": "Commands",
+                "description": "Command names ignore case. ${VAR} in the URL and headers is read from the environment.",
+                "x-key-title": "Command",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                        "url": {"type": "string", "minLength": 1, "title": "URL", "pattern": r"^(https?://|\$\{)", "x-pattern-message": "must start with http:// or https://"},
+                        "type": {"type": "string", "enum": ["json", "text"], "title": "Response type", "default": "json"},
+                        "value": {"type": "string", "title": "Value path", "description": "Dotted path into the JSON, like data.items.0.name. Empty: the whole response."},
+                        "msg": {"type": "string", "title": "Reply", "description": "{value} and {command} are filled in.", "default": "{value}"},
+                        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "title": "Timeout (seconds)"},
+                        "headers": {"type": "object", "title": "Headers", "additionalProperties": _SECRET, "x-key-title": "Header"},
+                        "auth": {
+                            "type": "object",
+                            "title": "Authentication",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["bearer"], "title": "Type"},
+                                "token": {**_SECRET, "title": "Token"},
+                                "token_env": {"type": "string", "title": "Token from environment variable"},
+                                "header": {"type": "string", "title": "Header", "default": "Authorization"},
+                                "prefix": {"type": "string", "title": "Prefix", "default": "Bearer"},
+                            },
+                        },
+                    },
+                },
+            },
+            "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "title": "Default timeout (seconds)", "default": 8},
+            "error_message": {
+                "type": "string",
+                "title": "Reply when a request fails",
+                "description": "{command} is filled in. Empty: no reply.",
+                "default": "Request failed",
+            },
+        },
+    }
 
     async def on_mesh_message(
         self,
@@ -56,7 +105,6 @@ class DirectMessageHttpCommandPlugin(BasePlugin):
                 text=response_text,
                 destination_id=event.from_id,
                 channel_index=event.channel_index,
-                reply_id=event.packet_id,
             )
         ]
 
@@ -209,16 +257,7 @@ def _resolve_path(data: Any, path: Any) -> Any:
 def _normalize_node_id(node_id: Optional[str]) -> Optional[str]:
     if not node_id:
         return None
-    text = node_id.strip().lower()
-    if not text:
-        return None
-    if text.startswith("!"):
-        return text
-    if text.startswith("0x"):
-        text = text[2:]
-    if text and all(char in "0123456789abcdef" for char in text):
-        return f"!{text}"
-    return text
+    return node_id.strip().lower() or None
 
 
 def _is_direct_message_to_local_node(event: MeshTextEvent, context: PluginContext) -> bool:

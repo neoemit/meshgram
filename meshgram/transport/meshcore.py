@@ -9,17 +9,11 @@ import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 from ..config import MeshgramSettings
-from ..types import (
-    MeshPacketRef,
-    MeshReactionEvent,
-    MeshTextEvent,
-    SendMeshAction,
-    SendMeshReactionAction,
-)
-from . import MeshReactionCallback, MeshTextCallback, MeshTransport
+from ..types import MeshPacketRef, MeshTextEvent, SendMeshAction
 
 LOGGER = logging.getLogger(__name__)
 
+MeshTextCallback = Callable[[MeshTextEvent], Awaitable[None]]
 # Receives the payload dict of every MeshCore RX_LOG_DATA event (raw RF packet
 # plus SNR/RSSI). Used by observer-style extensions such as MeshMapper uploads.
 RxLogListener = Callable[[dict[str, Any]], Awaitable[None]]
@@ -27,26 +21,56 @@ RxLogListener = Callable[[dict[str, Any]], Awaitable[None]]
 
 DEFAULT_MESHCORE_PAYLOAD_LIMIT = 140
 DEFAULT_OUTBOUND_ECHO_TEXT_FALLBACK_TTL_SECONDS = 2.0
-MESHCORE_CHANNEL_INDEX_RANGE = range(8)
+# Channel slots on firmware that doesn't report how many it has.
+DEFAULT_MAX_CHANNELS = 8
+
+# Friendlier text for the companion protocol's error codes.
+_ERROR_TEXT = {
+    "ERR_CODE_UNSUPPORTED_CMD": "the radio's firmware doesn't support this",
+    "ERR_CODE_NOT_FOUND": "the radio doesn't have it",
+    "ERR_CODE_TABLE_FULL": "the radio has no room left",
+    "ERR_CODE_BAD_STATE": "the radio can't do this right now",
+    "ERR_CODE_FILE_IO_ERROR": "the radio couldn't save it",
+    "ERR_CODE_ILLEGAL_ARG": "the radio rejected the value",
+    "timeout": "the radio didn't answer in time",
+    "no_event_received": "the radio didn't answer",
+}
 
 
-class MeshCoreTransport(MeshTransport):
-    backend_name = "meshcore"
-    supports_reactions = False
-    supports_reply_threading = False
-    # ACK waiting is handled inside ``asend_text`` (per-message), so the app's
-    # generic "wait_for_ack" pass after each send is a no-op.
-    supports_wait_for_ack = False
+class RadioCommandError(RuntimeError):
+    """A command for the radio failed, or the radio isn't connected."""
+
+
+def describe_radio_error(payload: Any) -> str:
+    if isinstance(payload, dict):
+        code = payload.get("code_string") or payload.get("reason") or payload.get("error")
+        if code is None and payload.get("error_code") is not None:
+            code = f"error code {payload['error_code']}"
+        if code is not None:
+            return _ERROR_TEXT.get(str(code), str(code))
+    return "the radio reported an error"
+
+
+class MeshCoreTransport:
+    """The MeshCore companion radio, via the ``meshcore`` library.
+
+    Normalizes incoming messages into ``MeshTextEvent`` objects, sends
+    ``SendMeshAction`` messages, and gives plugins and the web app's control
+    panel access to the radio (raw RF logs, contacts, channels, commands).
+    """
 
     def __init__(self, settings: MeshgramSettings):
-        super().__init__(settings)
+        self.settings = settings
+        self.local_node_id: Optional[str] = None
         self._mc: Any = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._on_text: Optional[MeshTextCallback] = None
-        self._on_reaction: Optional[MeshReactionCallback] = None
         self._contacts: dict[str, dict[str, Any]] = {}
         self._channels: dict[int, dict[str, Any]] = {}
+        self._device_info: dict[str, Any] = {}
         self._subscriptions: list[Any] = []
+        # One command at a time: the library matches replies to commands by event type only.
+        self._command_lock = asyncio.Lock()
         self.local_short_name: Optional[str] = None
         # Optional fallback cache for identity-less echoes:
         # (channel, text) -> monotonic-time-sent.
@@ -69,23 +93,16 @@ class MeshCoreTransport(MeshTransport):
             return flag
         return True
 
-    async def connect(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        on_text: MeshTextCallback,
-        on_reaction: MeshReactionCallback,
-    ) -> None:
+    async def connect(self, loop: asyncio.AbstractEventLoop, on_text: MeshTextCallback) -> None:
         try:
             from meshcore import EventType, MeshCore
         except ImportError as exc:  # pragma: no cover - guarded import
             raise RuntimeError(
-                "The `meshcore` package is required for backend=meshcore; "
-                "install with: pip install meshcore>=2.3.7"
+                "The `meshcore` package is required; install with: pip install meshcore>=2.3.7"
             ) from exc
 
         self._loop = loop
         self._on_text = on_text
-        self._on_reaction = on_reaction
 
         cfg = self.settings.meshcore.connection
         if cfg.mode == "tcp":
@@ -97,7 +114,7 @@ class MeshCoreTransport(MeshTransport):
             )
         elif cfg.mode == "ble":
             if not cfg.ble_address:
-                raise ValueError("MeshCore BLE mode requires meshcore.connection.ble_address (or MESH_BLE_ADDRESS)")
+                raise ValueError("MeshCore BLE mode requires meshcore.connection.ble_address")
             LOGGER.info("Connecting to MeshCore over BLE: %s", cfg.ble_address)
             ble_kwargs: dict[str, Any] = {}
             if cfg.ble_pin:
@@ -117,19 +134,20 @@ class MeshCoreTransport(MeshTransport):
         if self._mc is None or not getattr(self._mc, "is_connected", False) or getattr(self._mc, "commands", None) is None:
             handshake_hint = (
                 "MeshCore handshake failed. Verify: (1) the device runs MeshCore companion "
-                "firmware compiled with the matching transport; (2) MESH_BAUDRATE matches "
-                "(common values: 115200, 921600); (3) you selected the right MESH_MODE "
-                "(serial/tcp/ble) for this device. If the radio is actually Meshtastic, set "
-                "MESH_BACKEND=meshtastic."
+                "firmware compiled with the matching transport; (2) meshcore.connection.baudrate "
+                "matches (common values: 115200, 921600); (3) meshcore.connection.mode "
+                "(serial/tcp/ble) is right for this device. Meshtastic radios aren't supported."
             )
             self._mc = None
             raise RuntimeError(handshake_hint)
 
         self._enable_channel_log_path_enrichment()
 
-        await self._refresh_local_node_async()
-        await self._refresh_channels_async()
-        await self._refresh_contacts_async()
+        async with self._command_lock:
+            await self._refresh_local_node_async()
+            self._device_info = await self._query_device_info()
+            await self._refresh_channels_async()
+            await self._refresh_contacts_async()
 
         self._subscriptions.append(
             self._mc.subscribe(EventType.CONTACT_MSG_RECV, self._handle_contact_msg)
@@ -150,6 +168,7 @@ class MeshCoreTransport(MeshTransport):
         LOGGER.info("MeshCore transport ready (local_node_id=%s, contacts=%s)", self.local_node_id, len(self._contacts))
 
     def invalidate_connection(self) -> None:
+        """Tear down any active connection. Idempotent."""
         for sub in self._subscriptions:
             with contextlib.suppress(Exception):
                 self._mc.unsubscribe(sub)
@@ -170,6 +189,7 @@ class MeshCoreTransport(MeshTransport):
         self._mc = None
         self.local_node_id = None
         self.local_short_name = None
+        self._device_info = {}
         self._recent_outbound_texts.clear()
 
     def close(self) -> None:
@@ -223,7 +243,7 @@ class MeshCoreTransport(MeshTransport):
 
         loaded = 0
         channels: dict[int, dict[str, Any]] = {}
-        for channel_index in MESHCORE_CHANNEL_INDEX_RANGE:
+        for channel_index in range(self.max_channels):
             try:
                 result = await get_channel(channel_index)
             except Exception as exc:
@@ -240,7 +260,7 @@ class MeshCoreTransport(MeshTransport):
                     channels[channel_index] = dict(payload)
 
         self._channels = channels
-        LOGGER.info("MeshCore channel metadata refreshed for path enrichment (channels=%s)", loaded)
+        LOGGER.info("MeshCore channel metadata refreshed (slots=%s)", loaded)
 
     async def _refresh_contacts_async(self) -> None:
         try:
@@ -258,6 +278,49 @@ class MeshCoreTransport(MeshTransport):
         payload = result.payload
         if isinstance(payload, dict):
             self._contacts = dict(payload)
+
+    # --- Commands (control panel) --------------------------------------------
+
+    async def command(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        """Run a ``meshcore`` library command (``MeshCore.commands.<name>``); returns its payload.
+
+        Raises ``RadioCommandError`` when the radio isn't connected, the library
+        lacks the command, or the radio answers with an error.
+        """
+        async with self._command_lock:
+            return await self._command(name, *args, **kwargs)
+
+    async def _command(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        if self._mc is None:
+            raise RadioCommandError("The radio isn't connected")
+        method = getattr(getattr(self._mc, "commands", None), name, None)
+        if not callable(method):
+            raise RadioCommandError(f"The installed meshcore library has no {name} command")
+
+        from meshcore import EventType
+
+        try:
+            result = await method(*args, **kwargs)
+        except (ValueError, TypeError) as exc:
+            raise RadioCommandError(str(exc)) from exc
+        if getattr(result, "type", None) == EventType.ERROR:
+            raise RadioCommandError(describe_radio_error(getattr(result, "payload", None)))
+        return getattr(result, "payload", None)
+
+    async def refresh_channels(self) -> None:
+        async with self._command_lock:
+            await self._refresh_channels_async()
+
+    async def refresh_contacts(self) -> None:
+        async with self._command_lock:
+            await self._refresh_contacts_async()
+
+    async def refresh_self_info(self) -> dict[str, Any]:
+        """Ask the radio for its SELF_INFO again (name, position, radio settings) after changing them."""
+        async with self._command_lock:
+            await self._command("send_appstart")
+            await self._refresh_local_node_async()
+        return self.device_self_info
 
     @staticmethod
     def _derive_local_node_id(info: dict[str, Any]) -> Optional[str]:
@@ -295,6 +358,36 @@ class MeshCoreTransport(MeshTransport):
             result.append({"name": name, "secret": secret, "hash": channel_hash})
         return result
 
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """DEVICE_INFO read at connect (model, firmware ``ver``, ``max_channels``, ...); may be empty."""
+        return dict(self._device_info)
+
+    @property
+    def max_channels(self) -> int:
+        try:
+            reported = int(self._device_info.get("max_channels") or 0)
+        except (TypeError, ValueError):
+            reported = 0
+        return reported if reported > 0 else DEFAULT_MAX_CHANNELS
+
+    @property
+    def channel_slots(self) -> list[dict[str, Any]]:
+        """Every channel slot read from the radio, empty ones included: ``index``, ``name``, ``secret``, ``hash``."""
+        slots = []
+        for index, channel in sorted(self._channels.items()):
+            secret = channel.get("channel_secret")
+            secret = bytes(secret) if isinstance(secret, (bytes, bytearray)) and len(secret) == 16 else bytes(16)
+            slots.append(
+                {
+                    "index": index,
+                    "name": str(channel.get("channel_name") or "").strip(),
+                    "secret": secret,
+                    "hash": hashlib.sha256(secret).hexdigest()[:2],
+                }
+            )
+        return slots
+
     def add_rx_log_listener(self, listener: RxLogListener) -> None:
         """Register a callback for raw RF packet logs. Survives reconnects."""
         if listener not in self._rx_log_listeners:
@@ -329,6 +422,11 @@ class MeshCoreTransport(MeshTransport):
 
     async def query_device_info(self) -> dict[str, Any]:
         """Return the DEVICE_INFO payload (model, firmware version) or ``{}``."""
+        async with self._command_lock:
+            self._device_info = await self._query_device_info()
+        return dict(self._device_info)
+
+    async def _query_device_info(self) -> dict[str, Any]:
         commands = getattr(self._mc, "commands", None)
         send_device_query = getattr(commands, "send_device_query", None)
         if not callable(send_device_query):
@@ -336,7 +434,11 @@ class MeshCoreTransport(MeshTransport):
 
         from meshcore import EventType
 
-        result = await send_device_query()
+        try:
+            result = await send_device_query()
+        except Exception as exc:
+            LOGGER.debug("MeshCore device query failed: %s", exc)
+            return {}
         if getattr(result, "type", None) == EventType.ERROR:
             return {}
         payload = getattr(result, "payload", None)
@@ -352,7 +454,8 @@ class MeshCoreTransport(MeshTransport):
 
         from meshcore import EventType
 
-        result = await sign(data)
+        async with self._command_lock:
+            result = await sign(data)
         if getattr(result, "type", None) == EventType.ERROR:
             raise RuntimeError(f"MeshCore on-device signing failed: {getattr(result, 'payload', None)}")
         payload = getattr(result, "payload", None)
@@ -392,7 +495,6 @@ class MeshCoreTransport(MeshTransport):
             from_id=pubkey_prefix or None,
             to_id=self.local_node_id,
             packet_id=self._synthetic_inbound_id("dm", pubkey_prefix, text, timestamp),
-            reply_id=None,
             channel_index=-1,
             text=text,
             sender_label=sender_label,
@@ -455,7 +557,6 @@ class MeshCoreTransport(MeshTransport):
             from_id=pubkey_prefix or None,
             to_id=None,
             packet_id=self._synthetic_inbound_id("ch", str(channel_index), body, timestamp),
-            reply_id=None,
             channel_index=channel_index,
             text=body,
             sender_label=sender_label,
@@ -486,58 +587,42 @@ class MeshCoreTransport(MeshTransport):
 
     # --- Outbound ----------------------------------------------------------
 
-    async def asend_text(self, action: SendMeshAction) -> object:
+    async def asend_text(self, action: SendMeshAction) -> MeshPacketRef:
+        """Send a channel or direct message; returns an identifier for it."""
         if self._mc is None:
             raise RuntimeError("MeshCore client is not connected")
 
         from meshcore import EventType
 
-        is_dm = isinstance(action.destination_id, str) and action.destination_id.strip()
-        result: Any
-        if is_dm:
-            dst = action.destination_id  # type: ignore[assignment]
-            if action.reply_id is not None:
-                LOGGER.debug(
-                    "MeshCore backend has no native reply threading; dropping reply_id=%s",
-                    action.reply_id,
+        is_dm = isinstance(action.destination_id, str) and bool(action.destination_id.strip())
+        channel_index = action.channel_index if action.channel_index >= 0 else self.settings.meshcore.bridge_channel
+        async with self._command_lock:
+            if is_dm:
+                result = await self._mc.commands.send_msg(action.destination_id, action.text)
+            else:
+                result = await self._mc.commands.send_chan_msg(channel_index, action.text)
+
+            if getattr(result, "type", None) == EventType.ERROR:
+                raise RuntimeError(f"MeshCore send failed: {describe_radio_error(result.payload)}")
+
+            expected_ack = self._extract_expected_ack_hex(result)
+            if action.wait_for_ack and action.want_ack and is_dm and expected_ack is not None:
+                timeout_seconds = max(1.0, action.ack_timeout_ms / 1000) if action.ack_timeout_ms else 10.0
+                ack_event = await self._mc.wait_for_event(
+                    EventType.ACK,
+                    attribute_filters={"code": expected_ack},
+                    timeout=timeout_seconds,
                 )
-            result = await self._mc.commands.send_msg(dst, action.text)
-        else:
-            channel_index = action.channel_index if action.channel_index >= 0 else self.settings.meshcore.bridge_channel
-            result = await self._mc.commands.send_chan_msg(channel_index, action.text)
-
-        if getattr(result, "type", None) == EventType.ERROR:
-            raise RuntimeError(f"MeshCore send failed: {result.payload}")
-
-        expected_ack = self._extract_expected_ack_hex(result)
-
-        if (
-            action.wait_for_ack
-            and action.want_ack
-            and is_dm
-            and expected_ack is not None
-        ):
-            timeout_seconds = max(1.0, action.ack_timeout_ms / 1000) if action.ack_timeout_ms else 10.0
-            ack_event = await self._mc.wait_for_event(
-                EventType.ACK,
-                attribute_filters={"code": expected_ack},
-                timeout=timeout_seconds,
-            )
-            if ack_event is None:
-                raise TimeoutError(f"MeshCore ACK wait timed out for code {expected_ack}")
-
-        # MeshCore channel sends don't return an expected_ack (broadcasts have no
-        # per-recipient ACK). Synthesise an id so the app-level
-        # ``require_packet_id`` check passes and we don't retry-transmit.
-        packet_id = expected_ack or f"mc-out-{uuid.uuid4().hex[:12]}"
+                if ack_event is None:
+                    raise TimeoutError(f"MeshCore ACK wait timed out for code {expected_ack}")
 
         # Remember the text so we suppress the radio's echo of our own transmission
         # when it arrives back as an inbound channel message.
         if not is_dm:
-            channel_index = action.channel_index if action.channel_index >= 0 else self.settings.meshcore.bridge_channel
             self._record_outbound_text(channel_index, action.text)
 
-        return {"id": packet_id}
+        # Channel messages have no expected_ack (broadcasts aren't acknowledged).
+        return expected_ack or f"mc-out-{uuid.uuid4().hex[:12]}"
 
     def _record_outbound_text(self, channel_index: int, text: str) -> None:
         if not self._outbound_echo_text_fallback_enabled():
@@ -633,14 +718,6 @@ class MeshCoreTransport(MeshTransport):
         normalized = value.split("•", 1)[0].strip().lower()
         return normalized or None
 
-    async def asend_reaction(self, action: SendMeshReactionAction) -> object:
-        LOGGER.debug(
-            "MeshCore backend does not support reactions; dropping emoji=%s target_packet_id=%s",
-            action.emoji,
-            action.target_packet_id,
-        )
-        return None
-
     @staticmethod
     def _extract_expected_ack_hex(result: Any) -> Optional[str]:
         payload = getattr(result, "payload", None)
@@ -655,11 +732,7 @@ class MeshCoreTransport(MeshTransport):
 
     # --- Sender labels ------------------------------------------------------
 
-    def resolve_sender_label(
-        self,
-        from_id: Optional[str],
-        from_num: Optional[int] = None,  # noqa: ARG002 - MeshCore has no numeric node IDs
-    ) -> str:
+    def resolve_sender_label(self, from_id: Optional[str]) -> str:
         if from_id:
             override = self.settings.meshcore.contact_name_overrides
             normalized = from_id.strip().lower()

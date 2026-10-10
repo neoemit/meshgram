@@ -1,19 +1,12 @@
 import asyncio
+import os
+import tempfile
 import unittest
-
-from telegram.error import BadRequest
+from unittest import mock
 
 from meshgram.app import MeshgramApp
 from meshgram.config import MeshgramSettings, PluginConfig
-from meshgram.types import (
-    MeshtasticReactionEvent,
-    MeshtasticTextEvent,
-    SendMeshtasticReactionAction,
-    SendMeshtasticAction,
-    SendTelegramReactionAction,
-    TelegramMessageEvent,
-    TelegramReactionEvent,
-)
+from meshgram.types import MeshTextEvent, SendMeshAction, TelegramMessageEvent
 
 
 class _FakeTelegramMessage:
@@ -24,7 +17,6 @@ class _FakeTelegramMessage:
 class _FakeBot:
     def __init__(self):
         self.messages = []
-        self.reactions = []
         self._next_message_id = 100
 
     async def send_message(self, **kwargs):
@@ -32,502 +24,164 @@ class _FakeBot:
         self._next_message_id += 1
         return _FakeTelegramMessage(self._next_message_id)
 
-    async def set_message_reaction(self, **kwargs):
-        self.reactions.append(kwargs)
-        return True
-
-
-class _FakeBotReactionInvalid(_FakeBot):
-    async def set_message_reaction(self, **kwargs):
-        reaction = kwargs.get("reaction") or []
-        emoji = getattr(reaction[0], "emoji", None) if reaction else None
-        if emoji in {"❤", "❤️"}:
-            raise BadRequest("Reaction_invalid")
-        return await super().set_message_reaction(**kwargs)
-
-
-class _FakeBotReactionAlwaysInvalid(_FakeBot):
-    async def set_message_reaction(self, **kwargs):
-        raise BadRequest("Reaction_invalid")
-
 
 class _FakeTelegramApp:
     def __init__(self):
         self.bot = _FakeBot()
 
 
-class RuntimeIntegrationTests(unittest.TestCase):
-    def setUp(self):
+class _FakeMesh:
+    payload_limit = 140
+
+    def __init__(self):
+        self.is_connected = True
+        self.local_node_id = None
+        self.sent: list[SendMeshAction] = []
+        self.attempts: list[SendMeshAction] = []
+        # sequence_index -> exceptions to raise on the next attempts
+        self.failures: dict = {}
+
+    def refresh_local_node_id(self):
+        pass
+
+    def invalidate_connection(self):
+        self.is_connected = False
+
+    async def asend_text(self, action):
+        self.attempts.append(action)
+        pending = self.failures.get(action.sequence_index)
+        if pending:
+            raise pending.pop(0)
+        self.sent.append(action)
+        return f"mc-out-{len(self.sent)}"
+
+
+def _telegram(text, message_id=1) -> TelegramMessageEvent:
+    return TelegramMessageEvent(
+        chat_id=-555,
+        message_id=message_id,
+        text=text,
+        text_source="text",
+        is_from_bot=False,
+        sender_display_name="Alice",
+        has_media=False,
+    )
+
+
+def _mesh(text, from_id="bbbb2222cccc", channel_index=0, packet_id="mc-ch-1") -> MeshTextEvent:
+    return MeshTextEvent(
+        from_id=from_id,
+        to_id=None,
+        packet_id=packet_id,
+        channel_index=channel_index,
+        text=text,
+        sender_label="Remote",
+    )
+
+
+def _chunk(index, total=3, attempts=3, sequence="seq"):
+    return SendMeshAction(
+        text=f"chunk{index}",
+        sequence_id=sequence,
+        sequence_index=index,
+        sequence_total=total,
+        retry_max_attempts=attempts,
+        retry_initial_delay_ms=0,
+        retry_backoff_factor=2.0,
+        abort_on_failure=True,
+    )
+
+
+class RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        data_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(data_dir.cleanup)
+        patcher = mock.patch.dict(os.environ, {"MESHGRAM_DATA_DIR": data_dir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
         settings = MeshgramSettings(
             telegram_bot_token="token",
             telegram_group_id=-555,
             config_path="config.yaml",
             plugins=[
-                PluginConfig(name="bridge", enabled=True, settings={"reply_link_ttl_hours": 24}),
+                PluginConfig(name="bridge", enabled=True, settings={}),
                 PluginConfig(name="ping_pong", enabled=True, settings={}),
             ],
         )
-        settings.meshtastic.bridge_channel = 0
-        settings.chunking.enabled = True
-        settings.chunking.prefix_template = "({index}/{total}) "
+        settings.meshcore.bridge_channel = 0
         settings.chunking.inter_chunk_delay_ms = 0
+        settings.chunking.broadcast_min_inter_chunk_delay_ms = 0
+        settings.web.enabled = False
 
         self.app = MeshgramApp(settings)
         self.app.bot_app = _FakeTelegramApp()
-        self.app.meshtastic.iface = object()
+        self.mesh = _FakeMesh()
+        self.app.mesh = self.mesh
+        await self.app.plugins.start_all()
+        self.addAsyncCleanup(self.app.plugins.stop_all)
+        # Chunks wait a while between sends; not in tests.
+        sleep = asyncio.sleep
+        patcher = mock.patch("meshgram.app.asyncio.sleep", lambda _seconds: sleep(0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-        self.sent_mesh = []
-        self.sent_mesh_reactions = []
+    async def test_telegram_to_mesh_dispatch(self):
+        await self.app._dispatch_telegram_message(_telegram("hello from telegram"))
+        self.assertEqual(len(self.mesh.sent), 1)
+        self.assertEqual(self.mesh.sent[0].text, "[Alice] hello from telegram")
+        self.assertEqual(self.mesh.sent[0].channel_index, 0)
 
-        def _fake_send_mesh(action):
-            self.sent_mesh.append(action)
-            return {"id": 1000 + len(self.sent_mesh)}
+    async def test_long_telegram_message_goes_out_in_chunks(self):
+        await self.app._dispatch_telegram_message(_telegram("x" * 600))
+        self.assertGreater(len(self.mesh.sent), 1)
+        self.assertTrue(self.mesh.sent[0].text.startswith("(1/"))
 
-        def _fake_send_mesh_reaction(action):
-            self.sent_mesh_reactions.append(action)
-            return {"id": 3000 + len(self.sent_mesh_reactions)}
+    async def test_mesh_to_telegram(self):
+        await self.app._on_mesh_text(_mesh("from mesh"))
+        self.assertEqual(self.app.bot_app.bot.messages, [{"chat_id": -555, "text": "[Remote] from mesh"}])
 
-        self.app.meshtastic.send_text = _fake_send_mesh
-        self.app.meshtastic.send_reaction = _fake_send_mesh_reaction
-
-    def test_telegram_to_meshtastic_dispatch(self):
-        event = TelegramMessageEvent(
-            chat_id=-555,
-            message_id=1,
-            reply_to_message_id=None,
-            text="hello from telegram",
-            text_source="text",
-            is_from_bot=False,
-            sender_display_name="Alice",
-            has_media=False,
-        )
-
-        asyncio.run(self.app._dispatch_telegram_message(event))
-
-        self.assertEqual(len(self.sent_mesh), 1)
-        self.assertIn("[Alice] hello from telegram", self.sent_mesh[0].text)
-
-    def test_meshtastic_to_telegram_loop_prevention(self):
-        self.app.meshtastic.local_node_id = "!aaaa1111"
-        event = MeshtasticTextEvent(
-            from_id="!aaaa1111",
-            to_id=None,
-            packet_id=10,
-            reply_id=None,
-            channel_index=0,
-            text="should not relay",
-            sender_label="LocalNode",
-        )
-
-        asyncio.run(self.app._dispatch_meshtastic_message(event))
-        self.assertEqual(self.app.bot_app.bot.messages, [])
-
-    def test_meshtastic_ping_generates_pong_action(self):
-        event = MeshtasticTextEvent(
-            from_id="!bbbb2222",
-            to_id=None,
-            packet_id=11,
-            reply_id=None,
-            channel_index=3,
-            text="PING!!!",
-            sender_label="Remote",
-        )
-
-        asyncio.run(self.app._dispatch_meshtastic_message(event))
-
-        self.assertEqual(len(self.sent_mesh), 1)
-        self.assertEqual(self.sent_mesh[0].text, "Pong")
-        self.assertEqual(self.sent_mesh[0].channel_index, 3)
-        self.assertEqual(self.sent_mesh[0].reply_id, 11)
-
-    def test_reply_mapping_registered_for_telegram_to_meshtastic(self):
-        event = TelegramMessageEvent(
-            chat_id=-555,
-            message_id=21,
-            reply_to_message_id=None,
-            text="link this",
-            text_source="text",
-            is_from_bot=False,
-            sender_display_name="Alice",
-            has_media=False,
-        )
-
-        asyncio.run(self.app._dispatch_telegram_message(event))
-
-        self.assertEqual(self.app.reply_links.get_meshtastic_for_telegram(-555, 21), 1001)
-        self.assertEqual(self.app.reply_links.get_telegram_for_meshtastic(-555, 1001), 21)
-
-    def test_chunked_message_maps_first_chunk_as_canonical_and_all_chunks_reverse(self):
-        event = TelegramMessageEvent(
-            chat_id=-555,
-            message_id=31,
-            reply_to_message_id=None,
-            text="x" * 600,
-            text_source="text",
-            is_from_bot=False,
-            sender_display_name="Alice",
-            has_media=False,
-        )
-
-        asyncio.run(self.app._dispatch_telegram_message(event))
-
-        self.assertGreater(len(self.sent_mesh), 1)
-        self.assertEqual(self.app.reply_links.get_meshtastic_for_telegram(-555, 31), 1001)
-        self.assertEqual(self.app.reply_links.get_telegram_for_meshtastic(-555, 1001), 31)
-        self.assertEqual(self.app.reply_links.get_telegram_for_meshtastic(-555, 1002), 31)
-
-    def test_reply_mapping_registered_for_meshtastic_to_telegram_and_used(self):
-        incoming_mesh_event = MeshtasticTextEvent(
-            from_id="!bbbb2222",
-            to_id=None,
-            packet_id=222,
-            reply_id=None,
-            channel_index=0,
-            text="from mesh",
-            sender_label="Remote",
-        )
-
-        asyncio.run(self.app._dispatch_meshtastic_message(incoming_mesh_event))
-
-        mapped_telegram_message_id = self.app.reply_links.get_telegram_for_meshtastic(-555, 222)
-        self.assertIsNotNone(mapped_telegram_message_id)
-
-        telegram_reply_event = TelegramMessageEvent(
-            chat_id=-555,
-            message_id=22,
-            reply_to_message_id=mapped_telegram_message_id,
-            text="reply from tg",
-            text_source="text",
-            is_from_bot=False,
-            sender_display_name="Alice",
-            has_media=False,
-        )
-
-        asyncio.run(self.app._dispatch_telegram_message(telegram_reply_event))
-
-        self.assertEqual(self.sent_mesh[-1].reply_id, 222)
-
-    def test_telegram_reaction_dispatch_to_meshtastic_when_mapping_exists(self):
-        self.app.reply_links.link_telegram_to_meshtastic(-555, 77, 9001)
-        event = TelegramReactionEvent(
-            chat_id=-555,
-            message_id=77,
-            emoji="❤",
-            is_from_bot=False,
-        )
-
-        asyncio.run(self.app._dispatch_telegram_reaction(event))
-
-        self.assertEqual(len(self.sent_mesh_reactions), 1)
-        self.assertEqual(self.sent_mesh_reactions[0].target_packet_id, 9001)
-        self.assertEqual(self.sent_mesh_reactions[0].emoji, "❤")
-
-    def test_telegram_reaction_missing_mapping_emits_fallback_notice(self):
-        event = TelegramReactionEvent(
-            chat_id=-555,
-            message_id=77,
-            emoji="❤",
-            is_from_bot=False,
-        )
-
-        asyncio.run(self.app._dispatch_telegram_reaction(event))
-
-        self.assertEqual(len(self.sent_mesh_reactions), 0)
-        self.assertEqual(len(self.sent_mesh), 1)
-        self.assertEqual(self.sent_mesh[0].text, "(reaction target not found)")
-
-    def test_meshtastic_reaction_dispatch_to_telegram_when_mapping_exists(self):
-        self.app.reply_links.link_meshtastic_to_telegram(4567, -555, 345)
-        event = MeshtasticReactionEvent(
-            from_id="!bbbb2222",
-            to_id=None,
-            packet_id=222,
-            target_packet_id=4567,
-            channel_index=0,
-            emoji="❤",
-            sender_label="Remote",
-        )
-
-        asyncio.run(self.app._dispatch_meshtastic_reaction(event))
-
-        self.assertEqual(len(self.app.bot_app.bot.reactions), 1)
-        self.assertEqual(self.app.bot_app.bot.reactions[0]["chat_id"], -555)
-        self.assertEqual(self.app.bot_app.bot.reactions[0]["message_id"], 345)
-
-    def test_meshtastic_reaction_missing_mapping_emits_fallback_notice(self):
-        event = MeshtasticReactionEvent(
-            from_id="!bbbb2222",
-            to_id=None,
-            packet_id=222,
-            target_packet_id=1111,
-            channel_index=0,
-            emoji="❤",
-            sender_label="Remote",
-        )
-
-        asyncio.run(self.app._dispatch_meshtastic_reaction(event))
-
-        self.assertEqual(len(self.app.bot_app.bot.reactions), 0)
+    async def test_mesh_duplicates_are_dropped(self):
+        await self.app._on_mesh_text(_mesh("once"))
+        await self.app._on_mesh_text(_mesh("once"))
         self.assertEqual(len(self.app.bot_app.bot.messages), 1)
-        self.assertEqual(self.app.bot_app.bot.messages[0]["text"], "(reaction target not found)")
 
-    def test_telegram_reaction_send_falls_back_when_emoji_is_invalid(self):
-        self.app.bot_app.bot = _FakeBotReactionInvalid()
-        action = SendTelegramReactionAction(
-            chat_id=-555,
-            message_id=123,
-            emoji="❤",
-        )
-
-        asyncio.run(self.app._execute_send_telegram_reaction(action))
-
-        self.assertEqual(len(self.app.bot_app.bot.reactions), 1)
-        reaction = self.app.bot_app.bot.reactions[0]["reaction"][0]
-        self.assertEqual(getattr(reaction, "emoji", None), "👍")
-
-    def test_telegram_reaction_send_drops_when_all_candidates_invalid(self):
-        self.app.bot_app.bot = _FakeBotReactionAlwaysInvalid()
-        action = SendTelegramReactionAction(
-            chat_id=-555,
-            message_id=123,
-            emoji="❤",
-        )
-
-        # Should not raise; all candidates are dropped gracefully.
-        asyncio.run(self.app._execute_send_telegram_reaction(action))
-        self.assertEqual(len(self.app.bot_app.bot.reactions), 0)
-
-    def test_chunk_sequence_retries_and_completes_after_transient_failure(self):
-        attempt_chunk_indexes: list[int] = []
-        failure_counter = {"chunk2": 0}
-
-        def _send_with_transient_chunk2_failure(action):
-            attempt_chunk_indexes.append(action.sequence_index)
-            if action.sequence_index == 2 and failure_counter["chunk2"] == 0:
-                failure_counter["chunk2"] += 1
-                raise RuntimeError("temporary chunk 2 failure")
-            self.sent_mesh.append(action)
-            return {"id": 1000 + len(self.sent_mesh)}
-
-        self.app.meshtastic.send_text = _send_with_transient_chunk2_failure
-
-        actions = [
-            SendMeshtasticAction(
-                text="chunk1",
-                sequence_id="seq-1",
-                sequence_index=1,
-                sequence_total=3,
-                retry_max_attempts=3,
-                retry_initial_delay_ms=0,
-                retry_backoff_factor=2.0,
-                abort_on_failure=True,
-            ),
-            SendMeshtasticAction(
-                text="chunk2",
-                sequence_id="seq-1",
-                sequence_index=2,
-                sequence_total=3,
-                retry_max_attempts=3,
-                retry_initial_delay_ms=0,
-                retry_backoff_factor=2.0,
-                abort_on_failure=True,
-            ),
-            SendMeshtasticAction(
-                text="chunk3",
-                sequence_id="seq-1",
-                sequence_index=3,
-                sequence_total=3,
-                retry_max_attempts=3,
-                retry_initial_delay_ms=0,
-                retry_backoff_factor=2.0,
-                abort_on_failure=True,
-            ),
-        ]
-
-        asyncio.run(self.app._execute_actions(actions, "bridge"))
-
-        self.assertEqual(attempt_chunk_indexes, [1, 2, 2, 3])
-        self.assertEqual([action.sequence_index for action in self.sent_mesh], [1, 2, 3])
+    async def test_mesh_to_telegram_loop_prevention(self):
+        self.mesh.local_node_id = "aaaa1111bbbb"
+        await self.app._dispatch_mesh_message(_mesh("should not relay", from_id="aaaa1111bbbb"))
         self.assertEqual(self.app.bot_app.bot.messages, [])
 
-    def test_chunk_sequence_aborts_after_terminal_failure(self):
-        attempt_chunk_indexes: list[int] = []
+    async def test_mesh_ping_generates_pong(self):
+        await self.app._dispatch_mesh_message(_mesh("PING!!!", channel_index=3, packet_id="mc-ch-11"))
+        self.assertEqual(len(self.mesh.sent), 1)
+        self.assertEqual((self.mesh.sent[0].text, self.mesh.sent[0].channel_index), ("Pong", 3))
 
-        def _send_with_terminal_chunk2_failure(action):
-            attempt_chunk_indexes.append(action.sequence_index)
-            if action.sequence_index == 2:
-                raise RuntimeError("terminal chunk 2 failure")
-            self.sent_mesh.append(action)
-            return {"id": 2000 + len(self.sent_mesh)}
+    async def test_chunk_sequence_retries_and_completes_after_transient_failure(self):
+        self.mesh.failures[2] = [RuntimeError("temporary chunk 2 failure")]
+        with self.assertLogs("meshgram.app", level="WARNING"):
+            await self.app.execute_actions([_chunk(1), _chunk(2), _chunk(3)], "bridge")
+        self.assertEqual([action.sequence_index for action in self.mesh.attempts], [1, 2, 2, 3])
+        self.assertEqual([action.sequence_index for action in self.mesh.sent], [1, 2, 3])
 
-        self.app.meshtastic.send_text = _send_with_terminal_chunk2_failure
-
-        actions = [
-            SendMeshtasticAction(
-                text="chunk1",
-                sequence_id="seq-2",
-                sequence_index=1,
-                sequence_total=3,
-                retry_max_attempts=2,
-                retry_initial_delay_ms=0,
-                retry_backoff_factor=2.0,
-                abort_on_failure=True,
-            ),
-            SendMeshtasticAction(
-                text="chunk2",
-                sequence_id="seq-2",
-                sequence_index=2,
-                sequence_total=3,
-                retry_max_attempts=2,
-                retry_initial_delay_ms=0,
-                retry_backoff_factor=2.0,
-                abort_on_failure=True,
-            ),
-            SendMeshtasticAction(
-                text="chunk3",
-                sequence_id="seq-2",
-                sequence_index=3,
-                sequence_total=3,
-                retry_max_attempts=2,
-                retry_initial_delay_ms=0,
-                retry_backoff_factor=2.0,
-                abort_on_failure=True,
-            ),
-        ]
-
+    async def test_chunk_sequence_aborts_after_terminal_failure(self):
+        self.mesh.failures[2] = [RuntimeError("terminal"), RuntimeError("terminal")]
         with self.assertLogs("meshgram.app", level="ERROR") as log_context:
-            asyncio.run(self.app._execute_actions(actions, "bridge"))
+            await self.app.execute_actions([_chunk(1, attempts=2), _chunk(2, attempts=2), _chunk(3, attempts=2)], "bridge")
+        self.assertEqual([action.sequence_index for action in self.mesh.attempts], [1, 2, 2])
+        self.assertEqual([action.sequence_index for action in self.mesh.sent], [1])
+        self.assertTrue(any("Mesh send exhausted retries" in line for line in log_context.output))
 
-        self.assertEqual(attempt_chunk_indexes, [1, 2, 2])
-        self.assertEqual([action.sequence_index for action in self.sent_mesh], [1])
-        self.assertEqual(self.app.bot_app.bot.messages, [])
-        self.assertTrue(
-            any("Mesh send exhausted retries" in line for line in log_context.output),
-            msg=f"Expected retry exhaustion log, got: {log_context.output}",
-        )
+    async def test_connection_errors_drop_the_connection(self):
+        self.mesh.failures[None] = [ConnectionError("serial port gone")]
+        with self.assertLogs("meshgram.app", level="ERROR"):
+            await self.app.execute_actions([SendMeshAction(text="hi")], "bridge")
+        self.assertFalse(self.mesh.is_connected)
 
-    def test_send_requires_packet_id_when_enabled(self):
-        attempt_counter = {"count": 0}
-
-        def _send_missing_id_once(action):
-            attempt_counter["count"] += 1
-            if attempt_counter["count"] == 1:
-                return {}
-            self.sent_mesh.append(action)
-            return {"id": 4444}
-
-        self.app.meshtastic.send_text = _send_missing_id_once
-        action = SendMeshtasticAction(
-            text="needs id",
-            require_packet_id=True,
-            retry_max_attempts=2,
-            retry_initial_delay_ms=0,
-            retry_backoff_factor=2.0,
-        )
-
-        result = asyncio.run(self.app._execute_send_meshtastic(action))
-        self.assertEqual(result["id"], 4444)
-        self.assertEqual(attempt_counter["count"], 2)
-
-    def test_chunk_send_waits_for_ack_and_retries_if_ack_wait_fails(self):
-        send_attempt_counter = {"count": 0}
-        ack_wait_counter = {"count": 0}
-
-        def _send_with_ack_wait(action):
-            send_attempt_counter["count"] += 1
-            self.sent_mesh.append(action)
-            return {"id": 6666 + send_attempt_counter["count"]}
-
-        class _AckIface:
-            def waitForAckNak(self_nonlocal):
-                _wait_for_ack()
-
-        def _wait_for_ack():
-            ack_wait_counter["count"] += 1
-            if ack_wait_counter["count"] == 1:
-                raise RuntimeError("Timed out waiting for an acknowledgment")
-
-        self.app.meshtastic.send_text = _send_with_ack_wait
-        self.app.meshtastic.iface = _AckIface()
-
-        action = SendMeshtasticAction(
-            text="chunk",
-            destination_id="!1234abcd",
-            want_ack=True,
-            wait_for_ack=True,
-            ack_timeout_ms=2000,
-            retry_max_attempts=2,
-            retry_initial_delay_ms=0,
-            retry_backoff_factor=2.0,
-            sequence_id="seq-ack",
-            sequence_index=1,
-            sequence_total=2,
-        )
-
-        result = asyncio.run(self.app._execute_send_meshtastic(action))
-
-        self.assertEqual(result["id"], 6668)
-        self.assertEqual(send_attempt_counter["count"], 2)
-        self.assertEqual(ack_wait_counter["count"], 2)
-
-    def test_broadcast_chunk_send_does_not_wait_for_ack(self):
-        send_attempt_counter = {"count": 0}
-        ack_wait_counter = {"count": 0}
-
-        def _send_with_broadcast_ack(action):
-            send_attempt_counter["count"] += 1
-            self.sent_mesh.append(action)
-            return {"id": 7770 + send_attempt_counter["count"]}
-
-        class _AckIface:
-            def waitForAckNak(self_nonlocal):
-                ack_wait_counter["count"] += 1
-                raise RuntimeError("should not be called for broadcast")
-
-        self.app.meshtastic.send_text = _send_with_broadcast_ack
-        self.app.meshtastic.iface = _AckIface()
-
-        action = SendMeshtasticAction(
-            text="chunk",
-            destination_id=None,
-            want_ack=True,
-            wait_for_ack=True,
-            ack_timeout_ms=2000,
-            retry_max_attempts=3,
-            retry_initial_delay_ms=0,
-            retry_backoff_factor=2.0,
-            sequence_id="seq-broadcast",
-            sequence_index=1,
-            sequence_total=3,
-        )
-
-        result = asyncio.run(self.app._execute_send_meshtastic(action))
-        self.assertEqual(result["id"], 7771)
-        self.assertEqual(send_attempt_counter["count"], 1)
-        self.assertEqual(ack_wait_counter["count"], 0)
-
-    def test_meshtastic_reaction_send_retries_on_transient_failure(self):
-        attempt_counter = {"count": 0}
-
-        def _send_reaction_with_one_failure(action):
-            attempt_counter["count"] += 1
-            if attempt_counter["count"] == 1:
-                raise RuntimeError("temporary reaction failure")
-            self.sent_mesh_reactions.append(action)
-            return {"id": 5555}
-
-        self.app.meshtastic.send_reaction = _send_reaction_with_one_failure
-        action = SendMeshtasticReactionAction(
-            emoji="❤",
-            target_packet_id=9001,
-            retry_max_attempts=2,
-            retry_initial_delay_ms=0,
-            retry_backoff_factor=2.0,
-        )
-
-        result = asyncio.run(self.app._execute_send_meshtastic_reaction(action))
-        self.assertEqual(result["id"], 5555)
-        self.assertEqual(attempt_counter["count"], 2)
+    async def test_send_while_disconnected_is_dropped(self):
+        self.mesh.is_connected = False
+        with self.assertLogs("meshgram.app", level="WARNING"):
+            self.assertIsNone(await self.app._execute_send_mesh(SendMeshAction(text="hi")))
+        self.assertEqual(self.mesh.attempts, [])
 
 
 if __name__ == "__main__":

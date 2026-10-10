@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from meshgram.config import MESHCORE_BACKEND
-from meshgram.plugin import BasePlugin
+from meshgram.plugin import CHANNEL_FORMAT, BasePlugin
 from meshgram.text_utils import normalized_exact_word
 from meshgram.types import MeshTextEvent, PluginAction, PluginContext, SendMeshAction
 
@@ -17,6 +16,39 @@ HEX_CHARS = set("0123456789abcdef")
 
 class TraceMePlugin(BasePlugin):
     name = "trace_me"
+    title = "Trace replies"
+    description = (
+        "Answers a channel message that is exactly a keyword (\"trace\") with the repeaters "
+        "it came through, as their hashes and the hop count."
+    )
+    settings_schema = {
+        "type": "object",
+        "properties": {
+            "keywords": {
+                "type": "array",
+                "title": "Keywords",
+                "description": "Empty: \"trace\".",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": True,
+            },
+            "response_channel": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255,
+                "format": CHANNEL_FORMAT,
+                "title": "Reply on channel",
+                "description": "Empty: the channel the message came from.",
+                "x-empty-label": "Same channel",
+            },
+            "channels": {
+                "type": "array",
+                "title": "Channels",
+                "description": "Only answer on these channels. Empty: every channel.",
+                "items": {"type": "integer", "minimum": 0, "maximum": 255, "format": CHANNEL_FORMAT},
+                "uniqueItems": True,
+            },
+        },
+    }
 
     def _keywords(self) -> set[str]:
         configured = self.settings.get("keywords", ["trace"])
@@ -71,8 +103,6 @@ class TraceMePlugin(BasePlugin):
         event: MeshTextEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
-        if context.settings.mesh.backend != MESHCORE_BACKEND:
-            return []
         if event.channel_index < 0 or event.to_id is not None:
             return []
 
@@ -95,13 +125,7 @@ class TraceMePlugin(BasePlugin):
             )
             return []
 
-        return [
-            SendMeshAction(
-                text=response,
-                channel_index=self._response_channel(event),
-                reply_id=event.packet_id,
-            )
-        ]
+        return [SendMeshAction(text=response, channel_index=self._response_channel(event))]
 
 
 def split_path_hashes(path_hex: object, path_hash_mode: object) -> list[str]:

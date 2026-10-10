@@ -1,8 +1,11 @@
 import asyncio
+import os
+import tempfile
 import threading
 import unittest
 import unittest.mock
 from types import SimpleNamespace
+from unittest import mock
 
 from telegram.error import NetworkError
 
@@ -54,15 +57,25 @@ class StatusRegistryTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(len(events), 2)
 
+    async def test_remove_forgets_a_service_and_tells_listeners(self):
+        status = StatusRegistry()
+        events = []
+        status.add_listener(events.append)
+        status.set_state("mqtt_publish", "connected", label="MQTT")
+        status.remove("mqtt_publish")
+        status.remove("mqtt_publish")  # already gone: nothing to tell
+        await asyncio.sleep(0)
+        self.assertIsNone(status.get("mqtt_publish"))
+        self.assertEqual(events[-1], {"key": "mqtt_publish", "removed": True})
+        self.assertEqual(len(events), 2)
+
 
 class _FlakyMesh:
-    backend_name = "fake"
-
     def __init__(self):
         self.is_connected = False
         self.attempts = 0
 
-    async def connect(self, loop, on_text, on_reaction):
+    async def connect(self, loop, on_text):
         self.attempts += 1
         if self.attempts == 1:
             raise ConnectionError("no device")
@@ -81,14 +94,18 @@ class _FlakyMesh:
 class AppStatusTests(unittest.IsolatedAsyncioTestCase):
     def _app(self) -> MeshgramApp:
         settings = MeshgramSettings(telegram_bot_token="token", telegram_group_id=-1, config_path="config.yaml", plugins=[])
-        settings.meshtastic.connection.mode = "tcp"
-        settings.meshtastic.connection.tcp_host = "radio.local"
-        return MeshgramApp(settings)
+        settings.meshcore.connection.mode = "tcp"
+        settings.meshcore.connection.tcp_host = "radio.local"
+        settings.web.enabled = False
+        data_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(data_dir.cleanup)
+        with mock.patch.dict(os.environ, {"MESHGRAM_DATA_DIR": data_dir.name}):
+            return MeshgramApp(settings)
 
     async def test_initial_states(self):
         app = self._app()
         self.assertEqual(app.status.get("radio")["state"], "connecting")
-        self.assertEqual(app.status.get("radio")["detail"], "meshtastic tcp radio.local:4403")
+        self.assertEqual(app.status.get("radio")["detail"], "meshcore tcp radio.local:5000")
         self.assertEqual(app.status.get("telegram")["state"], "connecting")
 
     async def test_radio_status_follows_connection(self):

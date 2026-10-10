@@ -44,7 +44,6 @@ from urllib.parse import urlsplit
 
 from meshgram import __version__
 from meshgram._ed25519 import public_key_from_expanded, sign_with_expanded_key
-from meshgram.config import MESHCORE_BACKEND
 from meshgram.meshcore_packets import (
     DIRECT_ROUTE_TYPES,
     PAYLOAD_TYPE_NAMES,
@@ -1107,6 +1106,61 @@ class MeshMapperLiveFeed:
 
 class MeshMapperPlugin(BasePlugin):
     name = "meshmapper"
+    title = "MeshMapper observer"
+    description = (
+        "Uploads every packet the radio hears to MeshMapper (meshmapper.net) as an observer, "
+        "and receives other observers' packets for the map."
+    )
+    settings_schema = {
+        "type": "object",
+        "required": ["iata"],
+        "properties": {
+            "iata": {
+                "type": "string",
+                "title": "Region code",
+                "description": "Your MeshMapper region (an airport code, like YUL).",
+                "pattern": "^[A-Za-z0-9]{2,8}$",
+                "x-pattern-message": "must be a region code like YUL",
+            },
+            "subscribe": {
+                "type": "boolean",
+                "title": "Receive other observers' packets",
+                "default": True,
+            },
+            "live_feed": {
+                "type": "boolean",
+                "title": "Use MeshMapper's public live feed",
+                "description": "No account needed, but packets come without their bytes (no decryption).",
+                "default": True,
+            },
+            "subscribe_username": {
+                "type": "string",
+                "title": "Subscriber account",
+                "description": "From the broker operator: receives full packets over MQTT.",
+            },
+            "subscribe_password": {"type": "string", "writeOnly": True, "title": "Subscriber password"},
+            "server": {"type": "string", "minLength": 1, "title": "MQTT server", "default": DEFAULT_SERVER},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535, "title": "MQTT port", "default": 443},
+            "transport": {"type": "string", "enum": ["websockets", "tcp"], "title": "MQTT transport", "default": "websockets"},
+            "token_audience": {"type": "string", "title": "Token audience", "default": DEFAULT_SERVER},
+            "status_interval_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "title": "Status update interval (seconds)",
+                "default": 300,
+            },
+            "subscribe_server": {"type": "string", "title": "Subscriber MQTT server", "description": "Empty: the MQTT server."},
+            "subscribe_port": {"type": "integer", "minimum": 1, "maximum": 65535, "title": "Subscriber MQTT port"},
+            "private_key": {
+                "type": "string",
+                "writeOnly": True,
+                "title": "Radio private key",
+                "description": "Only if the firmware can't sign on the radio itself (128 hex characters).",
+                "pattern": "^[0-9a-fA-F]{128}$",
+                "x-pattern-message": "must be 128 hex characters",
+            },
+        },
+    }
 
     def __init__(self, settings: Optional[dict[str, Any]] = None):
         super().__init__(settings)
@@ -1116,8 +1170,11 @@ class MeshMapperPlugin(BasePlugin):
         self.live_feed = MeshMapperLiveFeed(self.config)
         self._disabled_reason: Optional[str] = None
         self._subscriber_hint_logged = False
+        self._transport: Any = None
+        self._status: Optional[StatusRegistry] = None
 
     def _bind_status(self, context: PluginContext) -> None:
+        self._status = context.status
         self.uploader.status = context.status
         self.subscriber.status = context.status
         self.live_feed.status = context.status
@@ -1129,14 +1186,9 @@ class MeshMapperPlugin(BasePlugin):
         for key in (STATUS_PUBLISH, STATUS_SUBSCRIBE, STATUS_FEED):
             _set_status(context.status, key, DISABLED, reason)
 
-    def _startup_error(self, context: PluginContext) -> Optional[str]:
-        if context.settings.mesh.backend != MESHCORE_BACKEND:
-            return "MeshMapper only accepts MeshCore packets (set mesh.backend to meshcore)"
-        return self.config.validation_error()
-
     async def on_startup(self, context: PluginContext) -> list[PluginAction]:
         self._bind_status(context)
-        error = self._startup_error(context)
+        error = self.config.validation_error()
         if error is not None:
             self._disable(error, context)
             return []
@@ -1153,11 +1205,12 @@ class MeshMapperPlugin(BasePlugin):
 
     async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
         self._bind_status(context)
-        error = self._startup_error(context)
+        error = self.config.validation_error()
         if error is not None:
             self._disable(error, context)
             return
 
+        self._transport = transport
         transport.add_rx_log_listener(self.uploader.handle_rx_log)
         await self.uploader.on_device_connected(transport)
         if not self.uploader.public_key:
@@ -1179,6 +1232,13 @@ class MeshMapperPlugin(BasePlugin):
             )
 
     async def on_shutdown(self) -> None:
+        if self._transport is not None:
+            self._transport.remove_rx_log_listener(self.uploader.handle_rx_log)
+            self._transport = None
         await self.live_feed.stop()
         await self.subscriber.stop()
         await self.uploader.stop()
+        # Turned off: its connections no longer apply.
+        if self._status is not None:
+            for key in (STATUS_PUBLISH, STATUS_SUBSCRIBE, STATUS_FEED):
+                self._status.remove(key)

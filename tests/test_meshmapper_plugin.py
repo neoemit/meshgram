@@ -9,8 +9,8 @@ from typing import Any
 from unittest import mock
 
 from meshgram._ed25519 import public_key_from_expanded, sign_with_expanded_key
-from meshgram.config import MESHCORE_BACKEND, MESHTASTIC_BACKEND, MeshgramSettings, PluginConfig
-from meshgram.plugin import load_plugins
+from meshgram.config import MeshgramSettings
+from meshgram.plugin import load_plugin_class
 from meshgram.plugins.meshmapper import (
     CLIENT_VERSION,
     MeshMapperConfig,
@@ -274,8 +274,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(MeshMapperConfig.from_settings({"iata": "YOW", "private_key": "abcd"}).validation_error())
 
     def test_plugin_is_registered(self):
-        plugins = load_plugins([PluginConfig(name="meshmapper", enabled=True, settings={"iata": "YOW"})])
-        self.assertIsInstance(plugins[0].instance, MeshMapperPlugin)
+        self.assertIs(load_plugin_class("meshmapper"), MeshMapperPlugin)
 
 
 class _FakePublishInfo:
@@ -375,6 +374,10 @@ class _FakeTransport:
         if listener not in self.listeners:
             self.listeners.append(listener)
 
+    def remove_rx_log_listener(self, listener):
+        if listener in self.listeners:
+            self.listeners.remove(listener)
+
     async def query_device_info(self):
         return {"model": "Heltec V3", "ver": "1.9.1", "fw_build": "01-Mar-2026"}
 
@@ -421,14 +424,13 @@ def _feed_event(observer_key: str) -> dict:
     return {"v": 1, "type": "event", "event": "packetObservation", "data": _feed_data(observer_key)}
 
 
-def _make_context(backend=MESHCORE_BACKEND) -> PluginContext:
+def _make_context() -> PluginContext:
     settings = MeshgramSettings(
         telegram_bot_token="token",
         telegram_group_id=-100,
         config_path="config.yaml",
         plugins=[],
     )
-    settings.mesh.backend = backend
     return PluginContext(settings=settings, telegram_group_id=-100, mesh_payload_limit=140, local_node_id=None)
 
 
@@ -695,7 +697,8 @@ class UploaderTests(unittest.TestCase):
 
             await self.plugin.on_shutdown()
             self.assertTrue(socket.closed)
-            self.assertEqual(status.get("meshmapper_feed")["state"], "disconnected")
+            # The plugin is off: its indicators go away.
+            self.assertIsNone(status.get("meshmapper_feed"))
 
         asyncio.run(scenario())
 
@@ -811,15 +814,30 @@ class UploaderTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_status_disabled_on_wrong_backend(self):
+    def test_status_disabled_when_misconfigured(self):
         async def scenario():
             status = StatusRegistry()
-            context = _make_context(MESHTASTIC_BACKEND)
+            context = _make_context()
             context.status = status
             with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
-                await self.plugin.on_startup(context)
+                await MeshMapperPlugin({}).on_startup(context)
             for key in ("mqtt_publish", "mqtt_subscribe", "meshmapper_feed"):
                 self.assertEqual(status.get(key)["state"], "disabled")
+
+        asyncio.run(scenario())
+
+    def test_shutdown_releases_the_transport_and_status(self):
+        async def scenario():
+            status = StatusRegistry()
+            context = _make_context()
+            context.status = status
+            await self.plugin.on_startup(context)
+            await self.plugin.on_mesh_connected(self.transport, context)
+            self.assertEqual(len(self.transport.listeners), 1)
+            await self.plugin.on_shutdown()
+            # Turned off at runtime: no stale listener or connection indicators.
+            self.assertEqual(self.transport.listeners, [])
+            self.assertEqual(status.snapshot(), [])
 
         asyncio.run(scenario())
 
@@ -882,15 +900,6 @@ class UploaderTests(unittest.TestCase):
                 await self._connect()
             self.assertEqual(len(self.transport.signed), 1)
             await self.plugin.on_shutdown()
-
-        asyncio.run(scenario())
-
-    def test_disabled_on_meshtastic_backend(self):
-        async def scenario():
-            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
-                await self.plugin.on_mesh_connected(self.transport, _make_context(MESHTASTIC_BACKEND))
-            self.assertEqual(self.transport.listeners, [])
-            self.assertEqual(self.clients, [])
 
         asyncio.run(scenario())
 

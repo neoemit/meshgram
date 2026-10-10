@@ -1,10 +1,9 @@
-"""Live web map of MeshCore packet propagation.
+"""Live map of MeshCore packet propagation, shown by the web app (``meshgram.web``).
 
-Serves a small web app (stdlib asyncio HTTP server, no extra dependencies) with
-a map of every node that shares a position (adverts and radio contacts,
-repeaters highlighted) next to a live list of every RF packet the radio hears.
-Repeater hashes in each packet's path are resolved to known nodes so the route
-a packet took can be drawn on the map.
+Feeds the web app's Map and Messages views: every node that shares a position
+(adverts and radio contacts, repeaters highlighted) and a live list of every RF
+packet the radio hears. Repeater hashes in each packet's path are resolved to
+known nodes so the route a packet took can be drawn on the map.
 
 Packets heard by other MeshMapper observers (relayed by the meshmapper plugin
 through the transport's remote RX log listeners) are shown too, routed to the
@@ -14,27 +13,25 @@ live feed arrive as metadata only (no bytes), so they can't be decrypted.
 Nodes and packet history are saved to SQLite (see ``packet_map_store``) and
 restored on startup, so the map survives restarts and redeploys.
 
+The data reaches open pages through the web app's event stream: a ``map``
+section of the snapshot, then ``packet``/``nodes``/``self`` events.
+
 The plugin never emits bridge actions; it only listens to raw RF logs.
 """
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import hmac
-import json
 import logging
 import math
-import os
 import re
 import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
-from urllib.parse import urlsplit
+from typing import Any, Callable, Optional
 
-from meshgram.config import MESHCORE_BACKEND, _as_bool
+from meshgram.config import _as_bool, data_dir
 from meshgram.meshcore_packets import (
     NODE_TYPE_NAMES,
     PAYLOAD_TYPE_ADVERT,
@@ -54,23 +51,18 @@ from meshgram.plugins.packet_map_store import (
     SavedState,
     encode,
 )
-from meshgram.status import StatusRegistry
 from meshgram.types import PluginAction, PluginContext
 
 LOGGER = logging.getLogger(__name__)
 
-STATIC_DIR = Path(__file__).with_name("packet_map_static")
-DEFAULT_TITLE = "Meshgram"
 HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
 # Node types that relay packets and therefore appear in packet paths.
 RELAY_NODE_TYPES = {"repeater", "room"}
-SSE_KEEPALIVE_SECONDS = 15.0
-SSE_QUEUE_SIZE = 500
 CONTACT_REFRESH_SECONDS = 30.0
-MAX_REQUEST_HEAD_BYTES = 16 * 1024
 PERSIST_INTERVAL_SECONDS = 5.0
-DEFAULT_DATA_DIR = "data"
 DEFAULT_DB_FILE = "packet_map.sqlite3"
+# The web app's snapshot section this plugin fills.
+SNAPSHOT_KEY = "map"
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -82,16 +74,9 @@ def _as_int(value: Any, default: int) -> int:
 
 @dataclass(slots=True)
 class PacketMapConfig:
-    host: str = "127.0.0.1"
-    port: int = 8080
     max_packets: int = 500
     max_messages: int = 1000
     max_remote_packets: int = 1000
-    password: str = ""
-    title: str = DEFAULT_TITLE
-    # Empty: the page restyles OpenStreetMap tiles to match its light or dark theme.
-    tile_url: str = ""
-    tile_attribution: str = ""
     # Where nodes and packet history are kept across restarts; None keeps them in memory only.
     db_path: Optional[Path] = None
 
@@ -100,23 +85,13 @@ class PacketMapConfig:
         db_path = None
         if _as_bool(settings.get("persist"), True):
             # A relative path is relative to MESHGRAM_DATA_DIR (an absolute one is used as-is).
-            data_dir = Path(os.getenv("MESHGRAM_DATA_DIR") or DEFAULT_DATA_DIR)
-            db_path = data_dir / str(settings.get("db_path") or DEFAULT_DB_FILE)
+            db_path = data_dir() / str(settings.get("db_path") or DEFAULT_DB_FILE)
         return cls(
-            host=str(settings.get("host") or "127.0.0.1").strip(),
-            port=_as_int(settings.get("port"), 8080),
             max_packets=max(10, _as_int(settings.get("max_packets"), 500)),
             max_messages=max(10, _as_int(settings.get("max_messages"), 1000)),
             max_remote_packets=max(10, _as_int(settings.get("max_remote_packets"), 1000)),
-            password=str(settings.get("password") or ""),
-            title=str(settings.get("title") or DEFAULT_TITLE),
-            tile_url=str(settings.get("tile_url") or ""),
-            tile_attribution=str(settings.get("tile_attribution") or ""),
             db_path=db_path,
         )
-
-    def client_config(self) -> dict[str, Any]:
-        return {"title": self.title, "tile_url": self.tile_url, "tile_attribution": self.tile_attribution}
 
 
 # --- State -------------------------------------------------------------------
@@ -161,12 +136,11 @@ class PacketMapState:
         # meshes fill with adverts and ACKs within minutes.
         self.messages: deque[dict[str, Any]] = deque(maxlen=max_messages)
         self.self_id: Optional[str] = None
-        # Connection status of the radio, Telegram, MQTT, ... (shown in the page header).
-        self.status: Optional[StatusRegistry] = None
+        # Sends live updates to open pages (the web app's EventHub.publish).
+        self.publish: Callable[[dict[str, Any]], None] = lambda event: None
         self._hash_counts: dict[str, int] = {}
         self._remote_hash_counts: dict[str, int] = {}
         self._next_packet_id = 1
-        self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         # Changes not yet persisted (an ordered set, so nodes keep their order on
         # disk); None until track_changes(), i.e. when persistence is off.
         self._dirty_node_ids: Optional[dict[str, None]] = None
@@ -220,30 +194,6 @@ class PacketMapState:
     def _mark_dirty(self, node_id: str) -> None:
         if self._dirty_node_ids is not None:
             self._dirty_node_ids[node_id] = None
-
-    # Subscribers ------------------------------------------------------------
-
-    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=SSE_QUEUE_SIZE)
-        self._subscribers.add(queue)
-        return queue
-
-    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
-        self._subscribers.discard(queue)
-
-    def _publish(self, event: dict[str, Any]) -> None:
-        for queue in list(self._subscribers):
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                # A client that can't keep up gets disconnected and re-syncs on reconnect.
-                self._subscribers.discard(queue)
-                with contextlib.suppress(asyncio.QueueFull):
-                    queue.get_nowait()
-                    queue.put_nowait({"type": "overflow"})
-
-    def apply_status(self, entry: dict[str, Any]) -> None:
-        self._publish({"type": "connection", "connection": entry})
 
     # Nodes ------------------------------------------------------------------
 
@@ -311,11 +261,13 @@ class PacketMapState:
     def apply_contacts(self, contacts: dict[str, dict[str, Any]]) -> None:
         changed = self.update_contacts(contacts)
         if changed:
-            self._publish({"type": "nodes", "nodes": changed})
+            self.publish({"type": "nodes", "nodes": changed})
 
     def apply_self(self, info: dict[str, Any]) -> None:
+        previous_id = self.self_id
         changed = self.update_self(info)
-        self._publish({"type": "self", "self_id": self.self_id, "nodes": changed})
+        if changed or self.self_id != previous_id:
+            self.publish({"type": "self", "self_id": self.self_id, "nodes": changed})
 
     def _candidates(self, hash_hex: str) -> list[dict[str, Any]]:
         return [node for node_id, node in self.nodes.items() if node_id.startswith(hash_hex)]
@@ -539,184 +491,19 @@ class PacketMapState:
         if self._dirty_node_ids is not None:
             self._unsaved_packets.append(packet)
 
-        self._publish({"type": "packet", "packet": packet, "nodes": [dict(node) for node in changed_nodes]})
+        self.publish({"type": "packet", "packet": packet, "nodes": [dict(node) for node in changed_nodes]})
         return packet
 
     def snapshot(self) -> dict[str, Any]:
         # Messages still in a packet buffer are already sent there; only send the older ones.
         buffered = {packet["id"] for packet in self.packets} | {packet["id"] for packet in self.remote_packets}
         return {
-            "type": "snapshot",
             "self_id": self.self_id,
             "nodes": [dict(node) for node in self.nodes.values()],
             "packets": list(self.packets),
             "remote_packets": list(self.remote_packets),
             "messages": [message for message in self.messages if message["id"] not in buffered],
-            "connections": self.status.snapshot() if self.status is not None else [],
         }
-
-
-# --- HTTP server ---------------------------------------------------------------
-
-
-_STATUS_TEXT = {200: "OK", 401: "Unauthorized", 404: "Not Found", 405: "Method Not Allowed", 400: "Bad Request"}
-
-
-class PacketMapServer:
-    def __init__(self, config: PacketMapConfig, state: PacketMapState):
-        self.config = config
-        self.state = state
-        self._server: Optional[asyncio.AbstractServer] = None
-        self._index_html = b""
-        self._stream_tasks: set[asyncio.Task[Any]] = set()
-
-    @property
-    def port(self) -> Optional[int]:
-        if self._server is None or not self._server.sockets:
-            return None
-        return self._server.sockets[0].getsockname()[1]
-
-    async def start(self) -> None:
-        template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-        config_json = json.dumps(self.config.client_config()).replace("</", "<\\/")
-        self._index_html = template.replace("/*__MESHGRAM_CONFIG__*/{}", config_json).encode("utf-8")
-        self._server = await asyncio.start_server(self._handle_client, self.config.host, self.config.port)
-        LOGGER.info("Packet map: serving on http://%s:%s/", self.config.host, self.port)
-
-    async def stop(self) -> None:
-        if self._server is not None:
-            self._server.close()
-        for task in list(self._stream_tasks):
-            task.cancel()
-        for task in list(self._stream_tasks):
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-        if self._server is not None:
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
-            self._server = None
-
-    def _authorized(self, headers: dict[str, str]) -> bool:
-        if not self.config.password:
-            return True
-        scheme, _, credentials = headers.get("authorization", "").partition(" ")
-        if scheme.lower() != "basic":
-            return False
-        try:
-            decoded = base64.b64decode(credentials.strip(), validate=True).decode("utf-8")
-        except Exception:
-            return False
-        _, _, password = decoded.partition(":")
-        return hmac.compare_digest(password.encode("utf-8"), self.config.password.encode("utf-8"))
-
-    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()
-        if task is not None:
-            self._stream_tasks.add(task)
-        try:
-            await self._serve_request(reader, writer)
-        except (ConnectionError, asyncio.IncompleteReadError, asyncio.TimeoutError, asyncio.LimitOverrunError):
-            pass
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            LOGGER.exception("Packet map: request failed")
-        finally:
-            if task is not None:
-                self._stream_tasks.discard(task)
-            with contextlib.suppress(Exception):
-                writer.close()
-
-    async def _serve_request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10.0)
-        if len(head) > MAX_REQUEST_HEAD_BYTES:
-            await self._respond(writer, 400, b"request too large")
-            return
-        lines = head.decode("latin-1").split("\r\n")
-        parts = lines[0].split(" ")
-        if len(parts) != 3:
-            await self._respond(writer, 400, b"bad request")
-            return
-        method, target, _ = parts
-        headers = {}
-        for line in lines[1:]:
-            name, sep, value = line.partition(":")
-            if sep:
-                headers[name.strip().lower()] = value.strip()
-
-        if method not in {"GET", "HEAD"}:
-            await self._respond(writer, 405, b"method not allowed")
-            return
-        if not self._authorized(headers):
-            await self._respond(
-                writer, 401, b"authentication required", extra_headers={"WWW-Authenticate": 'Basic realm="meshgram"'}
-            )
-            return
-
-        path = urlsplit(target).path
-        body_only = method == "GET"
-        if path in {"/", "/index.html"}:
-            await self._respond(writer, 200, self._index_html, "text/html; charset=utf-8", body_only)
-        elif path == "/api/state":
-            await self._respond(writer, 200, json.dumps(self.state.snapshot()).encode("utf-8"), "application/json", body_only)
-        elif path == "/healthz":
-            await self._respond(writer, 200, b"ok", "text/plain", body_only)
-        elif path == "/api/events" and body_only:
-            await self._stream_events(writer)
-        else:
-            await self._respond(writer, 404, b"not found")
-
-    async def _respond(
-        self,
-        writer: asyncio.StreamWriter,
-        status: int,
-        body: bytes,
-        content_type: str = "text/plain; charset=utf-8",
-        include_body: bool = True,
-        extra_headers: Optional[dict[str, str]] = None,
-    ) -> None:
-        headers = {
-            "Content-Type": content_type,
-            "Content-Length": str(len(body)),
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "Connection": "close",
-            **(extra_headers or {}),
-        }
-        head = f"HTTP/1.1 {status} {_STATUS_TEXT.get(status, 'OK')}\r\n"
-        head += "".join(f"{name}: {value}\r\n" for name, value in headers.items()) + "\r\n"
-        writer.write(head.encode("latin-1") + (body if include_body else b""))
-        await writer.drain()
-
-    async def _stream_events(self, writer: asyncio.StreamWriter) -> None:
-        writer.write(
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: text/event-stream\r\n"
-            b"Cache-Control: no-store\r\n"
-            b"Connection: close\r\n"
-            b"X-Accel-Buffering: no\r\n\r\n"
-            b"retry: 3000\n\n"
-        )
-        queue = self.state.subscribe()
-        try:
-            await self._send_event(writer, self.state.snapshot())
-            while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
-                except asyncio.TimeoutError:
-                    writer.write(b": keepalive\n\n")
-                    await writer.drain()
-                    continue
-                if event.get("type") == "overflow":
-                    return
-                await self._send_event(writer, event)
-        finally:
-            self.state.unsubscribe(queue)
-
-    @staticmethod
-    async def _send_event(writer: asyncio.StreamWriter, event: dict[str, Any]) -> None:
-        writer.write(b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n")
-        await writer.drain()
 
 
 # --- Plugin --------------------------------------------------------------------
@@ -724,6 +511,37 @@ class PacketMapServer:
 
 class PacketMapPlugin(BasePlugin):
     name = "packet_map"
+    title = "Packet map"
+    description = (
+        "Feeds the web app's Map and Messages views: nodes with a position, every packet the radio "
+        "(and other MeshMapper observers) hears, with routes, and decrypted channel messages."
+    )
+    settings_schema = {
+        "type": "object",
+        "properties": {
+            "max_packets": {"type": "integer", "minimum": 10, "title": "Packets kept", "default": 500},
+            "max_remote_packets": {
+                "type": "integer",
+                "minimum": 10,
+                "title": "Other observers' packets kept",
+                "default": 1000,
+            },
+            "max_messages": {"type": "integer", "minimum": 10, "title": "Messages kept", "default": 1000},
+            "persist": {
+                "type": "boolean",
+                "title": "Keep history across restarts",
+                "description": "Saved in an SQLite database in the data directory.",
+                "default": True,
+            },
+            "db_path": {
+                "type": "string",
+                "minLength": 1,
+                "title": "Database file",
+                "description": "Relative to the data directory.",
+                "default": DEFAULT_DB_FILE,
+            },
+        },
+    }
 
     def __init__(self, settings: Optional[dict[str, Any]] = None):
         super().__init__(settings)
@@ -733,30 +551,27 @@ class PacketMapPlugin(BasePlugin):
             max_messages=self.config.max_messages,
             max_remote_packets=self.config.max_remote_packets,
         )
-        self.server = PacketMapServer(self.config, self.state)
+        self._web: Any = None
         self._transport: Any = None
         self._refresh_task: Optional[asyncio.Task[None]] = None
         self._store: Optional[PacketMapStore] = None
         self._persist_task: Optional[asyncio.Task[None]] = None
-        self._enabled = False
 
     async def on_startup(self, context: PluginContext) -> list[PluginAction]:
-        if context.settings.mesh.backend != MESHCORE_BACKEND:
-            LOGGER.error("Packet map disabled: it needs MeshCore RF logs (set mesh.backend to meshcore)")
-            return []
         await self._open_store()
-        try:
-            await self.server.start()
-        except OSError as exc:
-            LOGGER.error("Packet map disabled: cannot listen on %s:%s (%s)", self.config.host, self.config.port, exc)
-            await self._close_store()
+        web = getattr(context, "web", None)
+        if web is None:
+            LOGGER.warning("Packet map: the web app is off (web.enabled), so the map isn't shown anywhere")
             return []
-        self._enabled = True
-        status = getattr(context, "status", None)
-        if status is not None:
-            self.state.status = status
-            status.add_listener(self.state.apply_status)
+        self._web = web
+        self.state.publish = web.events.publish
+        web.events.add_snapshot_provider(SNAPSHOT_KEY, self._snapshot)
+        # Open pages show the map now.
+        web.events.resync()
         return []
+
+    def _snapshot(self) -> dict[str, Any]:
+        return {SNAPSHOT_KEY: self.state.snapshot()}
 
     async def _open_store(self) -> None:
         if self.config.db_path is None:
@@ -809,30 +624,32 @@ class PacketMapPlugin(BasePlugin):
             self._store = None
 
     async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
-        if not self._enabled:
-            return
         self._transport = transport
         transport.add_rx_log_listener(self.handle_rx_log)
-        add_remote_listener = getattr(transport, "add_remote_rx_log_listener", None)
-        if callable(add_remote_listener):
-            add_remote_listener(self.handle_remote_rx_log)
-        self.state.apply_self(transport.device_self_info)
-        self._refresh_contacts()
+        transport.add_remote_rx_log_listener(self.handle_remote_rx_log)
+        self._refresh_from_radio()
         if self._refresh_task is None or self._refresh_task.done():
-            self._refresh_task = asyncio.create_task(self._contact_refresh_loop(), name="packet-map-contacts")
+            self._refresh_task = asyncio.create_task(self._refresh_loop(), name="packet-map-contacts")
 
-    def _refresh_contacts(self) -> None:
-        contacts = getattr(self._transport, "contacts", None)
+    def _refresh_from_radio(self) -> None:
+        transport = self._transport
+        if transport is None:
+            return
+        # Its name or position may have changed (from the control panel, say).
+        info = transport.device_self_info
+        if info:
+            self.state.apply_self(info)
+        contacts = transport.contacts
         if isinstance(contacts, dict):
             self.state.apply_contacts(contacts)
-        channels = getattr(self._transport, "channels", None)
+        channels = transport.channels
         if isinstance(channels, list):
             self.state.channels = channels
 
-    async def _contact_refresh_loop(self) -> None:
+    async def _refresh_loop(self) -> None:
         while True:
             await asyncio.sleep(CONTACT_REFRESH_SECONDS)
-            self._refresh_contacts()
+            self._refresh_from_radio()
 
     async def handle_rx_log(self, rx_log: dict[str, Any]) -> None:
         packet = self.state.ingest_rx_log(rx_log)
@@ -840,8 +657,6 @@ class PacketMapPlugin(BasePlugin):
             LOGGER.debug("Packet map: skipping undecodable RX log: %s", rx_log.get("raw_hex"))
 
     async def handle_remote_rx_log(self, rx_log: dict[str, Any]) -> None:
-        if not self._enabled:
-            return
         packet = self.state.ingest_remote_rx_log(rx_log)
         if packet is None:
             LOGGER.debug("Packet map: skipping undecodable observer packet from %s", rx_log.get("observer_id"))
@@ -852,9 +667,14 @@ class PacketMapPlugin(BasePlugin):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._refresh_task
             self._refresh_task = None
-        if self.state.status is not None:
-            self.state.status.remove_listener(self.state.apply_status)
-        if self._enabled:
-            await self.server.stop()
-            self._enabled = False
+        if self._transport is not None:
+            self._transport.remove_rx_log_listener(self.handle_rx_log)
+            self._transport.remove_remote_rx_log_listener(self.handle_remote_rx_log)
+            self._transport = None
+        if self._web is not None:
+            self._web.events.remove_snapshot_provider(SNAPSHOT_KEY)
+            self.state.publish = lambda event: None
+            # Open pages drop the map now.
+            self._web.events.resync()
+            self._web = None
         await self._close_store()

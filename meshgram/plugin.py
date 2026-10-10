@@ -1,40 +1,41 @@
 from __future__ import annotations
 
 import importlib
-import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .config import PluginConfig
+from .config import canonical_plugin_name
 from .types import (
-    MeshReactionEvent,
     MeshTextEvent,
-    Plugin,
     PluginAction,
     PluginContext,
     TelegramMessageEvent,
-    TelegramReactionEvent,
 )
 
 if TYPE_CHECKING:
-    from .transport import MeshTransport
-
-LOGGER = logging.getLogger(__name__)
+    from .transport import MeshCoreTransport
 
 BUILTIN_PLUGINS: dict[str, str] = {
     "bridge": "meshgram.plugins.bridge:BridgePlugin",
     "ping_pong": "meshgram.plugins.ping_pong:PingPongPlugin",
     "dm_http_command": "meshgram.plugins.dm_http_command:DirectMessageHttpCommandPlugin",
     "trace_me": "meshgram.plugins.trace_me:TraceMePlugin",
-    "trace-me": "meshgram.plugins.trace_me:TraceMePlugin",
     "meshmapper": "meshgram.plugins.meshmapper:MeshMapperPlugin",
     "packet_map": "meshgram.plugins.packet_map:PacketMapPlugin",
-    "packet-map": "meshgram.plugins.packet_map:PacketMapPlugin",
 }
+
+# Schema keyword the control panel understands: an integer that is a radio
+# channel slot, picked by name from the radio's channels.
+CHANNEL_FORMAT = "channel"
 
 
 class BasePlugin:
     name = "base"
+    # Shown in the web app's control panel.
+    title = ""
+    description = ""
+    # JSON Schema of ``settings`` (see meshgram.settings_schema). The control
+    # panel renders a form from it and validates edits against it.
+    settings_schema: dict[str, Any] = {"type": "object"}
 
     def __init__(self, settings: dict[str, Any] | None = None):
         self.settings = settings or {}
@@ -44,24 +45,20 @@ class BasePlugin:
 
     async def on_mesh_connected(
         self,
-        transport: "MeshTransport",
+        transport: "MeshCoreTransport",
         context: PluginContext,
     ) -> None:
-        """Called after every successful (re)connect to the mesh radio."""
+        """Called after every successful (re)connect to the radio, and on start if it's already connected."""
 
     async def on_shutdown(self) -> None:
-        """Called once while the app shuts down; release background resources here."""
+        """Called when the plugin is turned off, reconfigured (it's restarted) or the app stops.
+
+        Release background resources and unregister transport listeners here.
+        """
 
     async def on_telegram_message(
         self,
         event: TelegramMessageEvent,
-        context: PluginContext,
-    ) -> list[PluginAction]:
-        return []
-
-    async def on_telegram_reaction(
-        self,
-        event: TelegramReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         return []
@@ -73,59 +70,21 @@ class BasePlugin:
     ) -> list[PluginAction]:
         return []
 
-    async def on_mesh_reaction(
-        self,
-        event: MeshReactionEvent,
-        context: PluginContext,
-    ) -> list[PluginAction]:
-        return []
 
-    # Legacy aliases — kept so any external callers (and existing tests that
-    # invoke the hook directly) continue to reach the canonical override.
-    async def on_meshtastic_message(
-        self,
-        event: MeshTextEvent,
-        context: PluginContext,
-    ) -> list[PluginAction]:
-        return await self.on_mesh_message(event, context)
-
-    async def on_meshtastic_reaction(
-        self,
-        event: MeshReactionEvent,
-        context: PluginContext,
-    ) -> list[PluginAction]:
-        return await self.on_mesh_reaction(event, context)
+def plugin_key(name: str) -> str:
+    """The name a plugin is known by: built-ins by their canonical name, others as configured."""
+    canonical = canonical_plugin_name(name)
+    return canonical if canonical in BUILTIN_PLUGINS else str(name).strip()
 
 
-@dataclass(slots=True)
-class LoadedPlugin:
-    name: str
-    instance: Plugin
-
-
-def _resolve_plugin_target(name: str) -> str:
-    target = BUILTIN_PLUGINS.get(name, name)
+def resolve_plugin_target(name: str) -> str:
+    """``module:Class`` for a plugin name (a built-in name, ``module:Class`` or a module with a ``Plugin`` class)."""
+    target = BUILTIN_PLUGINS.get(plugin_key(name), name)
     if ":" in target:
         return target
-
     return f"{target}:Plugin"
 
 
-def load_plugins(plugin_configs: list[PluginConfig]) -> list[LoadedPlugin]:
-    plugins: list[LoadedPlugin] = []
-
-    for plugin_config in plugin_configs:
-        if not plugin_config.enabled:
-            continue
-
-        target = _resolve_plugin_target(plugin_config.name)
-        module_name, class_name = target.split(":", maxsplit=1)
-
-        module = importlib.import_module(module_name)
-        plugin_class = getattr(module, class_name)
-        instance = plugin_class(plugin_config.settings)
-
-        plugins.append(LoadedPlugin(name=plugin_config.name, instance=instance))
-        LOGGER.info("Loaded plugin %s (%s)", plugin_config.name, target)
-
-    return plugins
+def load_plugin_class(name: str) -> type:
+    module_name, class_name = resolve_plugin_target(name).split(":", maxsplit=1)
+    return getattr(importlib.import_module(module_name), class_name)

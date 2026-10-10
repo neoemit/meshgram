@@ -5,7 +5,7 @@ import time
 
 from typing import Any
 
-from meshgram.plugin import BasePlugin
+from meshgram.plugin import CHANNEL_FORMAT, BasePlugin
 from meshgram.text_utils import normalized_exact_word
 from meshgram.types import MeshTextEvent, PluginAction, PluginContext, SendMeshAction
 
@@ -14,6 +14,48 @@ LOGGER = logging.getLogger(__name__)
 
 class PingPongPlugin(BasePlugin):
     name = "ping_pong"
+    title = "Keyword replies"
+    description = "Answers radio messages that are exactly one of the keywords (\"Ping\" → \"Pong\"), on the channel they came from."
+    settings_schema = {
+        "type": "object",
+        "properties": {
+            "keyword_responses": {
+                "type": "object",
+                "title": "Keywords and replies",
+                "description": "Matching ignores case and surrounding punctuation. Empty: \"Ping\" → \"Pong\".",
+                "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 120},
+                "x-key-title": "Keyword",
+                "x-value-title": "Reply",
+            },
+            "channels": {
+                "type": "array",
+                "title": "Channels",
+                "description": "Only answer on these channels. Empty: every channel.",
+                "items": {"type": "integer", "minimum": 0, "maximum": 255, "format": CHANNEL_FORMAT},
+                "uniqueItems": True,
+            },
+            "response_dedupe_mode": {
+                "type": "string",
+                "title": "Duplicate suppression",
+                "enum": ["packet_id_only", "sender_keyword_window"],
+                "x-enum-titles": ["Once per message", "Once per sender and keyword in a time window"],
+                "default": "packet_id_only",
+            },
+            "response_dedupe_ttl_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "title": "Time window (seconds)",
+                "description": "For “once per sender and keyword”.",
+                "default": 30,
+            },
+            "message_dedupe_ttl_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "title": "Remember answered messages for (seconds)",
+                "default": 3600,
+            },
+        },
+    }
     DEFAULT_RESPONSE_DEDUPE_TTL_SECONDS = 30.0
     DEFAULT_MESSAGE_DEDUPE_TTL_SECONDS = 60.0 * 60.0
     RESPONSE_DEDUPE_MODE_PACKET_ID_ONLY = "packet_id_only"
@@ -107,12 +149,6 @@ class PingPongPlugin(BasePlugin):
         return self.DEFAULT_RESPONSE_DEDUPE_MODE
 
     def _sender_identity(self, event: MeshTextEvent) -> str:
-        raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
-
-        from_num = raw_packet.get("from")
-        if isinstance(from_num, int):
-            return f"node_num:{from_num & 0xFFFFFFFF:08x}"
-
         from_id = event.from_id
         if isinstance(from_id, str):
             normalized = from_id.strip().lower()
@@ -127,36 +163,19 @@ class PingPongPlugin(BasePlugin):
 
         return "unknown"
 
-    def _normalized_node_id(self, value: object) -> str | None:
+    @staticmethod
+    def _normalized_node_id(value: object) -> str | None:
         if not isinstance(value, str):
             return None
-
         normalized = value.strip().lower()
-        if not normalized:
-            return None
-        if normalized.startswith("!"):
-            normalized = normalized[1:]
-        if normalized.startswith("0x"):
-            normalized = normalized[2:]
-        if not normalized:
-            return None
-        return f"!{normalized}"
-
-    def _sender_node_id(self, event: MeshTextEvent) -> str | None:
-        raw_packet = event.raw_packet if isinstance(event.raw_packet, dict) else {}
-        from_num = raw_packet.get("from")
-        if isinstance(from_num, int):
-            return f"!{from_num & 0xFFFFFFFF:08x}"
-
-        return self._normalized_node_id(event.from_id)
+        return normalized or None
 
     def _is_from_local_node(self, event: MeshTextEvent, context: PluginContext) -> bool:
         local_node_id = self._normalized_node_id(getattr(context, "local_node_id", None))
         if local_node_id is None:
             return False
 
-        sender_node_id = self._sender_node_id(event)
-        return sender_node_id == local_node_id
+        return self._normalized_node_id(event.from_id) == local_node_id
 
     def _sender_dedupe_key(self, event: MeshTextEvent, keyword: str) -> tuple[str, str]:
         sender_key = self._sender_identity(event)
@@ -267,10 +286,4 @@ class PingPongPlugin(BasePlugin):
             event.channel_index,
         )
 
-        return [
-            SendMeshAction(
-                text=response_text,
-                channel_index=event.channel_index,
-                reply_id=event.packet_id,
-            )
-        ]
+        return [SendMeshAction(text=response_text, channel_index=event.channel_index)]

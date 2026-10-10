@@ -78,7 +78,7 @@ def _hard_split_by_bytes(text: str, max_bytes: int) -> list[str]:
     return parts
 
 
-def split_for_meshtastic(
+def split_for_mesh(
     text: str,
     payload_limit: int,
     prefix_template: str,
@@ -92,7 +92,7 @@ def split_for_meshtastic(
 
     if not chunking_enabled:
         if utf8_len(text) > payload_limit:
-            raise ValueError("Message exceeds Meshtastic payload limit while chunking is disabled")
+            raise ValueError("Message exceeds the radio payload limit while chunking is disabled")
         return [text]
 
     if utf8_len(text) <= payload_limit:

@@ -35,12 +35,10 @@ from ruamel.yaml.util import load_yaml_guess_indent
 
 from .config import (
     CONFIG_PATH_ENV,
+    DATA_DIR_ENV,
     DEFAULT_CONFIG_PATH,
-    MESHCORE_BACKEND,
     MESHCORE_MODES,
-    MESHTASTIC_BACKEND,
-    MESHTASTIC_MODES,
-    SUPPORTED_BACKENDS,
+    MESHTASTIC_REMOVED_HINT,
     ConfigError,
     LEGACY_ENV_VARS,
     build_settings,
@@ -49,8 +47,6 @@ from .plugins.dm_http_command import ENV_TEMPLATE_PATTERN
 
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_OUTPUT = "config.migrated.yaml"
-DATA_DIR_ENV = "MESHGRAM_DATA_DIR"
-BACKEND_MODES = {MESHTASTIC_BACKEND: MESHTASTIC_MODES, MESHCORE_BACKEND: MESHCORE_MODES}
 PLUGIN_SEGMENT = re.compile(r"plugins\[(\w+)\]")
 STALE_COMMENT = re.compile(r"#.*(?:\.env\b|\b(?:%s)\b)" % "|".join(LEGACY_ENV_VARS))
 MISSING: Any = object()
@@ -83,9 +79,9 @@ def _boolean(raw: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class EnvSetting:
-    # Dotted path in the config. "{backend}" is the active backend's section and
-    # "plugins[name]" every entry of that plugin, as the old code applied them.
-    path: str
+    # Dotted path in the config; "plugins[name]" is every entry of that plugin,
+    # as the old code applied them. None: nothing to write (see _apply_env_settings).
+    path: str | None
     convert: Callable[[str], Any] = _text
     secret: bool = False
 
@@ -94,13 +90,14 @@ ENV_SETTINGS: dict[str, EnvSetting] = {
     "TELEGRAM_BOT_TOKEN": EnvSetting("telegram.bot_token", secret=True),
     "TELEGRAM_GROUP_ID": EnvSetting("telegram.group_id", _integer),
     "LOG_LEVEL": EnvSetting("runtime.log_level"),
-    # Before the "{backend}" settings, which follow whatever it selects.
+    # MeshCore is the only backend now; anything else is refused.
     "MESH_BACKEND": EnvSetting("mesh.backend", _lower),
-    "MESH_MODE": EnvSetting("{backend}.connection.mode", _lower),
-    "MESH_DEVICE": EnvSetting("{backend}.connection.serial_device"),
-    "MESH_HOST": EnvSetting("{backend}.connection.tcp_host"),
-    "MESH_PORT": EnvSetting("{backend}.connection.tcp_port", _integer),
-    "MESH_NO_NODES": EnvSetting("meshtastic.connection.no_nodes", _boolean),
+    "MESH_MODE": EnvSetting("meshcore.connection.mode", _lower),
+    "MESH_DEVICE": EnvSetting("meshcore.connection.serial_device"),
+    "MESH_HOST": EnvSetting("meshcore.connection.tcp_host"),
+    "MESH_PORT": EnvSetting("meshcore.connection.tcp_port", _integer),
+    # Meshtastic only; noted as unused.
+    "MESH_NO_NODES": EnvSetting(None, _boolean),
     "MESH_BAUDRATE": EnvSetting("meshcore.connection.baudrate", _integer),
     "MESH_BLE_ADDRESS": EnvSetting("meshcore.connection.ble_address"),
     "MESH_BLE_PIN": EnvSetting("meshcore.connection.ble_pin", secret=True),
@@ -167,15 +164,6 @@ def _plugin_entries(data: CommentedMap, plugin: str) -> list[CommentedMap]:
     ]
 
 
-def _active_backend(data: CommentedMap) -> str:
-    mesh = data.get("mesh")
-    raw = mesh.get("backend", MESHTASTIC_BACKEND) if isinstance(mesh, dict) else MESHTASTIC_BACKEND
-    backend = str(raw).strip().lower()
-    if backend not in SUPPORTED_BACKENDS:
-        raise MigrationError(f"mesh.backend must be one of: {sorted(SUPPORTED_BACKENDS)}; got {raw!r}")
-    return backend
-
-
 def _plain_is_safe(value: str) -> bool:
     """Whether a YAML 1.1 reader (PyYAML) reads ``value`` back unquoted as the same string."""
     try:
@@ -237,7 +225,7 @@ class _Migration:
 
     def _targets(self, path: str) -> Iterator[tuple[CommentedMap, str, str]]:
         """Yield ``(mapping, key, display path)`` for each place a setting goes, creating sections as needed."""
-        head, *rest = path.replace("{backend}", _active_backend(self.data)).split(".")
+        head, *rest = path.split(".")
         plugin = PLUGIN_SEGMENT.fullmatch(head)
         if plugin is None:
             parents = [(self.data, "")]
@@ -278,15 +266,14 @@ class _Migration:
                     f"{name}={raw!r} ({origin}) isn't a valid value; fix or remove it and run again"
                 ) from None
 
-            if name == "MESH_BACKEND" and value not in SUPPORTED_BACKENDS:
-                raise MigrationError(f"{name} must be one of: {sorted(SUPPORTED_BACKENDS)}; got {raw!r} ({origin})")
-            if name == "MESH_MODE":
-                backend = _active_backend(self.data)
-                if value not in BACKEND_MODES[backend]:
-                    raise MigrationError(
-                        f"{name} must be one of {sorted(BACKEND_MODES[backend])} for the {backend} backend; "
-                        f"got {raw!r} ({origin})"
-                    )
+            if name == "MESH_BACKEND" and value != "meshcore":
+                raise MigrationError(f"{name}={raw!r} ({origin}): {MESHTASTIC_REMOVED_HINT}")
+            if name == "MESH_MODE" and value not in MESHCORE_MODES:
+                raise MigrationError(f"{name} must be one of {sorted(MESHCORE_MODES)}; got {raw!r} ({origin})")
+            if setting.path is None:
+                if name == "MESH_NO_NODES":
+                    self.report.notes.append(f"{name} ({origin}): a Meshtastic setting, and Meshtastic isn't supported any more")
+                continue
 
             targets = list(self._targets(setting.path))
             if not targets:
