@@ -32,7 +32,14 @@ from ._mesh_helpers import (
     is_emoji_modifier,
     sanitize_reaction_emoji_text,
 )
-from .config import MESHTASTIC_BACKEND, MeshgramSettings, load_settings
+from .config import (
+    MESHTASTIC_BACKEND,
+    MIGRATION_HINT,
+    ConfigError,
+    MeshgramSettings,
+    legacy_env_vars,
+    load_settings,
+)
 from .plugin import LoadedPlugin, load_plugins
 from .reply_links import ReplyLinkRegistry
 from .status import CONNECTED, CONNECTING, DISCONNECTED, StatusRegistry
@@ -1008,13 +1015,20 @@ def _get_bridge_reply_ttl_hours(settings: MeshgramSettings) -> int:
 
 
 def main() -> None:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        raise SystemExit(f"meshgram: {exc}") from None
 
     logging.basicConfig(
         level=getattr(logging, settings.log_level, logging.INFO),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         force=True,
     )
+
+    ignored = legacy_env_vars()
+    if ignored:
+        LOGGER.warning("Ignoring environment variables %s. %s.", ", ".join(ignored), MIGRATION_HINT)
 
     app = MeshgramApp(settings)
     app.run()

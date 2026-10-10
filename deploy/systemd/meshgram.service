@@ -8,7 +8,8 @@ Type=simple
 User=meshgram
 Group=meshgram
 WorkingDirectory=/opt/meshgram
-EnvironmentFile=/opt/meshgram/.env
+# Every setting lives in this file (copy config.example.yaml; chmod 600).
+Environment=MESHGRAM_CONFIG_PATH=/opt/meshgram/config.yaml
 # Persistent state (packet_map history) lives in /var/lib/meshgram.
 StateDirectory=meshgram
 Environment=MESHGRAM_DATA_DIR=/var/lib/meshgram

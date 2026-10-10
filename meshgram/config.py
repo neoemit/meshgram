@@ -1,12 +1,20 @@
+"""Meshgram settings, read from a single YAML file (``config.yaml``).
+
+Every setting, secrets included, lives in that file. The only environment
+variables Meshgram reads say where files are, not how it behaves:
+
+- ``MESHGRAM_CONFIG_PATH``: the config file (default ``config.yaml``).
+- ``MESHGRAM_DATA_DIR``: where persistent state goes (see ``packet_map``).
+"""
+
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
-from dotenv import load_dotenv
 
 
 MESHTASTIC_BACKEND = "meshtastic"
@@ -15,6 +23,43 @@ SUPPORTED_BACKENDS = {MESHTASTIC_BACKEND, MESHCORE_BACKEND}
 
 MESHTASTIC_MODES = {"serial", "tcp"}
 MESHCORE_MODES = {"serial", "tcp", "ble"}
+
+CONFIG_PATH_ENV = "MESHGRAM_CONFIG_PATH"
+DEFAULT_CONFIG_PATH = "config.yaml"
+MIGRATION_HINT = (
+    "Settings are no longer read from .env or environment variables; "
+    "run `python -m meshgram.migrate_config` to move them into config.yaml"
+)
+
+# Environment variables that older versions read as settings. They're ignored
+# now; ``meshgram.migrate_config`` knows where each one goes in config.yaml.
+LEGACY_ENV_VARS = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_GROUP_ID",
+    "LOG_LEVEL",
+    "MESH_BACKEND",
+    "MESH_MODE",
+    "MESH_DEVICE",
+    "MESH_BAUDRATE",
+    "MESH_HOST",
+    "MESH_PORT",
+    "MESH_NO_NODES",
+    "MESH_BLE_ADDRESS",
+    "MESH_BLE_PIN",
+    "MESH_AUTO_RECONNECT",
+    "MESHMAPPER_IATA",
+    "MESHMAPPER_PRIVATE_KEY",
+    "MESHMAPPER_SUBSCRIBE_USERNAME",
+    "MESHMAPPER_SUBSCRIBE_PASSWORD",
+    "PACKET_MAP_HOST",
+    "PACKET_MAP_PORT",
+    "PACKET_MAP_PASSWORD",
+    "PACKET_MAP_DB_PATH",
+)
+
+
+class ConfigError(ValueError):
+    """The config file is missing or holds an invalid value."""
 
 
 @dataclass(slots=True)
@@ -113,14 +158,22 @@ def _default_plugins() -> list[PluginConfig]:
 def _read_yaml(path: str) -> dict[str, Any]:
     config_path = Path(path)
     if not config_path.exists():
-        return {}
+        raise ConfigError(
+            f"Config file not found: {path}. Copy config.example.yaml to {path} and fill it in "
+            f"(set {CONFIG_PATH_ENV} to use another path). Upgrading? {MIGRATION_HINT}."
+        )
 
     with config_path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
 
     if not isinstance(data, dict):
-        raise ValueError(f"Config file must contain a top-level mapping: {path}")
+        raise ConfigError(f"Config file must contain a top-level mapping: {path}")
     return data
+
+
+def _section(data: Mapping[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -176,118 +229,40 @@ def _as_optional_string(value: Any) -> str | None:
     return text or None
 
 
-def _resolve_backend() -> str:
-    raw = os.getenv("MESH_BACKEND")
-    if raw is None:
-        return MESHTASTIC_BACKEND
-    backend = raw.strip().lower()
-    if backend not in SUPPORTED_BACKENDS:
-        raise ValueError(
-            f"MESH_BACKEND must be one of: {sorted(SUPPORTED_BACKENDS)}; got {raw!r}"
-        )
-    return backend
+def _connection_mode(connection_data: dict[str, Any], *, section: str, allowed: set[str], active: bool) -> str:
+    raw_mode = connection_data.get("mode", "serial")
+    mode = str(raw_mode).strip().lower() or "serial"
+    # Only the active backend's connection has to be usable.
+    if active and mode not in allowed:
+        raise ConfigError(f"{section}.connection.mode must be one of: {sorted(allowed)}; got {raw_mode!r}")
+    return mode
 
 
-def _build_meshtastic_config(
-    config_data: dict[str, Any],
-    *,
-    backend: str,
-) -> MeshtasticConfig:
-    meshtastic_data = (
-        config_data.get("meshtastic", {})
-        if isinstance(config_data.get("meshtastic", {}), dict)
-        else {}
-    )
-    connection_data = (
-        meshtastic_data.get("connection", {})
-        if isinstance(meshtastic_data.get("connection", {}), dict)
-        else {}
-    )
-
-    env_mode = os.getenv("MESH_MODE")
-    raw_mode = env_mode if env_mode is not None else connection_data.get("mode", "serial")
-    mode = str(raw_mode).strip().lower()
-    if backend == MESHTASTIC_BACKEND and mode not in MESHTASTIC_MODES:
-        raise ValueError(
-            f"Meshtastic mode must be one of: {sorted(MESHTASTIC_MODES)}; got {raw_mode!r}"
-        )
-
-    serial_device = os.getenv("MESH_DEVICE", connection_data.get("serial_device"))
-    tcp_host = os.getenv("MESH_HOST", str(connection_data.get("tcp_host", "localhost")))
-
-    tcp_port_raw = os.getenv("MESH_PORT")
-    if tcp_port_raw is not None:
-        tcp_port = _as_int(tcp_port_raw, 4403)
-    else:
-        tcp_port = _as_int(connection_data.get("tcp_port"), 4403)
-
-    no_nodes = _as_bool(os.getenv("MESH_NO_NODES"), _as_bool(connection_data.get("no_nodes"), False))
-
-    # When the active backend is meshcore, the meshtastic block stays in settings
-    # but the mode value is whatever was in YAML (env override doesn't apply).
-    effective_mode = mode if backend == MESHTASTIC_BACKEND else str(connection_data.get("mode", "serial")).strip().lower() or "serial"
+def _build_meshtastic_config(config_data: dict[str, Any], *, backend: str) -> MeshtasticConfig:
+    meshtastic_data = _section(config_data, "meshtastic")
+    connection_data = _section(meshtastic_data, "connection")
 
     return MeshtasticConfig(
         bridge_channel=_as_int(meshtastic_data.get("bridge_channel"), 0),
         node_name_overrides=_as_string_dict(meshtastic_data.get("node_name_overrides")),
         connection=MeshtasticConnectionConfig(
-            mode=effective_mode,
-            serial_device=serial_device,
-            tcp_host=tcp_host,
-            tcp_port=tcp_port,
-            no_nodes=no_nodes,
+            mode=_connection_mode(
+                connection_data,
+                section="meshtastic",
+                allowed=MESHTASTIC_MODES,
+                active=backend == MESHTASTIC_BACKEND,
+            ),
+            serial_device=_as_optional_string(connection_data.get("serial_device")),
+            tcp_host=_as_optional_string(connection_data.get("tcp_host")) or "localhost",
+            tcp_port=_as_int(connection_data.get("tcp_port"), 4403),
+            no_nodes=_as_bool(connection_data.get("no_nodes"), False),
         ),
     )
 
 
-def _build_meshcore_config(
-    config_data: dict[str, Any],
-    *,
-    backend: str,
-) -> MeshCoreConfig:
-    meshcore_data = (
-        config_data.get("meshcore", {})
-        if isinstance(config_data.get("meshcore", {}), dict)
-        else {}
-    )
-    connection_data = (
-        meshcore_data.get("connection", {})
-        if isinstance(meshcore_data.get("connection", {}), dict)
-        else {}
-    )
-
-    env_mode = os.getenv("MESH_MODE")
-    raw_mode = env_mode if env_mode is not None else connection_data.get("mode", "serial")
-    mode = str(raw_mode).strip().lower()
-    if backend == MESHCORE_BACKEND and mode not in MESHCORE_MODES:
-        raise ValueError(
-            f"MeshCore mode must be one of: {sorted(MESHCORE_MODES)}; got {raw_mode!r}"
-        )
-
-    serial_device = os.getenv("MESH_DEVICE", connection_data.get("serial_device"))
-
-    baudrate_raw = os.getenv("MESH_BAUDRATE")
-    if baudrate_raw is not None:
-        baudrate = _as_int(baudrate_raw, 115200)
-    else:
-        baudrate = _as_int(connection_data.get("baudrate"), 115200)
-
-    tcp_host = os.getenv("MESH_HOST", str(connection_data.get("tcp_host", "localhost")))
-
-    tcp_port_raw = os.getenv("MESH_PORT")
-    if tcp_port_raw is not None:
-        tcp_port = _as_int(tcp_port_raw, 5000)
-    else:
-        tcp_port = _as_int(connection_data.get("tcp_port"), 5000)
-
-    ble_address = os.getenv("MESH_BLE_ADDRESS", _as_optional_string(connection_data.get("ble_address")))
-    ble_pin = os.getenv("MESH_BLE_PIN", _as_optional_string(connection_data.get("ble_pin")))
-    auto_reconnect = _as_bool(
-        os.getenv("MESH_AUTO_RECONNECT"),
-        _as_bool(connection_data.get("auto_reconnect"), True),
-    )
-
-    effective_mode = mode if backend == MESHCORE_BACKEND else str(connection_data.get("mode", "serial")).strip().lower() or "serial"
+def _build_meshcore_config(config_data: dict[str, Any], *, backend: str) -> MeshCoreConfig:
+    meshcore_data = _section(config_data, "meshcore")
+    connection_data = _section(meshcore_data, "connection")
 
     return MeshCoreConfig(
         bridge_channel=_as_int(meshcore_data.get("bridge_channel"), 0),
@@ -301,82 +276,79 @@ def _build_meshcore_config(
             _as_float(meshcore_data.get("outbound_echo_text_fallback_ttl_seconds"), 2.0),
         ),
         connection=MeshCoreConnectionConfig(
-            mode=effective_mode,
-            serial_device=serial_device,
-            baudrate=baudrate,
-            tcp_host=tcp_host,
-            tcp_port=tcp_port,
-            ble_address=ble_address,
-            ble_pin=ble_pin,
-            auto_reconnect=auto_reconnect,
+            mode=_connection_mode(
+                connection_data,
+                section="meshcore",
+                allowed=MESHCORE_MODES,
+                active=backend == MESHCORE_BACKEND,
+            ),
+            serial_device=_as_optional_string(connection_data.get("serial_device")),
+            baudrate=_as_int(connection_data.get("baudrate"), 115200),
+            tcp_host=_as_optional_string(connection_data.get("tcp_host")) or "localhost",
+            tcp_port=_as_int(connection_data.get("tcp_port"), 5000),
+            ble_address=_as_optional_string(connection_data.get("ble_address")),
+            ble_pin=_as_optional_string(connection_data.get("ble_pin")),
+            auto_reconnect=_as_bool(connection_data.get("auto_reconnect"), True),
         ),
     )
 
 
-def load_settings() -> MeshgramSettings:
-    load_dotenv()
+def _build_plugins(plugins_data: Any) -> list[PluginConfig]:
+    if not isinstance(plugins_data, list):
+        return _default_plugins()
 
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    group_id_raw = os.getenv("TELEGRAM_GROUP_ID")
+    plugins: list[PluginConfig] = []
+    for item in plugins_data:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        enabled = _as_bool(item.get("enabled"), True)
+        settings = item.get("settings", {})
+        if not isinstance(settings, dict):
+            settings = {}
+        plugins.append(PluginConfig(name=name, enabled=enabled, settings=settings))
+    return plugins or _default_plugins()
 
+
+def legacy_env_vars(environ: Mapping[str, str] | None = None) -> list[str]:
+    """Names of set environment variables that used to configure Meshgram and are now ignored."""
+    environ = os.environ if environ is None else environ
+    return [name for name in LEGACY_ENV_VARS if name in environ]
+
+
+def build_settings(config_data: dict[str, Any], *, config_path: str = DEFAULT_CONFIG_PATH) -> MeshgramSettings:
+    """Validate parsed config data and turn it into settings."""
+    runtime_data = _section(config_data, "runtime")
+    telegram_data = _section(config_data, "telegram")
+    chunking_data = _section(config_data, "chunking")
+    mesh_data = _section(config_data, "mesh")
+
+    token = _as_optional_string(telegram_data.get("bot_token"))
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN is required")
-    if not group_id_raw:
-        raise ValueError("TELEGRAM_GROUP_ID is required")
+        raise ConfigError(f"telegram.bot_token is required in {config_path}")
 
+    group_id_raw = _as_optional_string(telegram_data.get("group_id"))
+    if group_id_raw is None:
+        raise ConfigError(f"telegram.group_id is required in {config_path}")
     try:
         group_id = int(group_id_raw)
     except ValueError as exc:
-        raise ValueError("TELEGRAM_GROUP_ID must be an integer") from exc
+        raise ConfigError(f"telegram.group_id must be an integer; got {group_id_raw!r}") from exc
 
-    config_path = os.getenv("MESHGRAM_CONFIG_PATH", "config.yaml")
-    config_data = _read_yaml(config_path)
-
-    runtime_data = config_data.get("runtime", {}) if isinstance(config_data.get("runtime", {}), dict) else {}
-    telegram_data = config_data.get("telegram", {}) if isinstance(config_data.get("telegram", {}), dict) else {}
-    chunking_data = config_data.get("chunking", {}) if isinstance(config_data.get("chunking", {}), dict) else {}
-
-    mesh_data = config_data.get("mesh", {}) if isinstance(config_data.get("mesh", {}), dict) else {}
-    yaml_backend = str(mesh_data.get("backend", MESHTASTIC_BACKEND)).strip().lower()
-    if yaml_backend not in SUPPORTED_BACKENDS:
-        raise ValueError(
-            f"mesh.backend must be one of: {sorted(SUPPORTED_BACKENDS)}; got {yaml_backend!r}"
-        )
-    env_backend = os.getenv("MESH_BACKEND")
-    backend = _resolve_backend() if env_backend is not None else yaml_backend
-
-    meshtastic_config = _build_meshtastic_config(config_data, backend=backend)
-    meshcore_config = _build_meshcore_config(config_data, backend=backend)
-
-    plugins_data = config_data.get("plugins")
-    if isinstance(plugins_data, list):
-        plugins: list[PluginConfig] = []
-        for item in plugins_data:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "")).strip()
-            if not name:
-                continue
-            enabled = _as_bool(item.get("enabled"), True)
-            settings = item.get("settings", {})
-            if not isinstance(settings, dict):
-                settings = {}
-            plugins.append(PluginConfig(name=name, enabled=enabled, settings=settings))
-        if not plugins:
-            plugins = _default_plugins()
-    else:
-        plugins = _default_plugins()
-
-    log_level = str(os.getenv("LOG_LEVEL", runtime_data.get("log_level", "INFO"))).upper()
+    backend = str(mesh_data.get("backend", MESHTASTIC_BACKEND)).strip().lower()
+    if backend not in SUPPORTED_BACKENDS:
+        raise ConfigError(f"mesh.backend must be one of: {sorted(SUPPORTED_BACKENDS)}; got {backend!r}")
 
     return MeshgramSettings(
         telegram_bot_token=token,
         telegram_group_id=group_id,
         config_path=config_path,
-        log_level=log_level,
+        log_level=str(runtime_data.get("log_level", "INFO")).strip().upper(),
         mesh=MeshConfig(backend=backend),
-        meshtastic=meshtastic_config,
-        meshcore=meshcore_config,
+        meshtastic=_build_meshtastic_config(config_data, backend=backend),
+        meshcore=_build_meshcore_config(config_data, backend=backend),
         telegram=TelegramConfig(
             include_captions=_as_bool(telegram_data.get("include_captions"), True),
             sender_prefix_template=str(
@@ -401,5 +373,12 @@ def load_settings() -> MeshgramSettings:
             abort_on_chunk_failure=_as_bool(chunking_data.get("abort_on_chunk_failure"), True),
             payload_safety_margin_bytes=max(0, _as_int(chunking_data.get("payload_safety_margin_bytes"), 12)),
         ),
-        plugins=plugins,
+        plugins=_build_plugins(config_data.get("plugins")),
     )
+
+
+def load_settings(config_path: str | None = None) -> MeshgramSettings:
+    """Read settings from ``config_path`` (default: ``$MESHGRAM_CONFIG_PATH`` or ``config.yaml``)."""
+    if config_path is None:
+        config_path = os.getenv(CONFIG_PATH_ENV) or DEFAULT_CONFIG_PATH
+    return build_settings(_read_yaml(config_path), config_path=config_path)

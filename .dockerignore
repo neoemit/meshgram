@@ -5,3 +5,8 @@ __pycache__/
 .DS_Store
 # Local runtime state; the container keeps its own in the /app/data volume.
 data/
+# Secrets stay out of the image: docker-compose.yml mounts config.yaml at runtime.
+.env
+config.yaml
+config.*.yaml
+!config.example.yaml

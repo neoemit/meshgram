@@ -545,9 +545,8 @@ class StoreTests(_DataDirMixin, unittest.TestCase):
 
 class PersistenceConfigTests(unittest.TestCase):
     def test_db_path_defaults_to_data_dir(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
+        with mock.patch.dict(os.environ, {"PACKET_MAP_DB_PATH": "ignored.sqlite3"}, clear=False):
             os.environ.pop("MESHGRAM_DATA_DIR", None)
-            os.environ.pop("PACKET_MAP_DB_PATH", None)
             self.assertEqual(PacketMapConfig.from_settings({}).db_path, Path("data/packet_map.sqlite3"))
             with mock.patch.dict(os.environ, {"MESHGRAM_DATA_DIR": "/var/lib/meshgram"}):
                 self.assertEqual(PacketMapConfig.from_settings({}).db_path, Path("/var/lib/meshgram/packet_map.sqlite3"))

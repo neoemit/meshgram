@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # fill in TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID, etc.
+cp config.example.yaml config.yaml  # fill in telegram.bot_token, telegram.group_id, etc.
 python main.py
 ```
 
@@ -26,7 +26,6 @@ python main.py
 ```bash
 docker compose up --build -d                                                          # base
 docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml up --build   # serial device
-docker compose -f docker-compose.yml -f docker-compose.macos-tcp.yml up --build      # macOS TCP bridge
 ```
 
 ## Architecture
@@ -36,7 +35,7 @@ Meshgram is a **plugin-based bidirectional bridge between a mesh radio and Teleg
 - **`meshtastic`** (default) — Meshtastic devices over serial or TCP, via the `meshtastic` Python library.
 - **`meshcore`** — MeshCore companion radios over serial, TCP, or BLE, via the `meshcore` Python library.
 
-Backend selection: `MESH_BACKEND=meshtastic|meshcore` env var, or `mesh.backend` in `config.yaml`. Existing Meshtastic deployments continue to work with no env/config changes (backend defaults to `meshtastic`).
+Backend selection: `mesh.backend: meshtastic|meshcore` in `config.yaml` (defaults to `meshtastic`).
 
 MeshCore caveats vs. Meshtastic:
 - No packet-level reactions — Telegram→MeshCore reaction actions are dropped with a debug log; MeshCore never emits reaction events.
@@ -49,7 +48,7 @@ The bridge relays messages, replies (Meshtastic only), and emoji reactions (Mesh
 
 `main.py` → `MeshgramApp.run()` in `meshgram/app.py`:
 
-1. Settings loaded from `.env` + `config.yaml` (env vars override YAML for connection fields)
+1. Settings loaded from `config.yaml` only (`load_settings()`); config errors exit with a message, and old setting env vars still set are logged as ignored
 2. Two transports initialized: `MeshtasticClient` (serial or TCP) and python-telegram-bot `Application`
 3. Incoming packets/messages are normalized into typed event dataclasses (`TelegramMessageEvent`, `MeshtasticTextEvent`, `TelegramReactionEvent`, `MeshtasticReactionEvent`) defined in `meshgram/types.py`
 4. Each event is dispatched to all enabled plugins (async), collecting `PluginAction` objects in return
@@ -80,16 +79,18 @@ Each returns a list of `PluginAction` objects (`SendTelegramAction`, `SendMeshta
 | `meshgram/transport/meshtastic.py` | `MeshtasticTransport` (also exported as `MeshtasticClient` for back-compat) |
 | `meshgram/transport/meshcore.py` | `MeshCoreTransport` |
 | `meshgram/_mesh_helpers.py` | Shared helpers (node-id normalization, emoji extraction, port-num check) |
-| `meshgram/config.py` | Settings dataclasses; `load_settings()` with env-over-YAML precedence |
+| `meshgram/config.py` | Settings dataclasses; `load_settings()` reads `config.yaml` (path from `MESHGRAM_CONFIG_PATH`), `build_settings()` validates parsed data; `LEGACY_ENV_VARS` |
+| `meshgram/migrate_config.py` | `python -m meshgram.migrate_config`: one-off merge of old `.env`/env settings into a copy of `config.yaml` (ruamel.yaml round-trip keeps comments); `ENV_SETTINGS` maps each legacy variable to its YAML path |
 | `meshgram/types.py` | All event and action dataclasses; `Plugin` protocol; `PluginContext`. Type names use the `Mesh*` prefix; the older `Meshtastic*` names are kept as aliases. |
 | `meshgram/reply_links.py` | In-memory bidirectional Telegram↔mesh message ID registry with TTL |
 | `meshgram/text_utils.py` | UTF-8 byte-aware chunking for radio MTU constraints |
 
 ### Config
 
-- **`.env`** — secrets (bot token, group ID, device path)
-- **`config.yaml`** — runtime behavior (bridge channel, node name overrides, Telegram sender template, chunking params, plugin enable/disable + per-plugin settings)
-- Env vars `MESH_MODE`, `MESH_HOST`, `MESH_PORT`, `MESH_DEVICE` override YAML connection settings at runtime
+- **`config.yaml`** — the only source of settings, secrets included (Telegram credentials, backend + connection, bridge channel, name overrides, chunking params, plugins and their settings). Gitignored, kept out of the Docker image (`.dockerignore`) and bind-mounted by `docker-compose.yml`.
+- **`config.example.yaml`** — tracked template documenting every field; keep it in sync when adding settings.
+- No env var overrides any setting. The only env vars are paths: `MESHGRAM_CONFIG_PATH` (config file) and `MESHGRAM_DATA_DIR` (persistent state). `dm_http_command` can still reference env vars explicitly (`${VAR}`, `auth.token_env`).
+- `.env` is no longer loaded; `python -m meshgram.migrate_config` moves old `.env` settings into the YAML (writes `config.migrated.yaml`).
 
 ### Node name resolution
 

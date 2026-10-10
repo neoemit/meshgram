@@ -97,21 +97,18 @@ class PacketMapConfig:
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "PacketMapConfig":
-        host = os.getenv("PACKET_MAP_HOST") or settings.get("host") or "127.0.0.1"
-        port = os.getenv("PACKET_MAP_PORT") or settings.get("port")
-        password = os.getenv("PACKET_MAP_PASSWORD") or settings.get("password") or ""
         db_path = None
         if _as_bool(settings.get("persist"), True):
             # A relative path is relative to MESHGRAM_DATA_DIR (an absolute one is used as-is).
             data_dir = Path(os.getenv("MESHGRAM_DATA_DIR") or DEFAULT_DATA_DIR)
-            db_path = data_dir / str(os.getenv("PACKET_MAP_DB_PATH") or settings.get("db_path") or DEFAULT_DB_FILE)
+            db_path = data_dir / str(settings.get("db_path") or DEFAULT_DB_FILE)
         return cls(
-            host=str(host).strip(),
-            port=_as_int(port, 8080),
+            host=str(settings.get("host") or "127.0.0.1").strip(),
+            port=_as_int(settings.get("port"), 8080),
             max_packets=max(10, _as_int(settings.get("max_packets"), 500)),
             max_messages=max(10, _as_int(settings.get("max_messages"), 1000)),
             max_remote_packets=max(10, _as_int(settings.get("max_remote_packets"), 1000)),
-            password=str(password),
+            password=str(settings.get("password") or ""),
             title=str(settings.get("title") or DEFAULT_TITLE),
             tile_url=str(settings.get("tile_url") or ""),
             tile_attribution=str(settings.get("tile_attribution") or ""),

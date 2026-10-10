@@ -1,6 +1,10 @@
+# Linux: passes the radio's USB serial device into the container. Use the same
+# path as serial_device in config.yaml. For a device other than /dev/ttyUSB0,
+# set MESH_DEVICE for Docker Compose (in your shell or in a .env file next to
+# this one; Compose reads it, Meshgram doesn't).
 services:
   meshgram:
     devices:
-      - "${MESH_DEVICE:?Set MESH_DEVICE in .env}:${MESH_DEVICE:?Set MESH_DEVICE in .env}"
+      - "${MESH_DEVICE:-/dev/ttyUSB0}:${MESH_DEVICE:-/dev/ttyUSB0}"
     group_add:
       - dialout
