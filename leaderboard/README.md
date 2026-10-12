@@ -84,4 +84,5 @@ The page reads `api/leaderboard` (this site's proxy) and `config.json` (the refr
 
 - **"No signal" on the page / `502` from `/api/leaderboard`:** this host can't reach `MESHGRAM_URL`. Check from inside the container: `docker compose exec leaderboard sh -c 'wget -S -O /dev/null "$MESHGRAM_URL/healthz"'` (any HTTP status, even `401`, means Meshgram is reachable).
 - **`401`:** the token doesn't match the plugin's `api_token`. **`404`:** the `check_in` plugin isn't running.
+- **An update doesn't show:** the page's files are served with `Cache-Control: no-cache` (checked on every load, cheap with ETags), so after a `git pull` a normal refresh shows them. Changes to `nginx/default.conf.template` need a restart (`docker compose restart <service>`): it's read when the container starts. Behind Cloudflare, copies cached before this setting (or by a cache rule of yours) stay until they expire or you purge them (Caching → Configuration → Purge Cache).
 - **Nothing starts:** `docker compose logs leaderboard` shows nginx's complaint (a missing variable in `.env`, a token with quotes in it, …).

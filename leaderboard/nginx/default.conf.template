@@ -83,6 +83,9 @@ server {
     location / {
         limit_except GET { deny all; }
         try_files $uri $uri/ =404;
-        expires 10m;
+        # The page changes with a git pull, so browsers and CDNs (Cloudflare) check back on every
+        # load: "Cache-Control: no-cache" with an ETag, so an unchanged file is a tiny 304.
+        expires -1;
+        etag on;
     }
 }
