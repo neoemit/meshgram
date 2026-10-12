@@ -69,6 +69,7 @@ The page reads `api/leaderboard` (this site's proxy) and `config.json` (the refr
   "window": {"open": true, "opens_at": "2026-10-11T22:00:00Z", "closes_at": "2026-10-12T22:00:00Z"},
   "participants_this_week": 13,
   "generated_at": "2026-10-12T09:30:00Z",
+  "meshgram_title": "LMB Meshgram",
   "leaderboard": [
     {"rank": 1, "id": "A1B2…", "hash": "A1", "name": "LMB-T", "streak": 15, "best_streak": 20,
      "total_check_ins": 40, "last_check_in": "2026-10-12T07:02:11Z", "checked_in_this_week": true,
@@ -77,7 +78,7 @@ The page reads `api/leaderboard` (this site's proxy) and `config.json` (the refr
 }
 ```
 
-Sorted by streak, longest first (`rank` is shared by equal streaks). `id` is the node's public key and `hash` its first byte; both are `null` (and `resolved` false) for a node known by name only, until Meshgram hears its advert. Individual check-ins are never exposed.
+`meshgram_title` is Meshgram's `web.title` (control panel → Settings → Web app → Title): the page's top bar and footer credit it ("live from the mesh via LMB Meshgram"). Sorted by streak, longest first (`rank` is shared by equal streaks). `id` is the node's public key and `hash` its first byte; both are `null` (and `resolved` false) for a node known by name only, until Meshgram hears its advert. Individual check-ins are never exposed.
 
 ## Troubleshooting
 

@@ -106,7 +106,7 @@ button, input { font: inherit; color: inherit; }
 .brand-mark .w2 { animation-delay: .4s; }
 @keyframes wave { 0%, 100% { opacity: .25; } 40% { opacity: 1; } }
 .brand-text { font-size: 18px; }
-.brand-text span { margin-left: 4px; color: var(--green); }
+.brand-text span { color: var(--green); }
 
 .signal {
   display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px;

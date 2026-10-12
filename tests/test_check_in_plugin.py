@@ -283,7 +283,7 @@ class HelperTests(unittest.TestCase):
 
 
 class LeaderboardAccessTests(CheckInTestCase):
-    web_config = WebConfig(port=0, password="secret")
+    web_config = WebConfig(port=0, password="secret", title="LMB Meshgram")
     settings = {"api_token": "tok"}
 
     async def get(self, path, headers=None):
@@ -298,6 +298,7 @@ class LeaderboardAccessTests(CheckInTestCase):
         self.assertEqual((await self.get(LEADERBOARD, {"Authorization": "Bearer nope"}))[0], 401)
         status, board, _ = await self.get(LEADERBOARD, {"Authorization": "Bearer tok"})
         self.assertEqual((status, board["leaderboard"][0]["name"]), (200, "LMB-T"))
+        self.assertEqual(board["meshgram_title"], "LMB Meshgram")
         basic = "Basic " + base64.b64encode(b"x:secret").decode()
         self.assertEqual((await self.get(LEADERBOARD, {"Authorization": basic}))[0], 200)
         # The token opens the leaderboard only, not the rest of the web app.

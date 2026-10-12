@@ -142,10 +142,20 @@
 
   // --- Rendering -----------------------------------------------------------------------------------
 
+  // "LMB Meshgram": the last word stands out.
+  function renderBrand(name) {
+    const words = name.trim().split(/\s+/);
+    const last = words.pop();
+    $("brand-name").replaceChildren(...(words.length ? [`${words.join(" ")} `, h("span", {}, last)] : [last]));
+    $("brand").setAttribute("aria-label", `${name} leaderboard home`);
+  }
+
   function render(fresh) {
     const data = state.data;
     const entries = data.leaderboard;
-    document.title = `${data.title} · Leaderboard`;
+    const brand = data.meshgram_title || "Meshgram";
+    document.title = `${data.title} · ${brand}`;
+    renderBrand(brand);
     $("title").textContent = data.title;
     $("keyword-text").textContent = data.keyword;
     $("eyebrow").textContent = `Weekly check-in · ${daysPhrase(data.check_in_days)}`;
@@ -160,7 +170,7 @@
     const zone = data.timezone && data.timezone !== "UTC" ? ` (${data.timezone})` : " (UTC)";
     $("footer-text").textContent = `Week of ${new Date(`${data.week}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })}${zone}`
       + ` · updated ${new Date(state.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-      + ` · refreshes every ${state.refreshSeconds} s · live from the mesh via Meshgram`;
+      + ` · refreshes every ${state.refreshSeconds} s · live from the mesh via ${brand}`;
   }
 
   function renderStats(entries, data) {

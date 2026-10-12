@@ -691,6 +691,8 @@ class CheckInPlugin(BasePlugin):
         entries = table[:limit] if limit else table
         return {
             **self._overview(moment, table),
+            # This Meshgram's name (web.title), for sites to credit.
+            "meshgram_title": getattr(getattr(self._web, "config", None), "title", None) or "Meshgram",
             "leaderboard": [
                 {
                     "rank": standing.rank,
