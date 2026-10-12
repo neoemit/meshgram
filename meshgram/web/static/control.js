@@ -1,12 +1,15 @@
 "use strict";
-// Control panel: the radio's settings, channels and contacts, the plugins, and
-// config.yaml with the plugin changes made here.
+// Control panel: the radio's settings, channels and contacts, the plugins,
+// Meshgram's own settings (the rest of config.yaml), and config.yaml with the
+// changes made here.
 // Talks to the JSON API in meshgram/web/api.py. Loaded after the page's main
 // script and uses its helpers ($, el, icon, store, fmtAgo, plural, NODE_TYPES)
 // and state (controlState, connections, currentView).
 
 (() => {
-  const SECTIONS = ["radio", "channels", "contacts", "plugins", "config"];
+  const SECTIONS = ["radio", "channels", "contacts", "plugins", "settings", "config"];
+  const RESTART_POLL_MS = 1500;
+  const RESTART_TIMEOUT_MS = 120000;
   const SECRET_MASK = "••••••••";
   const BANDWIDTHS = [7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125, 250, 500];
   const TELEMETRY = [[0, "Nobody"], [1, "Contacts allowed to"], [2, "Everyone"]];
@@ -17,13 +20,15 @@
   const savedSection = store.get("controlSection", "radio");
   const ui = {
     section: SECTIONS.includes(savedSection) ? savedSection : "radio",
-    data: { radio: null, channels: null, contacts: null, plugins: null, config: null },
+    data: { radio: null, channels: null, contacts: null, plugins: null, settings: null, config: null },
     errors: {},
     loading: {},
     stale: new Set(SECTIONS),
     openPlugins: new Set(),
     busyPlugins: new Set(),
     editors: new Map(),        // plugin name -> open settings editor
+    settingsEditors: new Map(), // settings section key -> its form
+    restarting: false,
     editingChannel: null,      // slot being renamed
     contactQuery: "",
     contactType: "all",
@@ -336,13 +341,13 @@
         ui.data.channels = await api("GET", `api/radio/channels${refresh ? "?refresh=1" : ""}`);
       } else if (section === "contacts") {
         ui.data.contacts = await api("GET", `api/radio/contacts${refresh ? "?refresh=1" : ""}`);
-      } else if (section === "plugins") {
+      } else if (section === "plugins" || section === "settings") {
         // Channel settings are picked from the radio's channels by name.
-        const [plugins, channels] = await Promise.all([
-          api("GET", "api/plugins"),
+        const [data, channels] = await Promise.all([
+          api("GET", section === "plugins" ? "api/plugins" : "api/settings"),
           ui.data.channels ? Promise.resolve(ui.data.channels) : api("GET", "api/radio/channels").catch(() => null),
         ]);
-        ui.data.plugins = plugins;
+        ui.data[section] = data;
         if (channels) ui.data.channels = channels;
       } else if (section === "config") {
         // It holds secrets, so the server only hands it out where settings can be changed.
@@ -364,7 +369,7 @@
     const view = $("view-control");
     const scrollTop = view.scrollTop;
     if (!ui.data[section]) panel.replaceChildren(placeholder(section));
-    else ({ radio: renderRadio, channels: renderChannels, contacts: renderContacts, plugins: renderPlugins, config: renderConfig })[section](panel);
+    else ({ radio: renderRadio, channels: renderChannels, contacts: renderContacts, plugins: renderPlugins, settings: renderSettings, config: renderConfig })[section](panel);
     view.scrollTop = scrollTop;
     if (section === "plugins") revealLinkedPlugin(panel);
   }
@@ -1210,6 +1215,12 @@
       placeholder: stored ? "Saved; type to replace it" : schema.default !== undefined ? String(schema.default) : null,
     });
     let control = input;
+    if (!secret && Array.isArray(schema.examples) && schema.examples.length) {
+      // Suggestions (serial devices found, say); anything else can still be typed.
+      const listId = nextId("dl");
+      input.setAttribute("list", listId);
+      control = el("div", {}, input, el("datalist", { id: listId }, ...schema.examples.map((example) => el("option", { value: String(example) }))));
+    }
     if (stored) {
       const clear = button("Clear", { onClick: () => { cleared = true; input.value = ""; input.placeholder = "Removed when you save"; clear.disabled = true; input.dispatchEvent(new Event("input", { bubbles: true })); } });
       clear.dataset.change = "";
@@ -1438,6 +1449,164 @@
     };
   }
 
+  // --- Settings (config.yaml outside the plugins) ----------------------------------------------
+
+  function renderSettings(panel) {
+    const data = ui.data.settings;
+    panel.replaceChildren(el("div", { class: "plugin-list" },
+      settingsNotice(data),
+      ...data.sections.map(settingsCard)));
+  }
+
+  function settingsNotice(data) {
+    if (ui.restarting) {
+      return el("div", { class: "notice", role: "status" }, el("span", { html: icon("refresh") }), el("p", {}, "Meshgram is restarting…"));
+    }
+    if (data.restart_needed) {
+      const restart = data.can_restart
+        ? button("Restart now", { iconName: "power", kind: "btn-primary", onClick: restartMeshgram })
+        : null;
+      if (restart) restart.dataset.change = "";
+      const node = el("div", { class: "notice warn", role: "note" },
+        el("span", { html: icon("alert") }),
+        el("div", {}, el("p", {}, "Saved settings take effect when Meshgram restarts. Until then it runs with the ones it started with."),
+          restart ? el("p", { style: "margin-top:10px" }, restart) : null));
+      disableIfReadOnly(node);
+      return node;
+    }
+    return el("div", { class: "notice", role: "note" },
+      el("span", { html: icon("info") }),
+      el("p", {}, "Everything in config.yaml besides the plugins. Changes are saved in Meshgram's data directory, win over config.yaml, and take effect when Meshgram restarts. ",
+        el("a", { href: "#control/config" }, "Put them in config.yaml"), " to make them the defaults."));
+  }
+
+  function settingsCard(section) {
+    let editor = ui.settingsEditors.get(section.key);
+    if (!editor || editor.section !== section) {
+      // Keep unsaved edits when another section re-renders the list.
+      const previous = editor && editor.form.dataset.dirty ? editor : null;
+      editor = previous || buildSettingsEditor(section);
+      ui.settingsEditors.set(section.key, editor);
+    }
+    const titleId = `settings-${section.key}-title`;
+    const tags = [
+      section.overridden.length ? el("span", { class: "tag", title: "Saved by Meshgram in its data directory; config.yaml says otherwise" }, "Changed here") : null,
+      section.pending.length ? el("span", { class: "tag", title: `Saved, not in use yet: ${section.pending.join(", ")}` }, "Restart to apply") : null,
+    ];
+    return el("article", { class: "card plugin-card", "data-settings": section.key, "aria-labelledby": titleId },
+      el("div", { class: "card-head plugin-head" },
+        el("div", { class: "plugin-title" }, el("h3", { id: titleId }, section.title), el("span", { class: "plugin-id" }, section.key), ...tags)),
+      section.description ? el("p", { class: "desc" }, section.description) : null,
+      editor.form);
+  }
+
+  function buildSettingsEditor(section) {
+    const ctx = { fields: [] };
+    const root = objectEditor(section.schema, section.values || {}, "", ctx, { top: true });
+    const errors = el("ul", { class: "form-errors", role: "alert", hidden: true });
+    const save = el("button", { class: "btn btn-sm btn-primary", type: "submit", "data-change": "" }, "Save");
+    const cancel = el("button", { class: "btn btn-sm", type: "button" }, "Discard changes");
+    const reset = section.overridden.length
+      ? el("button", { class: "btn btn-sm btn-danger", type: "button", "data-change": "" }, "Reset to config.yaml") : null;
+    const form = el("form", { class: "plugin-settings", novalidate: true },
+      errors,
+      root.el,
+      el("div", { class: "input-group", style: "flex-wrap:wrap" }, save, cancel, el("span", { class: "spacer", style: "flex:1" }), reset));
+    const editor = { section, form };
+    const path = `api/settings/${encodeURIComponent(section.key)}`;
+    const saved = (data, message) => {
+      ui.data.settings = data;
+      ui.settingsEditors.delete(section.key);
+      render("settings");
+      invalidate(["config"]);
+      toast(message);
+    };
+
+    form.addEventListener("input", () => { form.dataset.dirty = "1"; });
+    form.addEventListener("change", () => { form.dataset.dirty = "1"; });
+    cancel.addEventListener("click", () => {
+      ui.settingsEditors.delete(section.key);
+      render("settings");
+    });
+    if (reset) {
+      reset.addEventListener("click", async () => {
+        const ok = await confirmDialog({
+          title: `Reset ${section.title}?`,
+          text: "These settings go back to what config.yaml says when Meshgram restarts.",
+          ok: "Reset",
+          danger: true,
+        });
+        if (!ok) return;
+        const data = await act(reset, () => api("DELETE", `${path}/overrides`));
+        if (data) saved(data, `${section.title} reset to config.yaml`);
+      });
+    }
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearErrors(ctx, errors);
+      let values;
+      try {
+        values = root.get() || {};
+      } catch (err) {
+        showErrors(ctx, errors, [{ path: err.path || "", message: err.message }]);
+        return;
+      }
+      save.disabled = true;
+      try {
+        const data = await api("PATCH", path, values);
+        const updated = data.sections.find((item) => item.key === section.key);
+        saved(data, updated && updated.pending.length ? `${section.title} saved; restart Meshgram to use it` : `${section.title} saved`);
+      } catch (err) {
+        if (err.details) showErrors(ctx, errors, err.details);
+        else toast(err.message, "error");
+      } finally {
+        if (save.isConnected) save.disabled = !canChange();
+      }
+    });
+    disableIfReadOnly(form);
+    return editor;
+  }
+
+  async function restartMeshgram() {
+    const ok = await confirmDialog({
+      title: "Restart Meshgram?",
+      text: "The bot, the radio connection and this page go away for a few seconds, then come back with the saved settings.",
+      ok: "Restart",
+    });
+    if (!ok) return;
+    let before;
+    try {
+      before = (await api("GET", "api/settings")).started_at;
+      await api("POST", "api/restart");
+    } catch (err) {
+      toast(err.message, "error");
+      return;
+    }
+    ui.restarting = true;
+    render("settings");
+    // Wait for the new process: it answers with another start time.
+    const deadline = Date.now() + RESTART_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
+      try {
+        const data = await api("GET", "api/settings");
+        if (data.started_at === before) continue;
+        ui.restarting = false;
+        ui.data.settings = data;
+        ui.settingsEditors.clear();
+        render("settings");
+        invalidate(SECTIONS);
+        toast("Meshgram restarted");
+        return;
+      } catch {
+        // Not back yet.
+      }
+    }
+    ui.restarting = false;
+    render("settings");
+    toast("Meshgram hasn't come back here. If the web app's address or port changed, open it there; otherwise check its logs.", "error");
+  }
+
   // --- Config file ----------------------------------------------------------------------------
 
   function renderConfig(panel) {
@@ -1454,29 +1623,36 @@
     const download = el("a", { class: "btn btn-sm", href: "api/config.yaml", download: "config.yaml", html: `${icon("download")}<span>Download</span>` });
     panel.replaceChildren(card({
       title: "config.yaml",
-      sub: "With the plugin changes made in this control panel",
+      sub: "With the changes made in this control panel",
       actions: [reread, copy, download],
       body: [
         configStatus(data),
         data.problems.length
           ? notice("bad", "This file doesn't load back exactly as intended; check it before using it:", [el("ul", { class: "change-list" }, ...data.problems.map((text) => el("li", {}, text)))])
           : null,
-        data.changes.length ? configSteps(data) : null,
+        data.changes.length || data.settings_changes.length ? configSteps(data) : null,
         configViewer(data),
       ],
     }));
   }
 
   function configStatus(data) {
-    if (data.changes.length) {
+    const settings = data.settings_changes;
+    if (data.changes.length || settings.length) {
       const what = (change) => [change.enabled === null ? null : `turned ${change.enabled ? "on" : "off"}`, change.settings ? "settings changed" : null].filter(Boolean).join(", ");
-      return notice("", `${plural(data.changes.length, "plugin differs", "plugins differ")} from config.yaml:`, [
-        el("ul", { class: "change-list" }, ...data.changes.map((change) =>
-          el("li", {}, el("strong", {}, change.title), el("span", { class: "what" }, ` — ${what(change)}`)))),
+      const count = [settings.length ? plural(settings.length, "setting", "settings") : null,
+        data.changes.length ? plural(data.changes.length, "plugin", "plugins") : null].filter(Boolean).join(" and ");
+      const verb = settings.length + data.changes.length === 1 ? "differs" : "differ";
+      return notice("", `${count} ${verb} from config.yaml:`, [
+        el("ul", { class: "change-list" },
+          ...settings.map((change) =>
+            el("li", {}, el("strong", {}, change.title), change.secret ? el("span", { class: "what" }, " — a secret") : null)),
+          ...data.changes.map((change) =>
+            el("li", {}, el("strong", {}, change.title), el("span", { class: "what" }, ` — ${what(change)}`)))),
       ]);
     }
-    if (data.saved.length) {
-      const names = data.saved.map((plugin) => plugin.title).join(", ");
+    if (data.saved.length || data.saved_settings.length) {
+      const names = [...data.saved_settings, ...data.saved.map((plugin) => plugin.title)].join(", ");
       return notice("", `config.yaml already has the changes made here (${names}). Restart Meshgram and they'll stop showing as changed.`);
     }
     return notice("", "Nothing has been changed in the control panel: this is config.yaml as it is.");
@@ -1570,7 +1746,7 @@
     },
     // A change made from this or another open page.
     onChange(what) {
-      const affected = { radio: ["radio"], channels: ["channels", "plugins"], contacts: ["contacts"], plugins: ["plugins", "channels", "config"] }[what];
+      const affected = { radio: ["radio"], channels: ["channels", "plugins", "settings"], contacts: ["contacts"], plugins: ["plugins", "channels", "config"], settings: ["settings", "config"] }[what];
       if (affected) invalidate(affected);
     },
   };

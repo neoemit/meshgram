@@ -19,8 +19,6 @@ import contextlib
 import copy
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Protocol
@@ -28,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol
 from .config import PluginConfig
 from .plugin import BUILTIN_PLUGINS, load_plugin_class, plugin_key
 from .settings_schema import SettingsError, mask_secrets, restore_secrets, validate
+from .storage import write_private_json
 from .types import Plugin, PluginAction, PluginContext
 
 if TYPE_CHECKING:
@@ -75,20 +74,7 @@ class PluginOverrideStore:
 
     def save(self, overrides: dict[str, dict[str, Any]]) -> None:
         """Replace the file atomically; it may hold secrets, so only its owner can read it."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps({"version": OVERRIDES_VERSION, "plugins": overrides}, indent=2, sort_keys=True)
-        descriptor, temp_path = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(text + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(temp_path, 0o600)
-            os.replace(temp_path, self.path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(temp_path)
-            raise
+        write_private_json(self.path, {"version": OVERRIDES_VERSION, "plugins": overrides})
 
 
 @dataclass(slots=True)

@@ -4,12 +4,16 @@ Every setting, secrets included, lives in that file. The only environment
 variables Meshgram reads say where files are, not how it behaves:
 
 - ``MESHGRAM_CONFIG_PATH``: the config file (default ``config.yaml``).
-- ``MESHGRAM_DATA_DIR``: where persistent state goes (packet_map history and
-  plugin settings changed in the web app).
+- ``MESHGRAM_DATA_DIR``: where persistent state goes (packet_map history, and
+  settings changed in the web app's control panel).
+
+Settings changed in the control panel are saved there and win over config.yaml
+(see ``meshgram.core_settings`` and ``meshgram.plugin_manager``).
 """
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import os
 from dataclasses import dataclass, field
@@ -296,12 +300,17 @@ def _build_meshcore_config(config_data: dict[str, Any]) -> MeshCoreConfig:
     )
 
 
-def _build_web_config(config_data: dict[str, Any], plugins: list[PluginConfig]) -> WebConfig:
-    web_data = _section(config_data, "web")
-    if "web" not in config_data:
-        # Older configs set the web app's address and password on the packet_map plugin.
-        legacy = next((p.settings for p in plugins if canonical_plugin_name(p.name) == "packet_map"), {})
-        web_data = {key: legacy[key] for key in LEGACY_PACKET_MAP_WEB_KEYS if key in legacy}
+def legacy_web_section(config_data: Mapping[str, Any]) -> dict[str, Any]:
+    """Older configs set the web app's address and password on the packet_map plugin."""
+    legacy = next(
+        (p.settings for p in _build_plugins(config_data.get("plugins")) if canonical_plugin_name(p.name) == "packet_map"),
+        {},
+    )
+    return {key: legacy[key] for key in LEGACY_PACKET_MAP_WEB_KEYS if key in legacy}
+
+
+def _build_web_config(config_data: dict[str, Any]) -> WebConfig:
+    web_data = _section(config_data, "web") if "web" in config_data else legacy_web_section(config_data)
 
     defaults = WebConfig()
     return WebConfig(
@@ -340,29 +349,60 @@ def legacy_env_vars(environ: Mapping[str, str] | None = None) -> list[str]:
     return [name for name in LEGACY_ENV_VARS if name in environ]
 
 
-def build_settings(config_data: dict[str, Any], *, config_path: str = DEFAULT_CONFIG_PATH) -> MeshgramSettings:
-    """Validate parsed config data and turn it into settings."""
+def with_overrides(config_data: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of ``config_data`` with ``overrides`` in it: dotted paths ("meshcore.connection.mode") to values."""
+    data = copy.deepcopy(dict(config_data))
+    if any(path.split(".")[0] == "web" for path in overrides) and not isinstance(data.get("web"), dict):
+        # A web section replaces the packet_map plugin's old web settings; keep them in it.
+        data["web"] = legacy_web_section(data)
+    for path, value in overrides.items():
+        *parents, key = path.split(".")
+        node = data
+        for name in parents:
+            if not isinstance(node.get(name), dict):
+                node[name] = {}
+            node = node[name]
+        node[key] = copy.deepcopy(value)
+    return data
+
+
+def build_settings(
+    config_data: dict[str, Any],
+    *,
+    config_path: str = DEFAULT_CONFIG_PATH,
+    strict: bool = True,
+) -> MeshgramSettings:
+    """Validate parsed config data and turn it into settings.
+
+    Not ``strict``: a missing or invalid Telegram bot token or group (which
+    the control panel can supply) comes out empty instead of failing.
+    """
     runtime_data = _section(config_data, "runtime")
     telegram_data = _section(config_data, "telegram")
     chunking_data = _section(config_data, "chunking")
 
     token = _as_optional_string(telegram_data.get("bot_token"))
-    if not token:
+    if not token and strict:
         raise ConfigError(f"telegram.bot_token is required in {config_path}")
 
     group_id_raw = _as_optional_string(telegram_data.get("group_id"))
-    if group_id_raw is None:
-        raise ConfigError(f"telegram.group_id is required in {config_path}")
+    group_id = 0
     try:
-        group_id = int(group_id_raw)
-    except ValueError as exc:
-        raise ConfigError(f"telegram.group_id must be an integer; got {group_id_raw!r}") from exc
+        if group_id_raw is None:
+            raise ConfigError(f"telegram.group_id is required in {config_path}")
+        try:
+            group_id = int(group_id_raw)
+        except ValueError as exc:
+            raise ConfigError(f"telegram.group_id must be an integer; got {group_id_raw!r}") from exc
+    except ConfigError:
+        if strict:
+            raise
 
     _check_backend(config_data)
     plugins = _build_plugins(config_data.get("plugins"))
 
     return MeshgramSettings(
-        telegram_bot_token=token,
+        telegram_bot_token=token or "",
         telegram_group_id=group_id,
         config_path=config_path,
         log_level=str(runtime_data.get("log_level", "INFO")).strip().upper(),
@@ -389,13 +429,26 @@ def build_settings(config_data: dict[str, Any], *, config_path: str = DEFAULT_CO
             abort_on_chunk_failure=_as_bool(chunking_data.get("abort_on_chunk_failure"), True),
             payload_safety_margin_bytes=max(0, _as_int(chunking_data.get("payload_safety_margin_bytes"), 12)),
         ),
-        web=_build_web_config(config_data, plugins),
+        web=_build_web_config(config_data),
         plugins=plugins,
     )
 
 
+def config_path_from_env() -> str:
+    return os.getenv(CONFIG_PATH_ENV) or DEFAULT_CONFIG_PATH
+
+
+def read_config(config_path: str | None = None) -> dict[str, Any]:
+    """config.yaml, parsed (default: ``$MESHGRAM_CONFIG_PATH`` or ``config.yaml``)."""
+    return _read_yaml(config_path or config_path_from_env())
+
+
 def load_settings(config_path: str | None = None) -> MeshgramSettings:
-    """Read settings from ``config_path`` (default: ``$MESHGRAM_CONFIG_PATH`` or ``config.yaml``)."""
+    """Read settings from ``config_path`` (default: ``$MESHGRAM_CONFIG_PATH`` or ``config.yaml``).
+
+    Only config.yaml: changes saved from the control panel aren't in it (see
+    ``meshgram.core_settings.CoreSettings``).
+    """
     if config_path is None:
-        config_path = os.getenv(CONFIG_PATH_ENV) or DEFAULT_CONFIG_PATH
+        config_path = config_path_from_env()
     return build_settings(_read_yaml(config_path), config_path=config_path)

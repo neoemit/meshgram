@@ -132,8 +132,16 @@ class ExportConfigTests(unittest.TestCase):
     def test_a_config_meshgram_cannot_use_is_refused(self):
         with self.assertRaisesRegex(ConfigExportError, "isn't valid YAML"):
             export_config("telegram: [", {})
-        with self.assertRaisesRegex(ConfigExportError, "bot_token is required"):
-            export_config("plugins: []\n", {"trace_me": {"enabled": True}})
+        # The control panel may have the Telegram settings; without them the result says so.
+        export = export_config("plugins: []\n", {"trace_me": {"enabled": True}})
+        self.assertEqual(len(export.problems), 1)
+        self.assertIn("bot_token is required", export.problems[0])
+        export = export_config(
+            "plugins: []\n", {}, settings={"telegram.bot_token": "123:abc", "telegram.group_id": -100123}
+        )
+        self.assertEqual(export.problems, [])
+        self.assertEqual(export.settings_changes, ["telegram.bot_token", "telegram.group_id"])
+        self.assertEqual(export.text, 'telegram:\n  bot_token: 123:abc\n  group_id: -100123\n\nplugins: []\n')
 
     def test_every_example_plugin_survives_a_round_trip(self):
         example = Path(__file__).resolve().parents[1] / "config.example.yaml"

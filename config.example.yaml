@@ -10,9 +10,14 @@
 #
 # Two environment variables say where files are (they aren't settings):
 #   MESHGRAM_CONFIG_PATH  this file (default: config.yaml)
-#   MESHGRAM_DATA_DIR     persistent state: packet_map history and plugin
-#                         settings changed in the web app's control panel
+#   MESHGRAM_DATA_DIR     persistent state: packet_map history and settings
+#                         changed in the web app's control panel
 #                         (default: data; /app/data in Docker)
+#
+# Every setting here can also be changed in the web app's control panel
+# (Settings and Plugins tabs). Those changes are saved in MESHGRAM_DATA_DIR
+# (settings.json, plugins.json) and win over this file until you reset them
+# there; its Config file tab gives you this file with them written in.
 
 telegram:
   # From @BotFather. Required.

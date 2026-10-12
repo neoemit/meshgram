@@ -12,7 +12,7 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 
 - 🔁 Bidirectional message bridge — Telegram ↔ a radio channel
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
-- 🎛️ Web control panel: radio settings, channels (add them by name), contacts, and every plugin — turned on/off and configured live
+- 🎛️ Web control panel: radio settings, channels (add them by name), contacts, every plugin — turned on/off and configured live — and every other `config.yaml` setting (Telegram bot token and group, radio connection, web app, chunking, logging), applied with a restart from the panel
 - 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `packet_map`)
 - 🗺️ Optional MeshMapper observer uploads over MQTT
 - 📡 Live web map of packet propagation with a packet inspector
@@ -246,7 +246,7 @@ If your install path isn't `/opt/meshgram`, edit `WorkingDirectory`, `MESHGRAM_C
 
 ## 🔁 Migrating from `.env`
 
-Older versions read settings from `.env` (and environment variables) as well as `config.yaml`, and the environment won. Now every setting, secrets included, lives in `config.yaml`, which git no longer tracks; `config.example.yaml` is the template. Meshgram ignores the old variables and logs a warning if any are still set. (Settings changed in the web app's control panel are the one exception: they're saved separately, see [Control panel](#-web-app-and-control-panel).)
+Older versions read settings from `.env` (and environment variables) as well as `config.yaml`, and the environment won. Now every setting, secrets included, lives in `config.yaml`, which git no longer tracks; `config.example.yaml` is the template. Meshgram ignores the old variables and logs a warning if any are still set. (Settings changed in the web app's control panel are the one exception: they're saved separately and win over `config.yaml`, see [Control panel](#-web-app-and-control-panel).)
 
 `python -m meshgram.migrate_config` does the merge for you. It applies the old rules (environment over `.env` over YAML; `MESH_*` connection variables go to `meshcore.connection`), inlines the `${VAR}` and `token_env` references of `dm_http_command`, keeps your comments and layout, and writes the result to `config.migrated.yaml` (mode `600`) for you to review. It lists every value it moved and every `.env` entry it left out, and checks that Meshgram can load the result.
 
@@ -284,7 +284,7 @@ Only two remain. They say where files are, not how Meshgram behaves, and nothing
 | Variable | Default | Description |
 |---|---|---|
 | `MESHGRAM_CONFIG_PATH` | `config.yaml` | Path to the config file |
-| `MESHGRAM_DATA_DIR` | `data` (`/app/data` in Docker, `/var/lib/meshgram` with systemd) | Directory for persistent state (`packet_map` history, plugin settings changed in the control panel) |
+| `MESHGRAM_DATA_DIR` | `data` (`/app/data` in Docker, `/var/lib/meshgram` with systemd) | Directory for persistent state (`packet_map` history, settings changed in the control panel) |
 
 ---
 
@@ -566,15 +566,18 @@ web:
 
 **Connections (header):** a status dot for each service Meshgram connects to: the **radio**, the **Telegram** bot and, with the `meshmapper` plugin, the MeshMapper MQTT connections for **publishing** (MQTT ↑) and **subscribing** (MQTT ↓), and the MeshMapper **live feed**. Green is connected, amber is connecting, red is disconnected, and a hollow dot means turned off. Click it for details. If the page loses its connection to Meshgram, the dots turn hollow grey until it reconnects.
 
-**Control panel** (`#control`), in five tabs:
+**Control panel** (`#control`), in six tabs:
 
 - **Radio** — status (name, public key, model and firmware, battery and storage, uptime, noise floor, last RSSI/SNR, airtime, packet counters, clock drift) and actions: send a zero-hop or flood advert, set the radio's clock from the computer, reboot. Forms for the name and position (and whether adverts share it), the LoRa parameters (frequency, bandwidth, spreading factor, coding rate) and TX power, contact auto-add, extra ACKs, telemetry sharing, the path hash size (on firmware that supports it), and the RX delay / airtime factor tuning.
 - **Channels** — the channel slots with each channel's type, hash and which plugins use it. **Add a channel by name**: a hashtag channel (`#local`: the key comes from the name, so everyone who adds the same hashtag shares it), a private channel (paste the key someone shared, or leave it empty for a new random one), or the well-known Public channel. Rename, change a private channel's key, copy a key to share it, remove a channel, and send a message to a channel from the radio.
 - **Contacts** — the radio's contacts with type, key, last advert and route; search and filter by type, reset a route (the next message floods to find a new one), or remove a contact.
 - **Plugins** — every plugin with its state. Turn one on or off, or edit its settings in a form built from the plugin's schema. Saving applies them right away: a plugin that can take the change while running does (the Packet map's shown packet types, for example), the others restart with it. A link like `#control/plugins/packet_map` opens a plugin's settings directly. Secrets (passwords, tokens, API headers) are never sent to the browser: they show as "Saved", and are kept unless you type a new value.
-- **Config file** — your `config.yaml` with the plugin changes made in the panel written into it, to make them the defaults. It lists which plugins differ, shows the changes as a diff (or the whole file), and has **Copy** and **Download** buttons. Only the changed plugins' `enabled` and `settings` are rewritten: comments, quoting and layout stay as they are, and the result is checked by loading it back the way Meshgram does. Replace `config.yaml` with it and restart Meshgram.
+- **Settings** — everything else in `config.yaml`, one card per section: **Telegram** (bot token, group ID, captions, sender prefix), **Radio** (connection: serial device, baud rate, TCP host/port or Bluetooth address/PIN; bridge channel, contact names, echo fallback), **Web app** (address, port, password, title, map tiles), **Message chunking** and **Logging**. Serial devices found on the machine are suggested. A new bot token or group is checked with Telegram before it's saved. These settings are read when Meshgram starts, so a saved change shows *Restart to apply* until the **Restart now** button (or a restart of the service/container) brings Meshgram back with it; the page waits for it and reloads. Secrets (bot token, web password, Bluetooth PIN) are never sent to the browser.
+- **Config file** — your `config.yaml` with the settings and plugin changes made in the panel written into it, to make them the defaults. It lists which settings and plugins differ, shows the changes as a diff (or the whole file), and has **Copy** and **Download** buttons. Only what changed is rewritten: comments, quoting and layout stay as they are, and the result is checked by loading it back the way Meshgram does. Replace `config.yaml` with it and restart Meshgram.
 
-Changes to the radio are stored on the radio itself. Plugin changes are saved in `MESHGRAM_DATA_DIR/plugins.json` (mode `600`) and win over `config.yaml` until you click **Reset to config.yaml** on the plugin; a plugin changed this way is tagged *Changed here*. config.yaml is never rewritten (it holds secrets and Docker mounts it read-only); the **Config file** tab gives you the file to put in its place instead. Once `config.yaml` says the same as a saved change, Meshgram drops that change from `plugins.json` when it starts.
+Changes to the radio are stored on the radio itself. Plugin changes are saved in `MESHGRAM_DATA_DIR/plugins.json`, other settings in `MESHGRAM_DATA_DIR/settings.json` (both mode `600`, as they may hold secrets), and they win over `config.yaml` until you click **Reset to config.yaml** on the plugin or settings section; what's changed this way is tagged *Changed here*. config.yaml is never rewritten (it holds secrets and Docker mounts it read-only); the **Config file** tab gives you the file to put in its place instead. Once `config.yaml` says the same as a saved change, Meshgram drops that change when it starts.
+
+`telegram.bot_token` and `telegram.group_id` may even be left out of `config.yaml` when they're set in the panel (`settings.json` has them then). Meshgram can't start without them, though, so a fresh install still needs them in `config.yaml` once to reach the panel.
 
 Without a browser, the same file comes from `GET /api/config.yaml`, for example on the Meshgram host:
 
@@ -591,7 +594,7 @@ curl -fsS -u ":$PASSWORD" http://127.0.0.1:8080/api/config.yaml -o config.new.ya
 
 The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access. It has light and dark themes, works on phones, and remembers the map position, hidden node types, table sort order, theme and control panel tab across refreshes. The view is part of the URL (`#map`, `#messages`, `#control/channels`, …), so refresh and Back work.
 
-**API.** The panel uses a small JSON API under `/api` (radio, channels, contacts, plugins) plus a Server-Sent Events stream at `/api/events`; see the docstring of `meshgram/web/api.py` for the endpoints.
+**API.** The panel uses a small JSON API under `/api` (radio, channels, contacts, plugins, settings, restart) plus a Server-Sent Events stream at `/api/events`; see the docstring of `meshgram/web/api.py` for the endpoints.
 
 ---
 
@@ -633,6 +636,9 @@ Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji 
 ### A plugin ignores what's in `config.yaml`
 - It was changed in the control panel: its card says *Changed here*. Click **Reset to config.yaml** in its settings, or delete its entry from `MESHGRAM_DATA_DIR/plugins.json` while Meshgram is stopped. To keep the change instead, put it in `config.yaml` from the **Config file** tab.
 
+### A setting ignores what's in `config.yaml`
+- It was changed in the control panel's **Settings** tab: its section says *Changed here*. Click **Reset to config.yaml** there and restart, or delete its entry from `MESHGRAM_DATA_DIR/settings.json` while Meshgram is stopped (also the way back if a change there keeps Meshgram from starting or the web app from being reachable).
+
 ### Sender label shows the raw node ID
 - Expected when peer metadata is missing.
 - Set `meshcore.contact_name_overrides` for deterministic labels.
@@ -670,7 +676,8 @@ meshgram/
 │   ├── app.py
 │   ├── config.py
 │   ├── migrate_config.py         # one-off .env → config.yaml migration
-│   ├── config_export.py          # config.yaml with the control panel's plugin changes
+│   ├── core_settings.py          # settings outside the plugins changed in the control panel (settings.json)
+│   ├── config_export.py          # config.yaml with the control panel's changes
 │   ├── yaml_round_trip.py        # editing YAML with its comments and layout kept
 │   ├── plugin.py                 # BasePlugin, built-in plugin registry
 │   ├── plugin_manager.py         # runs plugins; runtime on/off and settings (plugins.json)

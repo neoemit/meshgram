@@ -16,7 +16,12 @@
     GET    /api/plugins                               every plugin with its schema and (masked) settings
     PATCH  /api/plugins/{name}                        {"enabled"?, "settings"?}
     DELETE /api/plugins/{name}/overrides              back to config.yaml
-    GET    /api/config                                config.yaml with the plugin changes in it, what
+    GET    /api/settings                              Meshgram's own settings (config.yaml but the plugins)
+                                                      by section, with their schemas (secrets masked)
+    PATCH  /api/settings/{section}                    the section's settings -> 200 (used after a restart)
+    DELETE /api/settings/{section}/overrides          back to config.yaml (after a restart)
+    POST   /api/restart                               restart Meshgram -> 202
+    GET    /api/config                                config.yaml with the changes made here in it, what
                                                       changes, and a diff (secrets included)
     GET    /api/config.yaml                           the same file, as a download
 
@@ -28,12 +33,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from ..config import MeshgramSettings
 from ..config_export import ConfigExport, ConfigExportError, export_config
+from ..core_settings import LEAVES, SCHEMA, CoreSettings, UnknownSectionError
 from ..plugin import CHANNEL_FORMAT
 from ..plugin_manager import PluginManager, UnknownPluginError
 from ..radio_admin import RadioAdmin, RadioAdminError
@@ -44,6 +51,9 @@ from ..types import MeshPacketRef, SendMeshAction
 from .server import HttpError, Request, Response, WebServer, json_response, no_content
 
 LOGGER = logging.getLogger(__name__)
+
+# Tells the control panel when a restart has happened: a new process, a new time.
+STARTED_AT = time.time()
 
 SendMesh = Callable[[SendMeshAction], Awaitable[MeshPacketRef]]
 
@@ -124,6 +134,8 @@ def _wrap(handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Reques
             raise HttpError(422, "Some settings aren't valid", details) from None
         except UnknownPluginError:
             raise HttpError(404, "There's no such plugin") from None
+        except UnknownSectionError:
+            raise HttpError(404, "There's no such settings section") from None
 
     return wrapped
 
@@ -135,6 +147,8 @@ def register_control_api(
     admin: RadioAdmin,
     plugins: PluginManager,
     send_mesh: SendMesh,
+    core: Optional[CoreSettings] = None,
+    restart: Optional[Callable[[], None]] = None,
 ) -> None:
     def announce(what: str) -> None:
         web.events.publish({"type": "control", "what": what})
@@ -281,6 +295,42 @@ def register_control_api(
         announce("plugins")
         return json_response(plugin)
 
+    # --- Meshgram's own settings ------------------------------------------------------------------
+
+    def settings_payload(described: dict[str, Any]) -> dict[str, Any]:
+        return {**described, "can_restart": restart is not None, "started_at": STARTED_AT}
+
+    if core is not None:
+
+        @route("GET", "/api/settings")
+        async def get_settings(request: Request) -> Response:
+            return json_response(settings_payload(core.describe()))
+
+        @route("PATCH", "/api/settings/{section}")
+        async def patch_settings(request: Request) -> Response:
+            try:
+                described = await core.update(request.params["section"], _body(request))
+            except OSError as exc:
+                raise HttpError(500, f"Couldn't save the change: {exc}") from None
+            announce("settings")
+            return json_response(settings_payload(described))
+
+        @route("DELETE", "/api/settings/{section}/overrides")
+        async def delete_settings_overrides(request: Request) -> Response:
+            try:
+                described = await core.reset(request.params["section"])
+            except OSError as exc:
+                raise HttpError(500, f"Couldn't save the change: {exc}") from None
+            announce("settings")
+            return json_response(settings_payload(described))
+
+    if restart is not None:
+
+        @route("POST", "/api/restart")
+        async def post_restart(request: Request) -> Response:
+            restart()
+            return json_response({"restarting": True}, 202)
+
     # --- Config file ----------------------------------------------------------------------------
 
     async def exported_config(request: Request) -> ConfigExport:
@@ -291,7 +341,8 @@ def register_control_api(
         except OSError as exc:
             raise HttpError(409, f"Can't read {path}: {exc.strerror or exc}") from None
         try:
-            return await asyncio.to_thread(export_config, text, plugins.overrides(), path=path)
+            settings_overrides = core.overrides() if core is not None else {}
+            return await asyncio.to_thread(export_config, text, plugins.overrides(), path=path, settings=settings_overrides)
         except ConfigExportError as exc:
             raise HttpError(409, str(exc)) from None
 
@@ -300,6 +351,14 @@ def register_control_api(
             return plugins.describe(name)["title"]
         except UnknownPluginError:
             return name  # Added to config.yaml since Meshgram started.
+
+    def setting_title(path: str) -> str:
+        """ "Radio › Connection › Serial device" for meshcore.connection.serial_device."""
+        titles, schema = [], SCHEMA
+        for key in path.split("."):
+            schema = (schema.get("properties") or {}).get(key) or {}
+            titles.append(schema.get("title") or key)
+        return " › ".join(titles)
 
     @route("GET", "/api/config")
     async def get_config(request: Request) -> Response:
@@ -312,8 +371,13 @@ def register_control_api(
                 {"name": change.name, "title": plugin_title(change.name), "enabled": change.enabled, "settings": change.settings}
                 for change in export.changes
             ],
+            "settings_changes": [
+                {"path": path, "title": setting_title(path), "secret": bool(LEAVES[path].get("writeOnly"))}
+                for path in export.settings_changes
+            ],
             # Plugins with changes saved in the data directory (config.yaml may have them already).
             "saved": [{"name": name, "title": plugin_title(name)} for name in plugins.overrides()],
+            "saved_settings": [setting_title(path) for path in (core.overrides() if core is not None else {})],
             "problems": export.problems,
         })
 
