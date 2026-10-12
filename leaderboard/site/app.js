@@ -123,8 +123,9 @@
     }[kind];
   }
 
+  // Numbers count up when they change; the first time they're just shown.
   function countUp(node, value) {
-    const from = state.shown.has(node) ? state.shown.get(node) : 0;
+    const from = state.shown.has(node) ? state.shown.get(node) : value;
     state.shown.set(node, value);
     if (from === value || reducedMotion.matches || document.hidden) {
       node.textContent = value.toLocaleString();
@@ -275,11 +276,6 @@
     if (left <= 0) refreshSoon();
   }
 
-  function renderOffline() {
-    const empty = $("board-empty");
-    empty.hidden = false;
-    empty.textContent = "The leaderboard can't be reached right now. It'll appear as soon as the signal is back.";
-  }
 
   // --- Data ---------------------------------------------------------------------------------------------
 
@@ -290,6 +286,8 @@
     state.data = data;
     state.updatedAt = Date.now();
     render(fresh);
+    $("offline").hidden = true;
+    document.body.classList.remove("loading");
     if (fresh.size) {
       const names = data.leaderboard.filter((entry) => fresh.has(keyOf(entry))).map((entry) => entry.name);
       const text = names.length === 1 ? `📡 ${names[0]} just checked in!` : `📡 ${names.length} new check-ins: ${names.join(", ")}`;
@@ -311,7 +309,7 @@
     } catch (err) {
       state.failures += 1;
       setSignal("lost");
-      if (!state.data) renderOffline();
+      if (!state.data) $("offline").hidden = false;
     }
     const delay = state.failures
       ? Math.min(MAX_RETRY_SECONDS, state.refreshSeconds * 2 ** (state.failures - 1))

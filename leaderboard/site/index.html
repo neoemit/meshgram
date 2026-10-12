@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MeshCore check-in leaderboard</title>
+  <title>Leaderboard</title>
   <meta name="description" content="Weekly mesh radio check-ins: who's on the air, this week's roll call and the longest streaks.">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#05070d" media="(prefers-color-scheme: dark)">
@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="styles.css">
   <script src="app.js" defer></script>
 </head>
-<body>
+<body class="loading">
   <canvas class="mesh-bg" id="mesh-bg" aria-hidden="true"></canvas>
   <div class="glow glow-a" aria-hidden="true"></div>
   <div class="glow glow-b" aria-hidden="true"></div>
@@ -26,7 +26,7 @@
         <path class="wave w1" d="M11.2 6.6a6.6 6.6 0 0 0 0 8.8M20.8 6.6a6.6 6.6 0 0 1 0 8.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
         <path class="wave w2" d="M7.6 3.6a11 11 0 0 0 0 14.8M24.4 3.6a11 11 0 0 1 0 14.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
       </svg>
-      <span class="brand-text" id="brand-name">Mesh<span>gram</span></span>
+      <span class="brand-text" id="brand-name"></span>
     </a>
     <div class="signal" id="signal" data-state="connecting" role="status" aria-live="polite">
       <span class="signal-dot" aria-hidden="true"></span>
@@ -36,20 +36,20 @@
 
   <main class="page" id="page">
     <section class="hero" aria-labelledby="title">
-      <p class="eyebrow" id="eyebrow">Weekly mesh check-in</p>
-      <h1 id="title">MeshCore Monday</h1>
-      <p class="lede" id="lede">Post the keyword on the channel to check in, keep your streak alive week after week, and climb the board.</p>
+      <p class="eyebrow" id="eyebrow"></p>
+      <h1 id="title"></h1>
+      <p class="lede" id="lede"></p>
       <div class="hero-actions">
         <button class="keyword" id="keyword" type="button" title="Copy the check-in keyword">
           <span class="keyword-label">Send</span>
-          <span class="keyword-text" id="keyword-text">#MeshCoreMonday</span>
+          <span class="keyword-text" id="keyword-text"></span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>
         </button>
         <div class="air" id="air" data-open="false">
           <span class="air-lamp" aria-hidden="true"></span>
           <div class="air-body">
-            <span class="air-label" id="air-label">Next check-in</span>
-            <span class="air-time" id="air-time" aria-live="off">— — —</span>
+            <span class="air-label" id="air-label"></span>
+            <span class="air-time" id="air-time" aria-live="off"></span>
           </div>
         </div>
       </div>
@@ -58,23 +58,23 @@
     <section class="stats" aria-label="This week in numbers">
       <article class="stat stat-green">
         <span class="stat-label">Checked in this week</span>
-        <strong class="stat-value" id="stat-week">0</strong>
-        <span class="stat-sub" id="stat-week-sub">&nbsp;</span>
+        <strong class="stat-value" id="stat-week"></strong>
+        <span class="stat-sub" id="stat-week-sub"></span>
       </article>
       <article class="stat stat-flame">
         <span class="stat-label">Active streaks</span>
-        <strong class="stat-value" id="stat-active">0</strong>
-        <span class="stat-sub" id="stat-active-sub">&nbsp;</span>
+        <strong class="stat-value" id="stat-active"></strong>
+        <span class="stat-sub" id="stat-active-sub"></span>
       </article>
       <article class="stat stat-amber">
         <span class="stat-label">Longest streak</span>
-        <strong class="stat-value" id="stat-longest">0</strong>
-        <span class="stat-sub" id="stat-longest-sub">&nbsp;</span>
+        <strong class="stat-value" id="stat-longest"></strong>
+        <span class="stat-sub" id="stat-longest-sub"></span>
       </article>
       <article class="stat stat-cyan">
         <span class="stat-label">Check-ins all time</span>
-        <strong class="stat-value" id="stat-total">0</strong>
-        <span class="stat-sub" id="stat-total-sub">&nbsp;</span>
+        <strong class="stat-value" id="stat-total"></strong>
+        <span class="stat-sub" id="stat-total-sub"></span>
       </article>
     </section>
 
@@ -89,7 +89,7 @@
     <section class="panel" aria-labelledby="rollcall-title">
       <div class="panel-head">
         <h2 id="rollcall-title">This week's roll call</h2>
-        <span class="panel-note" id="rollcall-note">In order of check-in</span>
+        <span class="panel-note" id="rollcall-note"></span>
       </div>
       <ol class="rollcall" id="rollcall"></ol>
     </section>
@@ -118,9 +118,13 @@
   </main>
 
   <footer class="footer">
-    <p id="footer-text">Live from the mesh via Meshgram.</p>
+    <p id="footer-text"></p>
   </footer>
 
+  <div class="offline" id="offline" role="alert" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4" opacity=".35"/><path d="m4 4 16 16"/></svg>
+    <p><strong>No signal from the leaderboard right now.</strong> It appears as soon as it's back; this page keeps trying.</p>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <p class="sr-only" id="announcer" aria-live="polite"></p>
 </body>

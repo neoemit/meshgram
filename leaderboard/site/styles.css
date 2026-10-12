@@ -88,6 +88,21 @@ button, input { font: inherit; color: inherit; }
 .glow-b { width: 360px; height: 360px; top: -80px; left: 20%; background: var(--green); opacity: calc(.18 * var(--glow-strength)); animation: drift 22s ease-in-out infinite alternate-reverse; }
 @keyframes drift { to { transform: translate(-60px, 40px) scale(1.15); } }
 
+/* --- Loading: nothing but the frame until the first leaderboard is in ------------------------------- */
+
+.page, .footer, .brand-text { transition: opacity .45s ease; }
+.loading .page, .loading .footer, .loading .brand-text { visibility: hidden; opacity: 0; }
+.offline {
+  position: fixed; left: 50%; top: 42%; z-index: 5; transform: translate(-50%, -50%);
+  display: grid; justify-items: center; gap: 12px; width: min(420px, calc(100vw - 32px)); padding: 24px;
+  border: 1px solid var(--panel-border); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow);
+  color: var(--text-2); text-align: center;
+}
+.offline[hidden] { display: none; }
+.offline svg { width: 36px; height: 36px; fill: none; stroke: var(--amber); stroke-width: 2; stroke-linecap: round; }
+.offline p { margin: 0; }
+.offline strong { display: block; color: var(--text); }
+
 /* --- Top bar ------------------------------------------------------------------------------------ */
 
 .topbar {
