@@ -21,6 +21,7 @@ BUILTIN_PLUGINS: dict[str, str] = {
     "trace_me": "meshgram.plugins.trace_me:TraceMePlugin",
     "meshmapper": "meshgram.plugins.meshmapper:MeshMapperPlugin",
     "packet_map": "meshgram.plugins.packet_map:PacketMapPlugin",
+    "check_in": "meshgram.plugins.check_in:CheckInPlugin",
 }
 
 # Schema keyword the control panel understands: an integer that is a radio

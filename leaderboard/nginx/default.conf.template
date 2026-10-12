@@ -1,0 +1,88 @@
+# The leaderboard site: static files, plus the leaderboard proxied from Meshgram.
+#
+# The image's entrypoint renders this file with the container's environment
+# (envsubst, only MESHGRAM_* and LEADERBOARD_* variables; see docker-compose.yml)
+# into /etc/nginx/conf.d/default.conf. nginx's own $variables are left alone.
+
+# Leaderboards fetched from Meshgram, shared by every visitor for
+# LEADERBOARD_CACHE_SECONDS, and served stale while Meshgram can't be reached.
+proxy_cache_path /tmp/nginx-cache levels=1 keys_zone=leaderboard:1m max_size=10m inactive=7d use_temp_path=off;
+
+# MESHGRAM_URL without a trailing slash.
+map "${MESHGRAM_URL}" $meshgram_url {
+    "~^(?<base>.+?)/*$" $base;
+}
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+    charset utf-8;
+    server_tokens off;
+    absolute_redirect off;
+
+    # Meshgram's host name is looked up when it's needed (Docker's DNS by default), so
+    # the site starts, and keeps serving the last leaderboard, while Meshgram is away.
+    resolver ${LEADERBOARD_RESOLVER} valid=30s ipv6=off;
+    resolver_timeout 5s;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+
+    location = /api/leaderboard {
+        limit_except GET { deny all; }
+
+        # The token stays here: browsers only ever talk to this site.
+        proxy_pass $meshgram_url/api/plugins/check_in/leaderboard;
+        proxy_http_version 1.1;
+        proxy_set_header Authorization "Bearer ${MESHGRAM_API_TOKEN}";
+        proxy_set_header Accept "application/json";
+        proxy_set_header Cookie "";
+        proxy_hide_header WWW-Authenticate;
+        proxy_hide_header Set-Cookie;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+
+        # https:// Meshgram URLs: send the host name (SNI) and check its certificate.
+        proxy_ssl_server_name on;
+        proxy_ssl_verify ${MESHGRAM_TLS_VERIFY};
+        proxy_ssl_verify_depth 4;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+
+        proxy_cache leaderboard;
+        proxy_cache_key "leaderboard";
+        proxy_cache_valid 200 ${LEADERBOARD_CACHE_SECONDS}s;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        proxy_cache_lock_timeout 10s;
+        # Meshgram says no-store (it's live data); this site decides how long to share it.
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+    }
+
+    location = /config.json {
+        default_type application/json;
+        expires -1;
+        return 200 '{"refreshSeconds": ${LEADERBOARD_REFRESH_SECONDS}}';
+    }
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        limit_except GET { deny all; }
+        try_files $uri $uri/ =404;
+        expires 10m;
+    }
+}

@@ -159,6 +159,32 @@ plugins:
       persist: true
       db_path: packet_map.sqlite3
 
+  - name: check_in  # "check-in" also works
+    enabled: false
+    settings:
+      # Weekly check-ins: a channel message containing the keyword (any case)
+      # on a check-in day counts, heard by the radio or by other MeshMapper
+      # observers (those need the subscriber account: the live feed has no
+      # message text). The radio replies with the node's rank this week, its
+      # streak (consecutive weeks) and the number of participants so far.
+      channel: 0              # radio channel slot (0 is usually Public)
+      keyword: "#MeshCoreMonday"
+      title: "MeshCore Monday"
+      days: [0]               # weekdays that count, 0 = Monday ... 6 = Sunday; [] = any day
+      timezone: UTC           # IANA name, e.g. Europe/Rome; where days and weeks begin
+      reply: true
+      reply_to_observed: true # also reply to check-ins only observers heard
+      # Placeholders: {title} {name} {rank} {streak} {streak_weeks} {participants}
+      # {participants_label} {total} {keyword}. Split between lines if longer
+      # than one radio message.
+      reply_template: "📟 {title}\n🏅 {name} is #{rank} to check in this week!\n🔥 Streak: {streak_weeks}\n👥 {participants_label} so far."
+      reply_cooldown_seconds: 30
+      # Lets another site (the leaderboard in leaderboard/) read
+      # /api/plugins/check_in/leaderboard with "Authorization: Bearer <token>".
+      # api_token: ""
+      # Participants and every check-in, inside MESHGRAM_DATA_DIR (/app/data in Docker).
+      db_path: check_in.sqlite3
+
   - name: dm_http_command
     enabled: false
     settings:

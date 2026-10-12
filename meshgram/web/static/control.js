@@ -35,6 +35,8 @@
     radioState: null,
     allows: null,
     focusPlugin: null,         // plugin whose settings a #control/plugins/<name> link opened
+    openPanels: new Set(),     // plugins whose own panel (registerPluginPanel) is open
+    panelViews: new Map(),     // plugin name -> { container, handle } of its open panel
     configView: null,          // "diff" or "file": what the config file section shows
   };
   let uid = 0;
@@ -959,6 +961,7 @@
     const changed = plugin.overridden.length
       ? el("span", { class: "tag", title: "Saved by Meshgram in its data directory; config.yaml says otherwise" }, "Changed here")
       : null;
+    const [panelToggle, panelBody] = pluginPanelParts(plugin);
     const article = el("article", { class: "card plugin-card", "data-plugin": plugin.name, "aria-labelledby": `${settingsId}-title` },
       el("div", { class: "card-head plugin-head" },
         el("div", { class: "plugin-title" },
@@ -969,10 +972,45 @@
         toggle),
       plugin.description ? el("p", { class: "desc" }, plugin.description) : null,
       plugin.error ? notice("bad", plugin.error) : null,
-      disclosure,
+      panelToggle ? el("div", { class: "plugin-disclosures" }, disclosure, panelToggle) : disclosure,
       open ? pluginSettings(plugin, settingsId) : null);
     disableIfReadOnly(article);
+    // After disableIfReadOnly: the panel keeps what doesn't change anything (a search box) usable.
+    if (panelBody) article.append(panelBody);
     return article;
+  }
+
+  // A plugin's own panel (static/<plugin>.js, see registerPluginPanel), shown while it runs.
+  function pluginPanelParts(plugin) {
+    const panel = pluginPanels.get(plugin.name);
+    if (!panel || !plugin.running) {
+      closePluginPanel(plugin.name);
+      return [null, null];
+    }
+    const open = ui.openPanels.has(plugin.name);
+    const id = `plugin-panel-${plugin.name.replace(/\W/g, "_")}`;
+    const toggle = el("button", { class: "disclosure", type: "button", "aria-expanded": String(open), "aria-controls": id, html: `${icon("chevron")}<span>${esc(panel.title)}</span>` });
+    toggle.addEventListener("click", () => {
+      if (ui.openPanels.has(plugin.name)) closePluginPanel(plugin.name);
+      else ui.openPanels.add(plugin.name);
+      render("plugins");
+    });
+    if (!open) return [toggle, null];
+    let view = ui.panelViews.get(plugin.name);
+    if (!view) {
+      const container = el("div", { class: "plugin-panel", id });
+      view = { container, handle: panel.render(container, panelKit) || {} };
+      ui.panelViews.set(plugin.name, view);
+    }
+    return [toggle, view.container];
+  }
+
+  function closePluginPanel(name) {
+    ui.openPanels.delete(name);
+    const view = ui.panelViews.get(name);
+    if (!view) return;
+    ui.panelViews.delete(name);
+    if (view.handle.destroy) view.handle.destroy();
   }
 
   function pluginSettings(plugin, id) {
@@ -1206,14 +1244,17 @@
     const secret = Boolean(schema.writeOnly);
     const stored = secret && value === SECRET_MASK;
     let cleared = false;
-    const input = el("input", {
-      type: secret ? "password" : "text",
-      value: stored ? null : value === undefined ? null : String(value),
+    // x-multiline: several lines of text (a message template, say).
+    const multiline = Boolean(schema["x-multiline"]) && !secret;
+    const input = el(multiline ? "textarea" : "input", {
+      type: multiline ? null : secret ? "password" : "text",
+      rows: multiline ? 5 : null,
       autocomplete: secret ? "new-password" : "off",
       spellcheck: "false",
       maxlength: schema.maxLength,
       placeholder: stored ? "Saved; type to replace it" : schema.default !== undefined ? String(schema.default) : null,
     });
+    input.value = stored || value === undefined ? "" : String(value);
     let control = input;
     if (!secret && Array.isArray(schema.examples) && schema.examples.length) {
       // Suggestions (serial devices found, say); anything else can still be typed.
@@ -1278,7 +1319,9 @@
     const titles = items["x-enum-titles"] || [];
     const inverted = Boolean(schema["x-inverted"]);
     const known = (raw) => items.enum.find((option) => String(option).toLowerCase() === String(raw).trim().toLowerCase());
-    const listed = new Set((Array.isArray(value) ? value : []).map(known).filter((option) => option !== undefined));
+    // Not set: what it defaults to is ticked.
+    const defaults = Array.isArray(schema.default) ? schema.default : [];
+    const listed = new Set((Array.isArray(value) ? value : defaults).map(known).filter((option) => option !== undefined));
     const inputs = items.enum.map((option, index) => {
       const input = el("input", { type: "checkbox", value: String(option), checked: (inverted ? !listed.has(option) : listed.has(option)) || null });
       return { option, input, chip: el("label", { class: "check-chip" }, input, titles[index] || String(option)) };
@@ -1300,7 +1343,12 @@
       el: node,
       get: () => {
         const picked = inputs.filter(({ input }) => input.checked !== inverted).map(({ option }) => option);
-        return picked.length ? picked : undefined;
+        // Left alone at its default: leave it out, so nothing changes needlessly.
+        if (value === undefined && Array.isArray(schema.default)
+          && picked.length === defaults.length && picked.every((option) => defaults.includes(option))) return undefined;
+        if (picked.length) return picked;
+        // x-keep-empty: nothing ticked means something (every day, say), not "the default".
+        return schema["x-keep-empty"] ? [] : undefined;
       },
     };
   }
@@ -1714,7 +1762,21 @@
     selectSection(SECTIONS[(next + SECTIONS.length) % SECTIONS.length], { focus: true });
   });
 
+  // Plugins with a panel of their own register it from their script (static/<plugin>.js).
+  const pluginPanels = new Map();
+  // What a plugin's panel gets to build with: the control panel's own helpers.
+  const panelKit = {
+    api, toast, confirmDialog, act, card, button, field, notice, keyRow, selectInput, numberInput,
+    disableIfReadOnly, copyText, canChange, nextId, fmtNumber,
+  };
+
   window.MeshgramControl = {
+    // ``panel``: { title, render(container, kit) -> { refresh?(), destroy?() } }. Shown in the
+    // plugin's card while it runs; refresh() is called on {"type":"control","what":<name>} events.
+    registerPluginPanel(name, panel) {
+      pluginPanels.set(name, panel);
+      if (ui.data.plugins) render("plugins");
+    },
     // The view became visible.
     show() {
       renderReadOnly();
@@ -1748,6 +1810,8 @@
     onChange(what) {
       const affected = { radio: ["radio"], channels: ["channels", "plugins", "settings"], contacts: ["contacts"], plugins: ["plugins", "channels", "config"], settings: ["settings", "config"] }[what];
       if (affected) invalidate(affected);
+      const view = ui.panelViews.get(what);
+      if (view && view.handle.refresh) view.handle.refresh();
     },
   };
 

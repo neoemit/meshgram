@@ -1,0 +1,43 @@
+# The public check-in leaderboard, deployed on its own: a static page plus the
+# leaderboard proxied (and cached) from Meshgram's check_in plugin.
+#
+#   cp .env.example .env    # set MESHGRAM_URL and MESHGRAM_API_TOKEN
+#   docker compose up -d
+#
+# Stateless: everything it shows lives in Meshgram.
+name: meshgram-leaderboard
+
+services:
+  leaderboard:
+    # nginx's stable line, running as an unprivileged user (uid 101) on port 8080.
+    image: nginxinc/nginx-unprivileged:1.30-alpine
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8090}:8080"
+    environment:
+      MESHGRAM_URL: ${MESHGRAM_URL:?Set MESHGRAM_URL in .env (where Meshgram's web app is, e.g. http://192.168.1.20:8080)}
+      MESHGRAM_API_TOKEN: ${MESHGRAM_API_TOKEN:?Set MESHGRAM_API_TOKEN in .env (the check_in plugin's api_token)}
+      MESHGRAM_TLS_VERIFY: ${MESHGRAM_TLS_VERIFY:-on}
+      LEADERBOARD_REFRESH_SECONDS: ${REFRESH_SECONDS:-30}
+      LEADERBOARD_CACHE_SECONDS: ${CACHE_SECONDS:-15}
+      LEADERBOARD_RESOLVER: ${RESOLVER:-127.0.0.11}
+      # Only these variables are put into the nginx configuration.
+      NGINX_ENVSUBST_FILTER: "^(MESHGRAM|LEADERBOARD)_"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    # Nothing in the image is written to; the rendered configuration and the cache live in memory.
+    read_only: true
+    tmpfs:
+      - /tmp:uid=101,gid=101,mode=0755
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=0755
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

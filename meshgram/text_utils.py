@@ -2,10 +2,21 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Any
 
 
 def utf8_len(value: str) -> int:
     return len(value.encode("utf-8"))
+
+
+def channel_message_max_bytes(chunking: Any, payload_limit: int) -> int:
+    """The longest channel message (UTF-8 bytes) that goes out in one packet, as the bridge sizes them.
+
+    ``chunking`` is the ``chunking`` section of the settings (``ChunkingConfig``).
+    """
+    limit = payload_limit - max(0, chunking.payload_safety_margin_bytes)
+    caps = [cap for cap in (chunking.max_chunk_bytes, chunking.broadcast_max_chunk_bytes) if cap > 0]
+    return max(1, min([limit, *caps]))
 
 
 def split_text_by_bytes(text: str, max_bytes: int) -> list[str]:

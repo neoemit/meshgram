@@ -13,7 +13,8 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 - 🔁 Bidirectional message bridge — Telegram ↔ a radio channel
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
 - 🎛️ Web control panel: radio settings, channels (add them by name), contacts, every plugin — turned on/off and configured live — and every other `config.yaml` setting (Telegram bot token and group, radio connection, web app, chunking, logging), applied with a restart from the panel
-- 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `packet_map`)
+- 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `packet_map`, `check_in`)
+- 🏅 Weekly check-ins ("#MeshCoreMonday") with streaks, a leaderboard API and a [public leaderboard site](leaderboard/)
 - 🗺️ Optional MeshMapper observer uploads over MQTT
 - 📡 Live web map of packet propagation with a packet inspector
 - 🐳 First-class Docker deployment with platform-specific overlays
@@ -548,6 +549,51 @@ Notes:
 - If the file is unreadable (for example corrupt), it's renamed to `packet_map.sqlite3.corrupt-<timestamp>` and a new one is started. If the directory isn't writable, the error is logged and the map runs without persistence.
 - The database contains decrypted channel messages and node positions, like the page itself, so protect the data directory accordingly.
 
+### `check_in` — weekly check-ins with streaks and a leaderboard
+
+Gamifies a weekly ritual: every Monday, nodes post `#MeshCoreMonday` on the Public channel. Any channel message on the check-in channel that **contains the keyword** (any case, anywhere in the text) on a **check-in day** is a check-in, whether your radio heard it or another MeshMapper observer did. The radio answers on the channel:
+
+```text
+📟 MeshCore Monday
+🏅 LMB-T is #13 to check in this week!
+🔥 Streak: 15 weeks
+👥 13 participants so far.
+```
+
+- **Rank** is the order of this week's first check-ins; the **streak** counts consecutive weeks with a check-in; **participants** is how many nodes have checked in this week. Checking in again gives the same rank with the current count. Weeks run Monday to Sunday in the configured `timezone`; on other days than `days` the keyword is ignored. A streak survives until a check-in day passes without a check-in.
+- **Who checked in.** MeshCore channel messages carry the sender's *name* (`"LMB-T: …"`), not its key, so a name is matched to the one node that advertises it: adverts your radio hears, adverts in observers' packets, and the radio's contacts. A name no node has (yet), or that several nodes share, is counted under the name ("name only") and linked to the node's key once its advert is heard; you can also link it by hand. A linked participant goes by its node's latest advertised name.
+- **Observers.** With the `meshmapper` plugin and a MeshMapper **subscriber account**, check-ins heard by other observers in your region count too (MeshMapper's free live feed has no message text, so it can't reveal them). They're decrypted with your radio's key for the channel. The same message heard by your radio and several observers counts, and is answered, once. Turn off `reply_to_observed` to count them without replying.
+- **Control panel.** Besides the settings, the plugin's card has a **Check-ins** panel: everyone with streak, best streak, total, this week's rank and last check-in; per participant, a 26-week grid to add or remove check-ins, set a streak, rename, link to a node, the check-ins on record, and delete. **Import…** brings in data from another check-in database and **CSV / JSON** export it (in the same format).
+- **Import format:** one record per node with its key (or a key prefix, or just a name), its current `streak`, and optionally its `total` check-ins and the date of its `last_check_in`. Each record gives the node `streak` consecutive weekly check-ins up to that date (or the date you pick); `total` adds the earlier check-ins on top. CSV with a header row (`node_id,name,streak,total,last_check_in`) or JSON (`[{...}]` or `{"records": [...]}`). Preview first: nothing is imported while any record has a problem. *Replace* deletes everything first.
+- **Leaderboard API.** `GET /api/plugins/check_in/leaderboard` returns the standings, best streak first: each node's `id` (public key), `hash` (first byte), `name`, `streak`, `best_streak`, `total_check_ins`, `last_check_in`, `checked_in_this_week`, `week_rank` and `resolved` (false for name-only participants), plus the week, whether the check-in window is open (and when it opens or closes) and this week's participant count. No individual check-ins are exposed. Set `api_token` and send `Authorization: Bearer <token>` to read it without the web app's password; with a token set, requests without it (or the password) are refused even when the web app has no password. The [leaderboard site](leaderboard/) shows it.
+- **Persistence.** Participants, every check-in and the names from adverts are kept in `check_in.sqlite3` in `MESHGRAM_DATA_DIR` (the `meshgram-data` volume in Docker), written as they happen. It survives restarts, rebuilds and `docker compose down` (not `down -v`). Back it up with `sqlite3 check_in.sqlite3 ".backup backup.sqlite3"`.
+
+```yaml
+plugins:
+  - name: check_in
+    enabled: true
+    settings:
+      keyword: "#MeshCoreMonday"
+      timezone: Europe/Rome
+      api_token: "a-long-random-string"
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `channel` | `0` | Channel slot where check-ins are posted and answered |
+| `keyword` | `#MeshCoreMonday` | Word or phrase a message must contain (any case) |
+| `title` | `MeshCore Monday` | Heads the reply and the leaderboard |
+| `days` | `[0]` | Weekdays check-ins count on, `0` = Monday … `6` = Sunday; `[]` = any day |
+| `timezone` | `UTC` | IANA time zone where days and weeks begin |
+| `reply` | `true` | Answer check-ins on the channel |
+| `reply_to_observed` | `true` | Also answer check-ins only other observers heard |
+| `reply_template` | the message above | Placeholders `{title}`, `{name}`, `{rank}`, `{streak}`, `{streak_weeks}` ("15 weeks"), `{participants}`, `{participants_label}` ("13 participants"), `{total}`, `{keyword}`. A reply longer than one radio message (120 bytes with the default chunking settings) is split between lines. |
+| `reply_cooldown_seconds` | `30` | Check-ins from the same node sooner than this after a reply still count, unanswered |
+| `api_token` | none | Bearer token for the leaderboard API (secret) |
+| `db_path` | `check_in.sqlite3` | Database file; a relative path is inside `MESHGRAM_DATA_DIR` |
+
+Everything but `db_path` changes without a restart.
+
 ---
 
 ## 🎛️ Web App and Control Panel
@@ -571,7 +617,7 @@ web:
 - **Radio** — status (name, public key, model and firmware, battery and storage, uptime, noise floor, last RSSI/SNR, airtime, packet counters, clock drift) and actions: send a zero-hop or flood advert, set the radio's clock from the computer, reboot. Forms for the name and position (and whether adverts share it), the LoRa parameters (frequency, bandwidth, spreading factor, coding rate) and TX power, contact auto-add, extra ACKs, telemetry sharing, the path hash size (on firmware that supports it), and the RX delay / airtime factor tuning.
 - **Channels** — the channel slots with each channel's type, hash and which plugins use it. **Add a channel by name**: a hashtag channel (`#local`: the key comes from the name, so everyone who adds the same hashtag shares it), a private channel (paste the key someone shared, or leave it empty for a new random one), or the well-known Public channel. Rename, change a private channel's key, copy a key to share it, remove a channel, and send a message to a channel from the radio.
 - **Contacts** — the radio's contacts with type, key, last advert and route; search and filter by type, reset a route (the next message floods to find a new one), or remove a contact.
-- **Plugins** — every plugin with its state. Turn one on or off, or edit its settings in a form built from the plugin's schema. Saving applies them right away: a plugin that can take the change while running does (the Packet map's shown packet types, for example), the others restart with it. A link like `#control/plugins/packet_map` opens a plugin's settings directly. Secrets (passwords, tokens, API headers) are never sent to the browser: they show as "Saved", and are kept unless you type a new value.
+- **Plugins** — every plugin with its state. Turn one on or off, or edit its settings in a form built from the plugin's schema (a plugin may add a panel of its own, like the check-ins one). Saving applies them right away: a plugin that can take the change while running does (the Packet map's shown packet types, for example), the others restart with it. A link like `#control/plugins/packet_map` opens a plugin's settings directly. Secrets (passwords, tokens, API headers) are never sent to the browser: they show as "Saved", and are kept unless you type a new value.
 - **Settings** — everything else in `config.yaml`, one card per section: **Telegram** (bot token, group ID, captions, sender prefix), **Radio** (connection: serial device, baud rate, TCP host/port or Bluetooth address/PIN; bridge channel, contact names, echo fallback), **Web app** (address, port, password, title, map tiles), **Message chunking** and **Logging**. Serial devices found on the machine are suggested. A new bot token or group is checked with Telegram before it's saved. These settings are read when Meshgram starts, so a saved change shows *Restart to apply* until the **Restart now** button (or a restart of the service/container) brings Meshgram back with it; the page waits for it and reloads. Secrets (bot token, web password, Bluetooth PIN) are never sent to the browser.
 - **Config file** — your `config.yaml` with the settings and plugin changes made in the panel written into it, to make them the defaults. It lists which settings and plugins differ, shows the changes as a diff (or the whole file), and has **Copy** and **Download** buttons. Only what changed is rewritten: comments, quoting and layout stay as they are, and the result is checked by loading it back the way Meshgram does. Replace `config.yaml` with it and restart Meshgram.
 
@@ -594,7 +640,7 @@ curl -fsS -u ":$PASSWORD" http://127.0.0.1:8080/api/config.yaml -o config.new.ya
 
 The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access. It has light and dark themes, works on phones, and remembers the map position, hidden node types, table sort order, theme and control panel tab across refreshes. The view is part of the URL (`#map`, `#messages`, `#control/channels`, …), so refresh and Back work.
 
-**API.** The panel uses a small JSON API under `/api` (radio, channels, contacts, plugins, settings, restart) plus a Server-Sent Events stream at `/api/events`; see the docstring of `meshgram/web/api.py` for the endpoints.
+**API.** The panel uses a small JSON API under `/api` (radio, channels, contacts, plugins, settings, restart) plus a Server-Sent Events stream at `/api/events`; see the docstring of `meshgram/web/api.py` for the endpoints. Plugins can add routes of their own while they run (the check-in plugin's are listed in `meshgram/plugins/check_in_api.py`).
 
 ---
 
@@ -692,7 +738,7 @@ meshgram/
 │   ├── web/
 │   │   ├── server.py             # HTTP server, auth/CSRF, SSE event hub
 │   │   ├── api.py                # control panel JSON API
-│   │   └── static/               # the page (index.html) and control.js
+│   │   └── static/               # the page (index.html), control.js, check_in.js
 │   └── plugins/
 │       ├── bridge.py
 │       ├── ping_pong.py
@@ -700,7 +746,12 @@ meshgram/
 │       ├── dm_http_command.py
 │       ├── meshmapper.py         # MeshMapper MQTT observer uploads
 │       ├── packet_map.py         # map/messages data for the web app
-│       └── packet_map_store.py   # packet map SQLite persistence
+│       ├── packet_map_store.py   # packet map SQLite persistence
+│       ├── check_in.py           # weekly check-ins: detection, replies, management
+│       ├── check_in_api.py       # its routes: leaderboard API, control panel
+│       ├── check_in_scoring.py   # weeks, streaks, ranks
+│       └── check_in_store.py     # check-in SQLite persistence
+├── leaderboard/                  # public check-in leaderboard site (deployed separately)
 └── tests/
 ```
 

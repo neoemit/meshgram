@@ -2,9 +2,12 @@
 
 Serves the page (``static/``), a JSON API and a Server-Sent Events stream of
 live updates. Plugins add their data to the stream through ``WebServer.events``
-(see ``EventHub``); the app registers the control panel's API routes.
+(see ``EventHub``) and may add routes of their own (removed when they stop); the
+app registers the control panel's API routes.
 
-Security: with ``web.password`` set, every request needs HTTP Basic auth.
+Security: with ``web.password`` set, every request needs HTTP Basic auth, except
+on routes added with ``public=True`` (a plugin's API for another site, say), whose
+handlers check access themselves.
 Requests that change something (POST/PUT/PATCH/DELETE) must also come from the
 page itself (same origin, JSON body), and are refused outright when the server
 listens beyond this machine without a password (see ``WebConfig.allows_changes``).
@@ -35,6 +38,7 @@ STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/control.js": ("control.js", "text/javascript; charset=utf-8"),
+    "/check_in.js": ("check_in.js", "text/javascript; charset=utf-8"),
 }
 CONFIG_PLACEHOLDER = "/*__MESHGRAM_CONFIG__*/{}"
 MAX_REQUEST_HEAD_BYTES = 16 * 1024
@@ -121,11 +125,18 @@ Handler = Callable[[Request], Awaitable[Response]]
 SnapshotProvider = Callable[[], dict[str, Any]]
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class _Route:
     method: str
     pattern: re.Pattern[str]
     handler: Handler
+    # Served without the web password; the handler checks access itself.
+    public: bool = False
+
+    def matches(self, method: str, path: str) -> Optional[re.Match[str]]:
+        if self.method != method and not (self.method == "GET" and method == "HEAD"):
+            return None
+        return self.pattern.match(path)
 
 
 def _compile(path: str) -> re.Pattern[str]:
@@ -207,8 +218,20 @@ class WebServer:
             return None
         return self._server.sockets[0].getsockname()[1]
 
-    def route(self, method: str, path: str, handler: Handler) -> None:
-        self._routes.append(_Route(method.upper(), _compile(path), handler))
+    def route(self, method: str, path: str, handler: Handler, *, public: bool = False) -> _Route:
+        """Serve ``handler`` for ``method path``; returns the route, for ``remove_route``.
+
+        ``public`` routes skip the web password (``web.password``): the handler decides
+        who may use them (with ``is_authorized`` and its own credentials, say).
+        """
+        route = _Route(method.upper(), _compile(path), handler, public)
+        self._routes.append(route)
+        return route
+
+    def remove_route(self, route: _Route) -> None:
+        """Stop serving a route (a plugin's, when the plugin stops)."""
+        with contextlib.suppress(ValueError):
+            self._routes.remove(route)
 
     def control_state(self) -> dict[str, Any]:
         allowed = self.config.allows_changes
@@ -261,6 +284,14 @@ class WebServer:
             self._server = None
 
     # --- Requests ---------------------------------------------------------------------
+
+    def is_authorized(self, headers: dict[str, str]) -> bool:
+        """Whether a request has the web password (always, when there's none)."""
+        return self._authorized(headers)
+
+    def _is_public(self, method: str, target: str) -> bool:
+        path = unquote(urlsplit(target).path)
+        return any(route.public and route.matches(method.upper(), path) for route in self._routes)
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if not self.config.password:
@@ -322,7 +353,7 @@ class WebServer:
             if sep:
                 headers[name.strip().lower()] = value.strip()
 
-        if not self._authorized(headers):
+        if not self._authorized(headers) and not self._is_public(method, target):
             await self._send(
                 writer,
                 _error(401, "Authentication required"),

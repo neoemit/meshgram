@@ -156,6 +156,7 @@ class MeshgramApp:
             local_node_id=self.mesh.local_node_id,
             status=self.status,
             web=self.web,
+            execute_actions=self.execute_actions,
         )
 
     def connected_transport(self) -> Optional[MeshCoreTransport]:

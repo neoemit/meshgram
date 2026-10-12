@@ -108,6 +108,28 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         status, _, _ = await http(server.port, "POST", "/api/things/a", raw_body=b"", headers={"Content-Type": "application/json", "Content-Length": "300000"})
         self.assertEqual(status, 413)
 
+    async def test_public_routes_and_removing_routes(self):
+        server = await self._start(password="pw")
+
+        async def handler(request):
+            # A public route decides for itself; the web password still counts.
+            return SimpleNamespace(status=200 if server.is_authorized(request.headers) else 403, body=b"{}", content_type="application/json", headers={})
+
+        public = server.route("GET", "/api/open/{name}", handler, public=True)
+        server.route("GET", "/api/closed", handler)
+        self.assertEqual((await http(server.port, "GET", "/api/open/x"))[0], 403)
+        self.assertEqual((await http(server.port, "HEAD", "/api/open/x"))[0], 403)
+        self.assertEqual((await http(server.port, "GET", "/api/closed"))[0], 401)
+        # Public is per route and method: nothing else gets past the password.
+        self.assertEqual((await http(server.port, "POST", "/api/open/x", body={}))[0], 401)
+        basic = {"Authorization": "Basic " + base64.b64encode(b"u:pw").decode()}
+        self.assertEqual((await http(server.port, "GET", "/api/open/x", headers=basic))[0], 200)
+
+        server.remove_route(public)
+        server.remove_route(public)  # already gone: no error
+        self.assertEqual((await http(server.port, "GET", "/api/open/x"))[0], 401)
+        self.assertEqual((await http(server.port, "GET", "/api/open/x", headers=basic))[0], 404)
+
     async def test_changes_must_come_from_the_page(self):
         server = await self._start()
 

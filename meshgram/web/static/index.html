@@ -554,6 +554,65 @@
   .disclosure svg { width: 16px; height: 16px; transform: rotate(-90deg); transition: transform .15s; }
   .disclosure[aria-expanded="true"] svg { transform: none; }
   .plugin-settings { padding: 0 16px 16px; display: grid; gap: 14px; }
+  .plugin-disclosures { display: flex; flex-wrap: wrap; }
+  .plugin-disclosures .disclosure + .disclosure { margin-left: 0; }
+  .plugin-panel { padding: 0 16px 16px; display: grid; gap: 12px; min-width: 0; }
+  /* check_in.js: the check-in plugin's participants */
+  .ci-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  .ci-pill { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 10px; border-radius: 999px;
+    background: var(--surface-3); color: var(--text-2); font-size: 12.5px; font-weight: 650; white-space: nowrap; }
+  .ci-pill[data-open] .ci-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+  .ci-pill[data-open="true"] { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good); }
+  .ci-pill[data-open="true"] .ci-dot { background: currentColor; box-shadow: 0 0 0 0 currentColor; animation: ci-pulse 1.8s infinite; }
+  @keyframes ci-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
+  .ci-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .ci-tools .search { flex: 1 1 220px; max-width: 360px; }
+  .ci-tools .spacer { flex: 1; }
+  .ci-tag { height: 20px; margin-left: 8px; font-size: 11px; color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .ci-streak { font-weight: 700; color: color-mix(in srgb, #ff9f43 var(--chip-pct), var(--chip-mix)); }
+  .ci-this-week { display: inline-flex; align-items: center; gap: 4px; color: var(--good); font-weight: 700; }
+  .ci-this-week svg { width: 15px; height: 15px; }
+  dialog.ci-dialog.wide { width: min(760px, calc(100vw - 32px)); }
+  .ci-dialog { max-height: calc(100vh - 48px); }
+  .ci-dialog-head { display: flex; align-items: center; gap: 10px; padding: 16px 16px 0 20px; }
+  .ci-dialog-head h2 { flex: 1; margin: 0; font-size: 18px; font-weight: 700; overflow-wrap: anywhere; }
+  .ci-dialog-body { display: grid; gap: 18px; padding: 14px 20px 20px; }
+  .ci-form, .dialog form.ci-form { display: grid; gap: 14px; padding: 0; }
+  .ci-actions-row { justify-content: flex-end; }
+  .ci-actions-row > :first-child { flex: none; }
+  .ci-section { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .ci-section h3 { margin: 0; font-size: 14px; font-weight: 700; }
+  .ci-facts { display: flex; flex-wrap: wrap; gap: 10px 22px; }
+  .ci-fact { display: grid; gap: 2px; min-width: 0; }
+  .ci-fact > span:first-child { font-size: 12px; font-weight: 650; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; }
+  .ci-fact strong { font-size: 17px; font-variant-numeric: tabular-nums; }
+  .ci-weeks { display: grid; grid-template-columns: repeat(26, minmax(0, 1fr)); gap: 3px; padding-top: 18px; }
+  .ci-week { position: relative; height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-3); cursor: pointer; }
+  .ci-week[data-on="true"] { border-color: transparent; background: linear-gradient(160deg, #ffb347, #ff6b3d); }
+  .ci-week[data-current="true"] { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ci-week:hover:not(:disabled) { filter: brightness(1.2); }
+  .ci-week:disabled { cursor: not-allowed; }
+  .ci-week-label { position: absolute; left: 0; bottom: calc(100% + 3px); font-size: 10.5px; color: var(--text-3); white-space: nowrap; pointer-events: none; }
+  .ci-node-picker { display: grid; gap: 6px; }
+  .ci-node-results { display: grid; gap: 4px; max-height: 180px; overflow-y: auto; }
+  .ci-node-option { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer; }
+  .ci-node-option:hover, .ci-node-option:focus-visible { border-color: var(--accent); background: var(--accent-soft); }
+  .ci-node-option .name { flex: 1; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ci-node-option .muted { color: var(--text-3); font-size: 12px; }
+  .ci-log-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+  .ci-log-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+  .ci-log-when { color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .ci-log-list .name { font-weight: 650; }
+  .ci-log-text { color: var(--text-2); overflow-wrap: anywhere; }
+  .ci-source { height: 20px; font-size: 11px; }
+  .ci-source.observer { color: var(--observer); }
+  .ci-source.manual, .ci-source.import { color: var(--ok); }
+  .ci-danger-row { justify-content: flex-start; }
+  .ci-import-result:empty { display: none; }
+  @media (max-width: 640px) {
+    .ci-weeks { grid-template-columns: repeat(13, minmax(0, 1fr)); row-gap: 22px; }
+  }
   .form-errors { margin: 0; padding: 10px 14px 10px 30px; border-radius: 10px; background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--bad); font-size: 13px; }
   .cpanel a:not(.btn) { color: var(--accent-text); font-weight: 650; }
   .cpanel code { padding: 1px 5px; border-radius: 5px; background: var(--surface-3); font: 12.5px var(--mono); overflow-wrap: anywhere; }
@@ -2480,5 +2539,6 @@ showView(viewFromHash());
 connect();
 </script>
 <script src="control.js"></script>
+<script src="check_in.js"></script>
 </body>
 </html>

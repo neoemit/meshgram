@@ -45,7 +45,7 @@ from ..plugin import CHANNEL_FORMAT
 from ..plugin_manager import PluginManager, UnknownPluginError
 from ..radio_admin import RadioAdmin, RadioAdminError
 from ..settings_schema import SettingsError
-from ..text_utils import utf8_len
+from ..text_utils import channel_message_max_bytes, utf8_len
 from ..transport import RadioCommandError
 from ..types import MeshPacketRef, SendMeshAction
 from .server import HttpError, Request, Response, WebServer, json_response, no_content
@@ -60,10 +60,7 @@ SendMesh = Callable[[SendMeshAction], Awaitable[MeshPacketRef]]
 
 def message_max_bytes(settings: MeshgramSettings, payload_limit: int) -> int:
     """The longest channel message (UTF-8 bytes) that goes out in one packet, as the bridge sizes them."""
-    chunking = settings.chunking
-    limit = payload_limit - max(0, chunking.payload_safety_margin_bytes)
-    caps = [cap for cap in (chunking.max_chunk_bytes, chunking.broadcast_max_chunk_bytes) if cap > 0]
-    return max(1, min([limit, *caps]))
+    return channel_message_max_bytes(settings.chunking, payload_limit)
 
 
 def channel_usage(plugins: PluginManager, settings: MeshgramSettings) -> dict[int, list[str]]:

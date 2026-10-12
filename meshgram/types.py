@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Protocol, Union
 
 if TYPE_CHECKING:
     from .config import MeshgramSettings
@@ -78,6 +78,9 @@ class PluginContext:
     status: Optional["StatusRegistry"] = None
     # The web app, when it runs; plugins publish live data to its pages through it.
     web: Optional["WebServer"] = None
+    # Runs actions outside a hook (``execute_actions(actions, plugin_name)``), for plugins
+    # that act on something other than a message: an RX log listener, a timer.
+    execute_actions: Optional[Callable[[list["PluginAction"], str], Awaitable[None]]] = None
 
 
 class Plugin(Protocol):

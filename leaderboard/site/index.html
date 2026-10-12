@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MeshCore check-in leaderboard</title>
+  <meta name="description" content="Weekly mesh radio check-ins: who's on the air, this week's roll call and the longest streaks.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#05070d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f3f6fb" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <canvas class="mesh-bg" id="mesh-bg" aria-hidden="true"></canvas>
+  <div class="glow glow-a" aria-hidden="true"></div>
+  <div class="glow glow-b" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Leaderboard home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 13.5 9.5 29h13z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M11.8 23.5h8.4M13.3 19.5h5.4" stroke="currentColor" stroke-width="1.6"/>
+        <circle cx="16" cy="11" r="2.4" fill="currentColor"/>
+        <path class="wave w1" d="M11.2 6.6a6.6 6.6 0 0 0 0 8.8M20.8 6.6a6.6 6.6 0 0 1 0 8.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path class="wave w2" d="M7.6 3.6a11 11 0 0 0 0 14.8M24.4 3.6a11 11 0 0 1 0 14.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+      <span class="brand-text">Mesh<span>Check-in</span></span>
+    </a>
+    <div class="signal" id="signal" data-state="connecting" role="status" aria-live="polite">
+      <span class="signal-dot" aria-hidden="true"></span>
+      <span class="signal-text" id="signal-text">Tuning in…</span>
+    </div>
+  </header>
+
+  <main class="page" id="page">
+    <section class="hero" aria-labelledby="title">
+      <p class="eyebrow" id="eyebrow">Weekly mesh check-in</p>
+      <h1 id="title">MeshCore Monday</h1>
+      <p class="lede" id="lede">Post the keyword on the channel to check in, keep your streak alive week after week, and climb the board.</p>
+      <div class="hero-actions">
+        <button class="keyword" id="keyword" type="button" title="Copy the check-in keyword">
+          <span class="keyword-label">Send</span>
+          <span class="keyword-text" id="keyword-text">#MeshCoreMonday</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>
+        </button>
+        <div class="air" id="air" data-open="false">
+          <span class="air-lamp" aria-hidden="true"></span>
+          <div class="air-body">
+            <span class="air-label" id="air-label">Next check-in</span>
+            <span class="air-time" id="air-time" aria-live="off">— — —</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stats" aria-label="This week in numbers">
+      <article class="stat stat-green">
+        <span class="stat-label">Checked in this week</span>
+        <strong class="stat-value" id="stat-week">0</strong>
+        <span class="stat-sub" id="stat-week-sub">&nbsp;</span>
+      </article>
+      <article class="stat stat-flame">
+        <span class="stat-label">Active streaks</span>
+        <strong class="stat-value" id="stat-active">0</strong>
+        <span class="stat-sub" id="stat-active-sub">&nbsp;</span>
+      </article>
+      <article class="stat stat-amber">
+        <span class="stat-label">Longest streak</span>
+        <strong class="stat-value" id="stat-longest">0</strong>
+        <span class="stat-sub" id="stat-longest-sub">&nbsp;</span>
+      </article>
+      <article class="stat stat-cyan">
+        <span class="stat-label">Check-ins all time</span>
+        <strong class="stat-value" id="stat-total">0</strong>
+        <span class="stat-sub" id="stat-total-sub">&nbsp;</span>
+      </article>
+    </section>
+
+    <section class="panel podium-panel" aria-labelledby="podium-title">
+      <div class="panel-head">
+        <h2 id="podium-title">Top of the tower</h2>
+        <span class="panel-note">Longest running streaks</span>
+      </div>
+      <ol class="podium" id="podium"></ol>
+    </section>
+
+    <section class="panel" aria-labelledby="rollcall-title">
+      <div class="panel-head">
+        <h2 id="rollcall-title">This week's roll call</h2>
+        <span class="panel-note" id="rollcall-note">In order of check-in</span>
+      </div>
+      <ol class="rollcall" id="rollcall"></ol>
+    </section>
+
+    <section class="panel" aria-labelledby="board-title">
+      <div class="panel-head board-head">
+        <h2 id="board-title">Leaderboard</h2>
+        <div class="board-tools">
+          <label class="search">
+            <span class="sr-only">Search nodes</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input type="search" id="search" placeholder="Find a node…" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="active-only">
+            <span>Active streaks only</span>
+          </label>
+        </div>
+      </div>
+      <div class="board-header" aria-hidden="true">
+        <span>#</span><span>Node</span><span>Streak</span><span class="hide-sm">Best</span><span class="hide-sm">Total</span><span>This week</span>
+      </div>
+      <ol class="board" id="board" aria-label="Nodes by streak"></ol>
+      <p class="empty" id="board-empty" hidden></p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p id="footer-text">Live from the mesh via Meshgram.</p>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <p class="sr-only" id="announcer" aria-live="polite"></p>
+</body>
+</html>
