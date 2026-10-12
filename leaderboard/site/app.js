@@ -287,7 +287,10 @@
     state.updatedAt = Date.now();
     render(fresh);
     $("offline").hidden = true;
-    document.body.classList.remove("loading");
+    if (document.body.classList.contains("loading")) {
+      document.body.classList.remove("loading");
+      setTimeout(() => document.body.classList.remove("intro"), 1500);
+    }
     if (fresh.size) {
       const names = data.leaderboard.filter((entry) => fresh.has(keyOf(entry))).map((entry) => entry.name);
       const text = names.length === 1 ? `📡 ${names[0]} just checked in!` : `📡 ${names.length} new check-ins: ${names.join(", ")}`;
