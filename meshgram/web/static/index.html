@@ -843,7 +843,7 @@
     <div class="messages-head">
       <div>
         <h2 id="control-title">Control panel</h2>
-        <p class="messages-sub">The radio and the plugins. Changes apply right away.</p>
+        <p class="messages-sub">The radio, the plugins and Meshgram's settings.</p>
       </div>
     </div>
     <div class="notice warn" id="control-readonly" role="note" hidden><span data-icon="lock"></span><p id="control-readonly-text"></p></div>
@@ -852,12 +852,14 @@
       <button class="seg" type="button" role="tab" id="ctab-channels" data-section="channels" aria-controls="cpanel-channels" aria-selected="false" tabindex="-1"><span data-icon="hash"></span>Channels</button>
       <button class="seg" type="button" role="tab" id="ctab-contacts" data-section="contacts" aria-controls="cpanel-contacts" aria-selected="false" tabindex="-1"><span data-icon="users"></span>Contacts</button>
       <button class="seg" type="button" role="tab" id="ctab-plugins" data-section="plugins" aria-controls="cpanel-plugins" aria-selected="false" tabindex="-1"><span data-icon="plug"></span>Plugins</button>
+      <button class="seg" type="button" role="tab" id="ctab-settings" data-section="settings" aria-controls="cpanel-settings" aria-selected="false" tabindex="-1"><span data-icon="cog"></span>Settings</button>
       <button class="seg" type="button" role="tab" id="ctab-config" data-section="config" aria-controls="cpanel-config" aria-selected="false" tabindex="-1"><span data-icon="file"></span>Config file</button>
     </div>
     <section class="cpanel" role="tabpanel" id="cpanel-radio" aria-labelledby="ctab-radio" tabindex="0"></section>
     <section class="cpanel" role="tabpanel" id="cpanel-channels" aria-labelledby="ctab-channels" tabindex="0" hidden></section>
     <section class="cpanel" role="tabpanel" id="cpanel-contacts" aria-labelledby="ctab-contacts" tabindex="0" hidden></section>
     <section class="cpanel" role="tabpanel" id="cpanel-plugins" aria-labelledby="ctab-plugins" tabindex="0" hidden></section>
+    <section class="cpanel" role="tabpanel" id="cpanel-settings" aria-labelledby="ctab-settings" tabindex="0" hidden></section>
     <section class="cpanel" role="tabpanel" id="cpanel-config" aria-labelledby="ctab-config" tabindex="0" hidden></section>
   </div>
 </main>
@@ -940,6 +942,7 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 3v5h5M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 21v-5h-5"/>',
   power: '<path d="M12 3v8"/><path d="M6.3 7.3a8 8 0 1 0 11.4 0"/>',
+  cog: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
   send: '<path d="m4 12 16-8-6 16-2-6.5z"/><path d="m12 13.5 8-9.5"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
   alert: '<path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17v.5"/>',

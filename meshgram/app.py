@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import sys
 import time
 from typing import Optional
 
@@ -21,10 +23,12 @@ from .config import (
     MIGRATION_HINT,
     ConfigError,
     MeshgramSettings,
+    config_path_from_env,
     data_dir,
     legacy_env_vars,
-    load_settings,
+    read_config,
 )
+from .core_settings import SETTINGS_FILE, CoreSettings, SettingsOverrideStore, check_telegram
 from .plugin_manager import OVERRIDES_FILE, PluginManager, PluginOverrideStore
 from .radio_admin import RadioAdmin
 from .status import CONNECTED, CONNECTING, DISCONNECTED, StatusRegistry
@@ -44,11 +48,15 @@ from .web.api import register_control_api
 LOGGER = logging.getLogger(__name__)
 MESH_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 TELEGRAM_HEALTH_CHECK_SECONDS = 60.0
+# Long enough for the control panel to get its answer before the web server goes.
+RESTART_DELAY_SECONDS = 0.5
 
 
 class MeshgramApp:
-    def __init__(self, settings: MeshgramSettings):
+    def __init__(self, settings: MeshgramSettings, core: Optional[CoreSettings] = None):
         self.settings = settings
+        self.core = core
+        self.restart_requested = False
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.bot_app: Optional[Application] = None
         self.mesh = MeshCoreTransport(settings)
@@ -69,6 +77,8 @@ class MeshgramApp:
                 admin=self.radio_admin,
                 plugins=self.plugins,
                 send_mesh=self._send_mesh_from_web,
+                core=core,
+                restart=self.request_restart,
             )
         self._mesh_connect_task: Optional[asyncio.Task[None]] = None
         self._telegram_health_task: Optional[asyncio.Task[None]] = None
@@ -404,6 +414,14 @@ class MeshgramApp:
 
     # --- Lifecycle ------------------------------------------------------------
 
+    def request_restart(self) -> None:
+        """Stop, then start again from the top (``main``), reading the settings anew."""
+        if self.bot_app is None:
+            raise RuntimeError("Meshgram isn't running")
+        LOGGER.info("Restarting Meshgram, as asked from the web app")
+        self.restart_requested = True
+        asyncio.get_running_loop().call_later(RESTART_DELAY_SECONDS, self.bot_app.stop_running)
+
     def run(self) -> None:
         self.bot_app = (
             ApplicationBuilder()
@@ -455,20 +473,28 @@ def _is_connection_error(exc: Exception) -> bool:
 
 
 def main() -> None:
+    # INFO until the settings say otherwise, so what loading them logs is seen.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s", force=True)
+    config_path = config_path_from_env()
     try:
-        settings = load_settings()
+        core = CoreSettings(
+            read_config(config_path),
+            config_path=config_path,
+            store=SettingsOverrideStore(data_dir() / SETTINGS_FILE),
+            check_telegram=check_telegram,
+        )
     except ConfigError as exc:
         raise SystemExit(f"meshgram: {exc}") from None
-
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        force=True,
-    )
+    settings = core.settings
+    logging.getLogger().setLevel(getattr(logging, settings.log_level, logging.INFO))
 
     ignored = legacy_env_vars()
     if ignored:
         LOGGER.warning("Ignoring environment variables %s. %s.", ", ".join(ignored), MIGRATION_HINT)
 
-    app = MeshgramApp(settings)
+    app = MeshgramApp(settings, core)
     app.run()
+    if app.restart_requested:
+        logging.shutdown()
+        # The same command again, in this process (so Docker and service managers see no exit).
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])

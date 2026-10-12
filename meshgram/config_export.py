@@ -1,21 +1,21 @@
-"""config.yaml with the control panel's plugin changes in it.
+"""config.yaml with the control panel's changes in it.
 
 The control panel never writes config.yaml: it holds secrets and is usually
-mounted read-only. Plugin changes made there are saved in
-``$MESHGRAM_DATA_DIR/plugins.json`` and win over config.yaml. To make them the
-new defaults, the panel offers config.yaml as it would read with those changes
-in it: the file on disk, comments, quoting and layout kept, with each changed
-plugin's ``enabled`` and ``settings`` replaced. Once that file replaces
-config.yaml and Meshgram restarts, the saved changes match config.yaml and are
-dropped (see ``PluginManager``).
+mounted read-only. Changes made there are saved in ``$MESHGRAM_DATA_DIR``
+(plugins in ``plugins.json``, everything else in ``settings.json``) and win
+over config.yaml. To make them the new defaults, the panel offers config.yaml
+as it would read with those changes in it: the file on disk, comments, quoting
+and layout kept, with each changed setting, and each changed plugin's
+``enabled`` and ``settings``, replaced. Once that file replaces config.yaml and
+Meshgram restarts, the saved changes match config.yaml and are dropped (see
+``PluginManager`` and ``CoreSettings``).
 
-The result is checked by loading it the way Meshgram does: every plugin must
-come out as the control panel has it, and nothing else may change.
+The result is checked by loading it the way Meshgram does: every setting and
+plugin must come out as the control panel has it, and nothing else may change.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import difflib
 import io
 from dataclasses import dataclass, field
@@ -26,7 +26,17 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import CommentMark, YAMLError as RoundTripYAMLError
 from ruamel.yaml.tokens import CommentToken
 
-from .config import DEFAULT_CONFIG_PATH, ConfigError, MeshgramSettings, PluginConfig, build_settings, canonical_plugin_name
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    ConfigError,
+    MeshgramSettings,
+    PluginConfig,
+    legacy_web_section,
+    build_settings,
+    canonical_plugin_name,
+    with_overrides,
+)
+from .core_settings import LEAVES, core_values, flatten, same as same_setting
 from .yaml_round_trip import MISSING, round_trip_yaml, same, yaml_value
 
 
@@ -49,6 +59,8 @@ class ConfigExport:
     # Unified diff from config.yaml to ``text``; empty when they're the same.
     diff: str = ""
     changes: list[PluginChange] = field(default_factory=list)
+    # Settings outside the plugins that change, as dotted paths ("telegram.bot_token").
+    settings_changes: list[str] = field(default_factory=list)
     # Where the result doesn't load back as intended; worth a look before using it.
     problems: list[str] = field(default_factory=list)
 
@@ -58,10 +70,13 @@ def export_config(
     overrides: Mapping[str, Mapping[str, Any]],
     *,
     path: str = DEFAULT_CONFIG_PATH,
+    settings: Optional[Mapping[str, Any]] = None,
 ) -> ConfigExport:
-    """``text`` (config.yaml) with ``overrides`` (plugin name -> ``enabled`` and/or ``settings``) in it."""
-    original = _load(text, path)
-    if not overrides:
+    """``text`` (config.yaml) with plugin ``overrides`` (name -> ``enabled`` and/or ``settings``)
+    and ``settings`` (dotted path -> value, see ``CoreSettings.overrides``) in it."""
+    settings = dict(settings or {})
+    original_data, original = _load(text, path)
+    if not overrides and not settings:
         return ConfigExport(text)
 
     round_trip = round_trip_yaml(text)
@@ -72,28 +87,39 @@ def export_config(
     if not isinstance(data, CommentedMap):
         raise ConfigExportError(f"{path} must contain a top-level mapping")
 
-    entries = _plugin_list(data, original.plugins)
-    for name, override in overrides.items():
-        _apply(entries, canonical_plugin_name(name), override)
+    for setting_path, value in settings.items():
+        _set(data, setting_path, value, original_data)
+    if overrides:
+        entries = _plugin_list(data, original.plugins)
+        for name, override in overrides.items():
+            _apply(entries, canonical_plugin_name(name), override)
     buffer = io.StringIO()
     round_trip.dump(data, buffer)
     exported_text = buffer.getvalue()
 
     try:
-        exported = _load(exported_text, path)
+        exported_data, exported = _load(exported_text, path)
     except ConfigExportError as exc:
         return ConfigExport(exported_text, _diff(text, exported_text, path), problems=[str(exc)])
+    expected = build_settings(with_overrides(original_data, settings), config_path=path, strict=False)
     changes, problems = _compare(original, exported, overrides)
-    if not changes and not problems:
+    settings_changes, settings_problems = _compare_settings(original, expected, exported, settings)
+    problems = settings_problems + problems
+    try:
+        build_settings(exported_data, config_path=path)
+    except (ConfigError, ValueError) as exc:
+        problems.append(f"Meshgram can't use it: {exc}")
+    if not changes and not settings_changes and not problems:
         # config.yaml already says it all; don't offer the round trip's reformatting.
         return ConfigExport(text)
-    return ConfigExport(exported_text, _diff(text, exported_text, path), changes, problems)
+    return ConfigExport(exported_text, _diff(text, exported_text, path), changes, settings_changes, problems)
 
 
 # --- Loading -----------------------------------------------------------------------------
 
 
-def _load(text: str, path: str) -> MeshgramSettings:
+def _load(text: str, path: str) -> tuple[dict[str, Any], MeshgramSettings]:
+    """The parsed file and its settings; the Telegram settings may be missing (the control panel may have them)."""
     try:
         data = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
@@ -101,7 +127,7 @@ def _load(text: str, path: str) -> MeshgramSettings:
     if not isinstance(data, dict):
         raise ConfigExportError(f"{path} must contain a top-level mapping")
     try:
-        return build_settings(data, config_path=path)
+        return data, build_settings(data, config_path=path, strict=False)
     except (ConfigError, ValueError) as exc:
         raise ConfigExportError(f"Meshgram can't use {path}: {exc}") from None
 
@@ -142,6 +168,49 @@ def _plugin_list(data: CommentedMap, effective: list[PluginConfig]) -> Commented
             entry["settings"] = _to_yaml(plugin.settings)
         _append_entry(plugins, entry)
     return plugins
+
+
+def _set(data: CommentedMap, path: str, value: Any, original_data: Mapping[str, Any]) -> None:
+    """Set one setting (dotted path), adding the sections it needs."""
+    *parents, key = path.split(".")
+    node = data
+    for depth, name in enumerate(parents):
+        child = node.get(name)
+        if isinstance(child, CommentedMap):
+            node = child
+            continue
+        # The rest of the path is new.
+        new: dict[str, Any] = {}
+        inner = new
+        for part in parents[depth + 1:]:
+            inner = inner.setdefault(part, {})
+        inner[key] = value
+        if depth == 0 and name == "web" and name not in node:
+            # A web section replaces the packet_map plugin's old web settings; keep them in it.
+            new = {**legacy_web_section(original_data), **new}
+        if name in node:
+            node[name] = _to_yaml(new)
+        elif depth == 0:
+            _add_section(node, name, _to_yaml(new))
+        else:
+            _insert(node, len(node), name, _to_yaml(new))
+        return
+    if key in node:
+        _merge_into(node, key, value)
+    else:
+        _insert(node, len(node), yaml_value(key), _to_yaml(value))
+
+
+def _add_section(data: CommentedMap, name: str, section: CommentedMap) -> None:
+    """A new top-level section, before the plugins, a blank line apart from its neighbours."""
+    keys = list(data)
+    position = keys.index("plugins") if "plugins" in keys else len(keys)
+    # Comment lines before the plugins introduce them, so they move down.
+    _insert(data, position, name, section)
+    if position > 0:
+        _blank_line_before(data, name)
+    elif len(keys) > 0 and not (data.ca.items.get(keys[0]) or [None, None])[1]:
+        _blank_line_before(data, keys[0])
 
 
 def _apply(entries: CommentedSeq, name: str, override: Mapping[str, Any]) -> None:
@@ -335,9 +404,6 @@ def _compare(
     overrides: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[PluginChange], list[str]]:
     problems: list[str] = []
-    if dataclasses.replace(original, plugins=[]) != dataclasses.replace(exported, plugins=[]):
-        problems.append("Settings outside the plugins section would change too")
-
     before = _plugins_by_name(original)
     after = _plugins_by_name(exported)
     wanted = {canonical_plugin_name(name): override for name, override in overrides.items()}
@@ -357,6 +423,23 @@ def _compare(
         )
         if change.enabled is not None or change.settings:
             changes.append(change)
+    return changes, problems
+
+
+def _compare_settings(
+    original: MeshgramSettings,
+    expected: MeshgramSettings,
+    exported: MeshgramSettings,
+    settings: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Which settings outside the plugins change, and which don't come out as intended."""
+    before, wanted, after = (flatten(core_values(item)) for item in (original, expected, exported))
+    problems = [
+        f"{path} doesn't come out as set in the control panel" if path in settings else f"{path} would change too"
+        for path in LEAVES
+        if not same_setting(after[path], wanted[path])
+    ]
+    changes = [path for path in LEAVES if not same_setting(after[path], before[path])]
     return changes, problems
 
 

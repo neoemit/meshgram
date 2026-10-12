@@ -8,9 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import yaml
+
 from meshgram.config import MeshgramSettings, PluginConfig, WebConfig
+from meshgram.core_settings import CoreSettings, SettingsOverrideStore
 from meshgram.plugin_manager import PluginManager, PluginOverrideStore
 from meshgram.radio_admin import RadioAdmin, hashtag_secret
+from meshgram.settings_schema import SECRET_MASK
 from meshgram.status import StatusRegistry
 from meshgram.web import WebServer
 from meshgram.web.api import channel_usage, message_max_bytes, register_control_api
@@ -365,6 +369,84 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         status, error = await self.call("GET", "/api/config")
         self.assertEqual(status, 403)
         self.assertIn("holds secrets", error["error"])
+
+
+class SettingsApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.dir = Path(tempdir.name)
+        self.config_path = self.dir / "config.yaml"
+        self.config_path.write_text(
+            'telegram:\n  bot_token: "123:abc"\n  group_id: -1\n\nmeshcore:\n  connection:\n    serial_device: /dev/ttyACM0\n',
+            encoding="utf-8",
+        )
+        self.checked = []
+
+        async def check_telegram(token, group_id):
+            self.checked.append((token, group_id))
+
+        self.core = CoreSettings(
+            yaml.safe_load(self.config_path.read_text(encoding="utf-8")),
+            config_path=str(self.config_path),
+            store=SettingsOverrideStore(self.dir / "settings.json"),
+            check_telegram=check_telegram,
+        )
+        self.restarts = 0
+
+        def restart():
+            self.restarts += 1
+
+        plugins = PluginManager([], _Host(FakeRadio()), PluginOverrideStore(self.dir / "plugins.json"))
+        self.web = WebServer(WebConfig(port=0), StatusRegistry())
+
+        async def send_mesh(action):
+            return "mc-out-1"
+
+        register_control_api(
+            self.web, settings=self.core.settings, admin=RadioAdmin(FakeRadio()), plugins=plugins,
+            send_mesh=send_mesh, core=self.core, restart=restart,
+        )
+        await self.web.start()
+        self.addAsyncCleanup(self.web.stop)
+        self.events = self.web.events.subscribe()
+
+    async def call(self, method, path, body=None):
+        status, _, payload = await http(self.web.port, method, path, body=body)
+        return status, as_json(payload)
+
+    async def test_settings(self):
+        status, body = await self.call("GET", "/api/settings")
+        self.assertEqual(status, 200)
+        self.assertEqual([section["key"] for section in body["sections"]], ["telegram", "meshcore", "web", "chunking", "runtime"])
+        self.assertEqual((body["restart_needed"], body["can_restart"]), (False, True))
+        telegram = body["sections"][0]
+        self.assertEqual(telegram["values"]["bot_token"], SECRET_MASK)
+        self.assertNotIn("123:abc", json.dumps(body))
+
+        status, body = await self.call("PATCH", "/api/settings/telegram", {**telegram["values"], "bot_token": "456:def"})
+        self.assertEqual((status, body["restart_needed"]), (200, True))
+        self.assertEqual(body["sections"][0]["overridden"], ["bot_token"])
+        self.assertEqual(self.checked, [("456:def", -1)])
+        self.assertEqual(self.events.get_nowait()["what"], "settings")
+
+        status, error = await self.call("PATCH", "/api/settings/web", {"port": "eighty"})
+        self.assertEqual((status, error["details"]), (422, [{"path": "port", "message": "must be integer"}]))
+        self.assertEqual((await self.call("PATCH", "/api/settings/nope", {}))[0], 404)
+
+        # The export has it, in config.yaml's layout.
+        status, body = await self.call("GET", "/api/config")
+        self.assertEqual(status, 200)
+        self.assertIn('  bot_token: "456:def"\n', body["yaml"])
+        self.assertEqual(body["settings_changes"], [{"path": "telegram.bot_token", "title": "Telegram › Bot token", "secret": True}])
+        self.assertEqual((body["changes"], body["problems"], body["saved_settings"]), ([], [], ["Telegram › Bot token"]))
+
+        status, body = await self.call("DELETE", "/api/settings/telegram/overrides")
+        self.assertEqual((status, body["restart_needed"], body["sections"][0]["overridden"]), (200, False, []))
+
+    async def test_restart(self):
+        status, body = await self.call("POST", "/api/restart", {})
+        self.assertEqual((status, body, self.restarts), (202, {"restarting": True}, 1))
 
 
 class HelperTests(unittest.TestCase):

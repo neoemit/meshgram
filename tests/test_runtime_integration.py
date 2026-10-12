@@ -183,6 +183,16 @@ class RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await self.app._execute_send_mesh(SendMeshAction(text="hi")))
         self.assertEqual(self.mesh.attempts, [])
 
+    async def test_restart_stops_the_bot_for_main_to_start_again(self):
+        self.app.bot_app.stop_running = mock.Mock()
+        with mock.patch("meshgram.app.RESTART_DELAY_SECONDS", 0), self.assertLogs("meshgram.app", level="INFO"):
+            self.app.request_restart()
+        self.assertTrue(self.app.restart_requested)
+        self.app.bot_app.stop_running.assert_not_called()  # Not before the web app has answered.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        self.app.bot_app.stop_running.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
