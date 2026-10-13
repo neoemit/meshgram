@@ -1,9 +1,10 @@
 """Weekly check-ins: nodes post a keyword ("#MeshCoreMonday") on a channel and get counted.
 
 A channel message containing the keyword (any case, anywhere in the text) on a
-check-in day is a check-in, whether this radio heard it or another MeshMapper
-observer did (observers' packets come through the transport, with their bytes
-only from MeshMapper's subscriber account: the free live feed has no text). The
+check-in day is a check-in, whether this radio heard it or another observer did
+(the transport decrypts the channel messages in the packets the MQTT observer
+plugins receive and hands them to ``on_mesh_message`` with ``source`` "mqtt";
+MeshMapper's free live feed has no packet bytes, so no text). The
 radio answers on the channel with the sender's rank this week, streak and the
 number of participants so far; asking again gives the same rank with the current
 count.
@@ -11,7 +12,8 @@ count.
 Channel messages carry the sender's name, not its key, so a name is matched to
 the one node that advertises it (adverts the radio and observers hear, and the
 radio's contacts). A name no node (or more than one) has is counted under the
-name and linked to the node once its advert is heard; see ``check_in_store``.
+name and linked to the node once its advert is heard: the first flood advert of
+the name, heard by the radio or an observer, links it; see ``check_in_store``.
 
 Everything is kept in an SQLite database in the data directory. The control
 panel manages it (``static/check_in.js``) through the routes in
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import logging
 import re
@@ -33,10 +36,9 @@ from typing import Any, Callable, Optional
 
 from meshgram.config import _as_bool, data_dir
 from meshgram.meshcore_packets import (
+    DIRECT_ROUTE_TYPES,
     PAYLOAD_TYPE_ADVERT,
-    PAYLOAD_TYPE_GRP_TXT,
     decode_advert,
-    decrypt_group_text,
     parse_packet,
 )
 from meshgram.plugin import CHANNEL_FORMAT, BasePlugin
@@ -65,7 +67,7 @@ from meshgram.plugins.check_in_store import (
 )
 from meshgram.radio_admin import channel_kind
 from meshgram.text_utils import channel_message_max_bytes, split_text_by_bytes, utf8_len
-from meshgram.types import MeshTextEvent, PluginAction, PluginContext, SendMeshAction
+from meshgram.types import SOURCE_MQTT, MeshTextEvent, PluginAction, PluginContext, SendMeshAction
 
 LOGGER = logging.getLogger(__name__)
 
@@ -277,6 +279,10 @@ def _clean_key(value: Any) -> Optional[str]:
     return key if KEY_RE.match(key) else None
 
 
+def _is_flood(route_type: Any) -> bool:
+    return isinstance(route_type, int) and route_type not in DIRECT_ROUTE_TYPES
+
+
 def _packet_bytes(rx_log: dict[str, Any]) -> Optional[bytes]:
     raw_hex = str(rx_log.get("payload") or "").strip()
     if not raw_hex:
@@ -292,7 +298,7 @@ class CheckInPlugin(BasePlugin):
     title = "Weekly check-ins"
     description = (
         "Counts the nodes that post a keyword (\"#MeshCoreMonday\") on a channel, heard by the radio or by "
-        "MeshMapper observers, replies with their rank and streak, and serves a leaderboard for other sites."
+        "MQTT observers, replies with their rank and streak, and serves a leaderboard for other sites."
     )
     settings_schema = {
         "type": "object",
@@ -345,7 +351,7 @@ class CheckInPlugin(BasePlugin):
             "reply_to_observed": {
                 "type": "boolean",
                 "title": "Also reply to check-ins only observers heard",
-                "description": "Check-ins other MeshMapper observers heard (with the subscriber account) count either way.",
+                "description": "Check-ins other observers heard (through the MQTT observer plugins) count either way.",
                 "default": True,
             },
             "reply_template": {
@@ -468,6 +474,7 @@ class CheckInPlugin(BasePlugin):
     # --- Messages ---------------------------------------------------------------------------
 
     async def on_mesh_message(self, event: MeshTextEvent, context: PluginContext) -> list[PluginAction]:
+        """A channel message the radio heard, or an observer did (``source`` "mqtt")."""
         if event.to_id is not None or event.channel_index != self.config.channel:
             return []
         self._context = context
@@ -477,13 +484,16 @@ class CheckInPlugin(BasePlugin):
             sender, body = event.sender_label, event.text
         if sender is None:
             return []  # Nobody to count: the message has no "<name>: " in front.
+        observed = event.source == SOURCE_MQTT
+        if observed and self._is_own_name(sender):
+            return []  # Our own replies come back through observers too.
         return await self._handle_message(
             sender,
             body,
             sender_timestamp=raw.get("sender_timestamp"),
-            source=SOURCE_RADIO,
-            observer_id=None,
-            reply=True,
+            source=SOURCE_OBSERVER if observed else SOURCE_RADIO,
+            observer_id=_clean_key(raw.get("observer_id")) if observed else None,
+            reply=self.config.reply_to_observed if observed else True,
         )
 
     async def handle_rx_log(self, rx_log: dict[str, Any]) -> None:
@@ -491,39 +501,25 @@ class CheckInPlugin(BasePlugin):
         raw = _packet_bytes(rx_log)
         parsed = parse_packet(raw) if raw else None
         if parsed and parsed["payload_type"] == PAYLOAD_TYPE_ADVERT:
-            self._sight_advert(decode_advert(parsed["payload"]))
+            self._sight_advert(decode_advert(parsed["payload"]), flood=_is_flood(parsed["route_type"]))
 
     async def handle_remote_rx_log(self, rx_log: dict[str, Any]) -> None:
-        """What other MeshMapper observers heard: adverts, and check-ins on the channel."""
-        source = rx_log.get("source_node")
-        if isinstance(source, dict):
-            self._sight(source.get("public_key"), source.get("name"), fill_only=True)
+        """What other observers heard: adverts (their channel messages arrive through on_mesh_message)."""
         raw = _packet_bytes(rx_log) if rx_log.get("payload") else None
         parsed = parse_packet(raw) if raw else None
-        if not parsed:
+        if parsed:
+            if parsed["payload_type"] == PAYLOAD_TYPE_ADVERT:
+                self._sight_advert(decode_advert(parsed["payload"]), flood=_is_flood(parsed["route_type"]))
             return
-        if parsed["payload_type"] == PAYLOAD_TYPE_ADVERT:
-            self._sight_advert(decode_advert(parsed["payload"]))
+        source = rx_log.get("source_node")
+        if not isinstance(source, dict):
             return
-        if parsed["payload_type"] != PAYLOAD_TYPE_GRP_TXT:
-            return
-        channel = self._channel_entry()
-        decrypted = decrypt_group_text(parsed["payload"], [channel]) if channel else None
-        if not decrypted:
-            return
-        sender, body = split_sender(decrypted["message"])
-        if sender is None or self._is_own_name(sender):
-            return  # Our own replies come back through observers too.
-        actions = await self._handle_message(
-            sender,
-            body,
-            sender_timestamp=decrypted.get("sender_timestamp"),
-            source=SOURCE_OBSERVER,
-            observer_id=_clean_key(rx_log.get("observer_id")),
-            reply=self.config.reply_to_observed,
-        )
-        if actions:
-            await self._send(actions)
+        decoded = rx_log.get("decoded") if isinstance(rx_log.get("decoded"), dict) else {}
+        if decoded.get("payload_type") == PAYLOAD_TYPE_ADVERT and _is_flood(decoded.get("route_type")):
+            # Known by its metadata only (MeshMapper's live feed): an advert's sender is the advertiser.
+            self._sight(source.get("public_key"), source.get("name"), flood=True)
+        else:
+            self._sight(source.get("public_key"), source.get("name"), fill_only=True)
 
     async def _handle_message(
         self,
@@ -619,13 +615,6 @@ class CheckInPlugin(BasePlugin):
             for index, part in enumerate(pack_lines(text, max_bytes))
         ]
 
-    async def _send(self, actions: list[PluginAction]) -> None:
-        execute = getattr(self._context, "execute_actions", None)
-        if not callable(execute):
-            LOGGER.warning("Check-ins: can't reply to a check-in an observer heard (no way to send here)")
-            return
-        await execute(actions, self.name)
-
     # --- The radio ------------------------------------------------------------------------
 
     def _channel_entry(self) -> Optional[dict[str, Any]]:
@@ -671,22 +660,26 @@ class CheckInPlugin(BasePlugin):
 
     # --- Node directory -------------------------------------------------------------------
 
-    def _sight_advert(self, advert: Optional[dict[str, Any]]) -> None:
+    def _sight_advert(self, advert: Optional[dict[str, Any]], *, flood: bool = False) -> None:
         if advert:
-            self._sight(advert.get("public_key"), advert.get("name"), advert_at=float(advert["advert_timestamp"]))
+            self._sight(advert.get("public_key"), advert.get("name"), advert_at=float(advert["advert_timestamp"]), flood=flood)
 
-    def _sight(self, key: Any, name: Any, *, advert_at: Optional[float] = None, fill_only: bool = False) -> None:
+    def _sight(
+        self, key: Any, name: Any, *, advert_at: Optional[float] = None, fill_only: bool = False, flood: bool = False
+    ) -> None:
         node_id = _clean_key(key)
         name = str(name or "").strip()[:MAX_NAME_LENGTH]
         if node_id is None or not name:
             return
-        sighting = NodeSighting(node_id, name, advert_at, fill_only)
+        sighting = NodeSighting(node_id, name, advert_at, fill_only and not flood, flood)
         pending = self._pending_nodes.get(node_id)
         if pending is not None:
-            if fill_only and not pending.fill_only:
-                return
-            if (pending.advert_at or 0) > (advert_at or 0) and not pending.fill_only:
-                return
+            keep = not pending.fill_only and (sighting.fill_only or (pending.advert_at or 0) > (advert_at or 0))
+            winner, other = (pending, sighting) if keep else (sighting, pending)
+            # A flood advert heard meanwhile still counts as one until flushed.
+            if other.flood and other.name == winner.name and not winner.flood:
+                winner = dataclasses.replace(winner, flood=True)
+            sighting = winner
         self._pending_nodes[node_id] = sighting
 
     async def _flush_loop(self) -> None:

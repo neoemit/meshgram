@@ -13,9 +13,9 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 - 🔁 Bidirectional message bridge — Telegram ↔ a radio channel
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
 - 🎛️ Web control panel: radio settings, channels (add them by name), contacts, every plugin — turned on/off and configured live — and every other `config.yaml` setting (Telegram bot token and group, radio connection, web app, chunking, logging), applied with a restart from the panel
-- 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `packet_map`, `check_in`)
+- 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `letsmesh`, `meshrank`, `packet_map`, `check_in`)
 - 🏅 Weekly check-ins ("#MeshCoreMonday") with streaks, a leaderboard API and a [public leaderboard site](leaderboard/)
-- 🗺️ Optional MeshMapper observer uploads over MQTT
+- 🗺️ Optional MQTT observer uploads to MeshMapper, LetsMesh and MeshRank; other observers' messages reach the plugins like the radio's
 - 📡 Live web map of packet propagation with a packet inspector
 - 🐳 First-class Docker deployment with platform-specific overlays
 - 🛠️ Linux `systemd` service templates included
@@ -502,6 +502,46 @@ Notes:
 - The plugin is ignored, with an error in the log, when `iata` is missing.
 - It needs `paho-mqtt` and `websockets` (for the live feed), which are included in `requirements.txt`. If you installed Meshgram before they were added, rerun `pip install -r requirements.txt` or rebuild the Docker image.
 
+### `letsmesh` and `meshrank` — more MQTT observers
+
+Two more packet analyzers that take the same observer uploads (topics `meshcore/<IATA>/<PUBLIC_KEY>/packets` and `/status`, the same JSON as above), as their presets in [meshcoretomqtt](https://github.com/Cisien/meshcoretomqtt/tree/main/presets) set them up. Turn on any mix of `meshmapper`, `letsmesh` and `meshrank` (in `config.yaml` or the control panel's **Plugins** tab): each uploads independently, and a problem with one doesn't affect the others.
+
+- **`letsmesh`** — [LetsMesh](https://letsmesh.net)'s packet analyzer. It has two brokers, `mqtt-us-v1.letsmesh.net` and `mqtt-eu-v1.letsmesh.net` (port 443, WebSockets + TLS), and the plugin uploads to the ones ticked under **Servers** (`servers: [us, eu]`, both by default). The login is the same device-signed token as MeshMapper's, with the broker as its audience, so the radio signs one per broker (or `private_key` is used, as above).
+- **`meshrank`** — [MeshRank](https://meshrank.net). Its broker (`meshrank.net`, port 8883, MQTT over TLS) takes **anonymous** observers: data flows right away, the observer known by the public key in its topics, and status documents aren't retained. To attach the observer to your MeshRank account, create a registration under **Account → Observer Setup** on meshrank.net and set its login as `username` / `password`; the observer keeps its identity.
+
+```yaml
+plugins:
+  - name: letsmesh
+    enabled: true
+    settings:
+      iata: "YOW"
+      servers: [us, eu]
+  - name: meshrank
+    enabled: true
+    settings:
+      iata: "YOW"
+      # username: ""  # MeshRank observer registration (optional)
+      # password: ""
+```
+
+| Setting | Default | Plugins | Description |
+|---|---|---|---|
+| `iata` | — (**required**) | both | Region code |
+| `servers` | `[us, eu]` | `letsmesh` | Which LetsMesh brokers to upload to |
+| `username` / `password` | — | `meshrank` | Registration login (otherwise anonymous) |
+| `server` / `port` / `transport` | `meshrank.net` / `8883` / `tcp` | `meshrank` | Broker override |
+| `status_interval_seconds` | `300` | both | How often the online status is republished |
+| `subscribe` | `true` | both | Receive other observers' packets, when there's a subscriber account |
+| `subscribe_username` / `subscribe_password` | — | both | MQTT subscriber account from the broker's operator (observer logins can only publish, as on MeshMapper) |
+| `subscribe_server` / `subscribe_port` | the upload broker | both | Where the subscriber account logs in (`letsmesh`: the first server picked) |
+| `private_key` | — | `letsmesh` | As for `meshmapper` |
+
+Their connections appear in the web app's header and panel like MeshMapper's (`LetsMesh US MQTT (publish)`, `MeshRank MQTT (publish)`, …), and the log lines start with `LetsMesh US:`, `LetsMesh EU:` or `MeshRank:`.
+
+### Messages other observers heard
+
+Channel messages in the packets other observers upload are decrypted with your radio's channel keys and handed to **every plugin** like the ones the radio hears: the bridge relays them to Telegram, `ping_pong` and `trace_me` answer them (`trace_me` reports the route to the observer that heard it), `check_in` counts them, and so on. Plugins that care can tell them apart (`MeshTextEvent.source` is `"mqtt"`, and `raw_packet` names the `network` and observer). This needs packets with their bytes, so an MQTT subscriber account on one of the observer plugins (MeshMapper's live feed has no bytes). Each message is handled once however many observers (and your radio) heard it, and your own messages coming back through observers are ignored. Direct messages can't be read from other observers' packets (they're encrypted for the recipient), so they still need the radio. The same observer's packet arriving from two servers it uploads to counts once.
+
 ### `packet_map` — live packet propagation map
 
 Feeds the web app's **Map** and **Messages** views with what your radio hears in real time (the web app itself is configured in the `web` section, see [Web app and control panel](#-web-app-and-control-panel)):
@@ -509,7 +549,7 @@ Feeds the web app's **Map** and **Messages** views with what your radio hears in
 - **Map (left):** every node that shares a GPS position, from adverts the radio hears and from its contact list. Each node type has its own shape and colour (repeaters ◆, room servers ■, companions ●, sensors ▲) and your own radio is pink. When a packet arrives, a glowing dot follows its real route (originator → each repeater in its path → your radio), pausing briefly at each relay, and the trail fades once it arrives. Hops that couldn't be placed on the map are drawn dotted. In the **Nodes on map** panel, click a node type to show or hide it (Alt-click shows only that type), and turn the live packet flow on or off.
 - **Packet list (right):** every received RF packet, newest first. Each card shows the packet type, the sender, SNR/RSSI (colour-coded, with signal bars), hop count, the route as a chain of named stops, the channel and decrypted text for channel messages Meshgram has the key for, and a "Heard N×" badge when the same packet arrives over several paths. Click a card to see all decoded metadata (hash, route type, transport codes, advert key/position, source/destination hashes, raw hex), draw its route on the map with direction arrows, and replay its flow. You can search, filter by one or more packet types, and pause the list. If you scroll down, new packets don't move the list; a "new packets" button takes you back to the top. On phones the type filters are one row you swipe sideways.
 - **Hiding packet types:** types you never want to see (Acks, Paths, …) can be hidden altogether with the **Packet types shown** setting: untick them in the control panel (**Plugins → Packet map → Settings**, or the ⚙ chip at the start of the type filters, which also says how many are hidden). Hidden types leave the packet list, its filters, the header counts and the map's live flow, right away on every open page and without restarting anything. It's display only: they're still recorded, and tick a type again to bring its packets back. Nodes and the Messages tab aren't affected, and every payload type there is can be hidden, unassigned ones included.
-- **Other MeshMapper observers:** with the `meshmapper` plugin enabled, packets other observers in your region upload appear too. They carry a teal **MeshMapper** tag, their route ends at the observer that heard them, and on the map their flows are lighter and end with a teal ripple. Observers are drawn with a teal ring. A switch above the list shows **All**, **This radio** or **MeshMapper** packets, and a **MeshMapper packets** switch on the map turns their flows off. When MeshMapper knows a packet's sender, it becomes the packet's origin, and a node your radio hasn't placed yet gets MeshMapper's name and position. Packets that arrive over MQTT (with a subscriber account) carry their bytes: channel messages in them are decrypted with your radio's channel keys, and adverts they carry add node positions. Live feed packets have no bytes, so they stay undecrypted. They're kept in a separate buffer (`max_remote_packets`), so a busy region can't push out your radio's own packets.
+- **Other observers (MQTT):** with an MQTT observer plugin (`meshmapper`, `letsmesh`, `meshrank`) receiving other observers' packets, the packets other observers in your region upload appear too. They carry a teal tag naming the server they came through (**MeshMapper**, **LetsMesh**, **MeshRank**), their route ends at the observer that heard them, and on the map their flows are lighter and end with a teal ripple. Observers are drawn with a teal ring. A switch above the list shows **All**, **Radio** or **MQTT** packets (every configured MQTT server's under **MQTT**), and an **MQTT packets** switch on the map turns their flows off. The same observer's packet reported by two servers is shown once. When MeshMapper knows a packet's sender, it becomes the packet's origin, and a node your radio hasn't placed yet gets MeshMapper's name and position. Packets that arrive over MQTT (with a subscriber account) carry their bytes: channel messages in them are decrypted with your radio's channel keys, and adverts they carry add node positions. Live feed packets have no bytes, so they stay undecrypted. They're kept in a separate buffer (`max_remote_packets`), so a busy region can't push out your radio's own packets.
 - **Messages (second tab):** a table of every channel message Meshgram could decrypt, newest first. Each row shows time, channel, sender, the text, the route (hops and last relay), the best SNR/RSSI and how many copies were heard. Copies of the same message heard over different paths are grouped into one row; expand it to see each path with its time offset and signal. **Replay** switches to the map and replays every path with its real timing (or one path from the expanded row), and a "Back to messages" link returns you to the same row. Columns are sortable, and you can search or filter by channel. While you're pointing at or tabbing through the table, new messages wait behind a "new messages" button so rows don't move under you. The tab shows a count of messages that arrived while you were on the map.
 
 When the plugin is off, the Map and Messages views say so and link to the control panel's **Plugins** tab.
@@ -526,7 +566,7 @@ plugins:
 |---|---|---|
 | `hidden_packet_types` | none | Packet types left out of the page (see **Hiding packet types**): `ADVERT`, `GRP_TXT`, `GRP_DATA`, `TXT_MSG`, `ACK`, `REQ`, `RESPONSE`, `PATH`, `ANON_REQ`, `TRACE`, `MULTIPART`, `CONTROL`, `RAW_CUSTOM`, `TYPE_12`–`TYPE_14` |
 | `max_packets` | `500` | Packets kept in memory and sent to newly opened pages |
-| `max_remote_packets` | `1000` | Packets from other MeshMapper observers kept in memory (see above) |
+| `max_remote_packets` | `1000` | Packets from other observers (MQTT) kept in memory (see above) |
 | `max_messages` | `1000` | Decrypted messages kept for the Messages tab. They're kept separately from `max_packets`, so they survive busy periods of adverts and ACKs. |
 | `persist` | `true` | Save nodes and packet history to disk and restore them on restart (see **Persistence** below). Set `false` to keep everything in memory only. |
 | `db_path` | `packet_map.sqlite3` | History database. A relative path is inside `MESHGRAM_DATA_DIR`. |
@@ -551,7 +591,7 @@ Notes:
 
 ### `check_in` — weekly check-ins with streaks and a leaderboard
 
-Gamifies a weekly ritual: every Monday, nodes post `#MeshCoreMonday` on the Public channel. Any channel message on the check-in channel that **contains the keyword** (any case, anywhere in the text) on a **check-in day** is a check-in, whether your radio heard it or another MeshMapper observer did. The radio answers on the channel:
+Gamifies a weekly ritual: every Monday, nodes post `#MeshCoreMonday` on the Public channel. Any channel message on the check-in channel that **contains the keyword** (any case, anywhere in the text) on a **check-in day** is a check-in, whether your radio heard it or another observer did (over MQTT). The radio answers on the channel:
 
 ```text
 📟 MeshCore Monday
@@ -561,8 +601,8 @@ Gamifies a weekly ritual: every Monday, nodes post `#MeshCoreMonday` on the Publ
 ```
 
 - **Rank** is the order of this week's first check-ins; the **streak** counts consecutive weeks with a check-in; **participants** is how many nodes have checked in this week. Checking in again gives the same rank with the current count. Weeks run Monday to Sunday in the configured `timezone`; on other days than `days` the keyword is ignored. A streak survives until a check-in day passes without a check-in.
-- **Who checked in.** MeshCore channel messages carry the sender's *name* (`"LMB-T: …"`), not its key, so a name is matched to the one node that advertises it: adverts your radio hears, adverts in observers' packets, and the radio's contacts. A name no node has (yet), or that several nodes share, is counted under the name ("name only") and linked to the node's key once its advert is heard; you can also link it by hand. A linked participant goes by its node's latest advertised name.
-- **Observers.** With the `meshmapper` plugin and a MeshMapper **subscriber account**, check-ins heard by other observers in your region count too (MeshMapper's free live feed has no message text, so it can't reveal them). They're decrypted with your radio's key for the channel. The same message heard by your radio and several observers counts, and is answered, once. Turn off `reply_to_observed` to count them without replying.
+- **Who checked in.** MeshCore channel messages carry the sender's *name* (`"LMB-T: …"`), not its key, so a name is matched to the one node that advertises it: adverts your radio hears, adverts in observers' packets, and the radio's contacts. A name no node has (yet), or that several nodes share, is counted under the name ("name only", **unverified** on the leaderboard) and linked to the node's key once its advert is heard: as soon as that name is the only one of its kind, or at the first **flood advert** of the name heard live, by your radio or an observer over MQTT, even if other nodes (old keys, contacts) went by it before. You can also link it by hand. A linked participant goes by its node's latest advertised name.
+- **Observers.** With an MQTT observer plugin (`meshmapper`, `letsmesh`, `meshrank`) and a **subscriber account**, check-ins heard by other observers in your region count too (MeshMapper's free live feed has no message text, so it can't reveal them; see [Messages other observers heard](#messages-other-observers-heard)). They're decrypted with your radio's key for the channel. The same message heard by your radio and several observers counts, and is answered, once. Turn off `reply_to_observed` to count them without replying.
 - **Control panel.** Besides the settings, the plugin's card has a **Check-ins** panel: everyone with streak, best streak, total, this week's rank and last check-in; per participant, a 26-week grid to add or remove check-ins, set a streak, rename, link to a node, the check-ins on record, and delete. **Export…** saves a **backup** (a JSON file with every participant and every check-in, as they are) or a CSV **summary** (one row per node). **Import…** takes either: a backup brings everything back, here or in another Meshgram (*Add to what's here* skips what's already on record, so importing twice changes nothing; *Replace everything here* restores it exactly); summaries come from another check-in database. **Clear all…** deletes every participant and check-in, so the leaderboard starts from zero (names learned from adverts are kept); it offers to download a backup first.
 - **Import format:** one record per node with its key (or a key prefix, or just a name), its current `streak`, and optionally its `total` check-ins and the date of its `last_check_in`. Each record gives the node `streak` consecutive weekly check-ins up to that date (or the date you pick); `total` adds the earlier check-ins on top. CSV with a header row (`node_id,name,streak,total,last_check_in`) or JSON (`[{...}]` or `{"records": [...]}`). Preview first: nothing is imported while any record has a problem. *Replace* deletes everything first.
 - **Leaderboard API.** `GET /api/plugins/check_in/leaderboard` returns the standings, best streak first: each node's `id` (public key), `hash` (first byte), `name`, `streak`, `best_streak`, `total_check_ins`, `last_check_in`, `checked_in_this_week`, `week_rank` and `resolved` (false for name-only participants), plus where to check in (`channel`: the channel's `name` and `kind`, `public`, `hashtag` or `private`, never its key; `null` until the radio's channels are read), the week, whether the check-in window is open (and when it opens or closes), this week's participant count and `meshgram_title` (the web app's `title`, which the leaderboard site shows as its name). No individual check-ins are exposed. Set `api_token` and send `Authorization: Bearer <token>` to read it without the web app's password; with a token set, requests without it (or the password) are refused even when the web app has no password. The [leaderboard site](leaderboard/) shows it.
@@ -610,7 +650,7 @@ web:
   # tile_url / tile_attribution: a custom Leaflet tile server (default: OpenStreetMap)
 ```
 
-**Connections (header):** a status dot for each service Meshgram connects to: the **radio**, the **Telegram** bot and, with the `meshmapper` plugin, the MeshMapper MQTT connections for **publishing** (MQTT ↑) and **subscribing** (MQTT ↓), and the MeshMapper **live feed**. Green is connected, amber is connecting, red is disconnected, and a hollow dot means turned off. Click it for details. If the page loses its connection to Meshgram, the dots turn hollow grey until it reconnects.
+**Connections (header):** a status dot for each service Meshgram connects to: the **radio**, the **Telegram** bot and, with the MQTT observer plugins, one **MQTT** dot for all their connections (green when every one that's on is connected, red when one is down); the panel lists each one: publishing and subscribing per server, and MeshMapper's **live feed**. Green is connected, amber is connecting, red is disconnected, and a hollow dot means turned off. Click it for details. If the page loses its connection to Meshgram, the dots turn hollow grey until it reconnects.
 
 **Control panel** (`#control`), in six tabs:
 
@@ -650,7 +690,7 @@ The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from Op
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and chunk sequencing, ping keyword behavior, trace-me responses, DM HTTP command, MeshCore transport send/dispatch with a stubbed library, MeshMapper packet formatting / auth tokens / MQTT session handling with a fake broker client, packet map decoding / path resolution / persistence, the web server (auth, CSRF and read-only rules, event stream), the control panel API, radio administration against a simulated radio, settings schemas and secret masking, runtime plugin management, and exporting config.yaml with the control panel's changes (comments kept, read back the way Meshgram loads it).
+Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and chunk sequencing, ping keyword behavior, trace-me responses, DM HTTP command, MeshCore transport send/dispatch with a stubbed library, MQTT observer packet formatting / auth tokens / MQTT sessions (MeshMapper, LetsMesh, MeshRank) with a fake broker client, observers' channel messages reaching the plugins, packet map decoding / path resolution / persistence, the web server (auth, CSRF and read-only rules, event stream), the control panel API, radio administration against a simulated radio, settings schemas and secret masking, runtime plugin management, and exporting config.yaml with the control panel's changes (comments kept, read back the way Meshgram loads it).
 
 ---
 
@@ -693,13 +733,13 @@ Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji 
 - Verify the symlink/device path actually exists: `ls -l /dev/meshcore` (or whatever you set).
 - For udev SYMLINK rules to fire, trigger an `add` action: `sudo udevadm trigger --action=add --sysname-match=ttyACM0`.
 
-### MeshMapper observer not showing up
-- Check the logs for lines starting with `MeshMapper:`. `uploads disabled` explains why the plugin is inactive, for example a missing `iata`.
+### MQTT observer (MeshMapper, LetsMesh, MeshRank) not showing up
+- Check the logs for lines starting with `MeshMapper:`, `LetsMesh US:`, `LetsMesh EU:` or `MeshRank:`. `uploads disabled` explains why the plugin is inactive, for example a missing `iata`.
 - `MQTT connect refused: Not authorized` means the broker rejected the token. Make sure the system clock is correct (the token has `iat`/`exp` timestamps) and that a configured `private_key` belongs to this radio.
 - `could not create auth token` means the radio couldn't sign the token. Update the companion firmware or set `private_key`.
-- The `iata` value must exactly match your MeshMapper region code.
+- The `iata` value must exactly match the server's region code.
 - The observer only appears after the radio has heard at least one packet. Set `runtime.log_level: DEBUG` to see each `MeshMapper: published packet …` line.
-- No packets from other observers: check the **Live feed** dot in the web app's header (its panel says why it's down) and that `subscribe` / `live_feed` aren't `false`. Quiet regions can go minutes without a packet. **MQTT ↓** stays off without a subscriber account, which is fine. Device-signed observer logins can only publish (see **Other observers' packets**).
+- No packets from other observers: check **MeshMapper live feed** in the web app's connections panel (it says why it's down) and that `subscribe` / `live_feed` aren't `false`. Quiet regions can go minutes without a packet. The **MQTT (subscribe)** connections stay off without a subscriber account, which is fine. Device-signed observer logins can only publish (see **Other observers' packets**).
 
 ### Logs appear duplicated
 - Check there's only one container (`docker ps -a`) and one Python process (`docker exec meshgram sh -c 'ls /proc | grep "^[0-9]*$"'`). If output is duplicated only in your terminal but the raw container log (`docker inspect <name> --format '{{.LogPath}}'`) shows one copy per line, it's a transient compose/terminal artifact — restart with `docker compose up -d` and re-attach with `docker compose logs -f`.
@@ -744,7 +784,10 @@ meshgram/
 │       ├── ping_pong.py
 │       ├── trace_me.py
 │       ├── dm_http_command.py
-│       ├── meshmapper.py         # MeshMapper MQTT observer uploads
+│       ├── mqtt_observer.py      # MQTT observer uploads/subscriptions shared by the three below
+│       ├── meshmapper.py         # MeshMapper observer (+ its live feed)
+│       ├── letsmesh.py           # LetsMesh observer (US/EU brokers)
+│       ├── meshrank.py           # MeshRank observer (anonymous)
 │       ├── packet_map.py         # map/messages data for the web app
 │       ├── packet_map_store.py   # packet map SQLite persistence
 │       ├── check_in.py           # weekly check-ins: detection, replies, management

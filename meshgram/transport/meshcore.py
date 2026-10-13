@@ -9,7 +9,8 @@ import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 from ..config import MeshgramSettings
-from ..types import MeshPacketRef, MeshTextEvent, SendMeshAction
+from ..meshcore_packets import PAYLOAD_TYPE_GRP_TXT, decrypt_group_text, packet_hash, parse_packet
+from ..types import SOURCE_MQTT, MeshPacketRef, MeshTextEvent, SendMeshAction
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +24,9 @@ DEFAULT_MESHCORE_PAYLOAD_LIMIT = 140
 DEFAULT_OUTBOUND_ECHO_TEXT_FALLBACK_TTL_SECONDS = 2.0
 # Channel slots on firmware that doesn't report how many it has.
 DEFAULT_MAX_CHANNELS = 8
+# An observer's packet that arrives again within this long (through another MQTT
+# server it uploads to, say) is the same reception: dropped.
+REMOTE_DEDUPE_TTL_SECONDS = 60.0
 
 # Friendlier text for the companion protocol's error codes.
 _ERROR_TEXT = {
@@ -77,6 +81,8 @@ class MeshCoreTransport:
         self._recent_outbound_texts: dict[tuple[int, str], float] = {}
         self._rx_log_listeners: list[RxLogListener] = []
         self._remote_rx_log_listeners: list[RxLogListener] = []
+        # (observer, packet hash, path) -> (monotonic time, had the packet bytes), oldest first.
+        self._recent_remote: dict[tuple[str, str, tuple[str, ...]], tuple[float, bool]] = {}
 
     # --- Lifecycle ----------------------------------------------------------
 
@@ -397,13 +403,20 @@ class MeshCoreTransport:
         with contextlib.suppress(ValueError):
             self._rx_log_listeners.remove(listener)
 
-    # Packets heard by *other* observers (e.g. relayed from MeshMapper by the meshmapper
-    # plugin) are shared with plugins through the transport, like local RF logs. Each dict
-    # looks like an RF log (``payload``, ``snr``, ``rssi``) plus ``observer_id`` and
-    # ``observer_name``; when only packet metadata is known (MeshMapper's live feed), it has
+    # Packets heard by *other* observers (relayed from MQTT servers by the meshmapper,
+    # letsmesh and meshrank plugins) are shared with plugins through the transport, like
+    # local RF logs. Each dict looks like an RF log (``payload``, ``snr``, ``rssi``) plus
+    # ``observer_id``, ``observer_name`` and ``network`` (the service it came from, e.g.
+    # "LetsMesh"); when only packet metadata is known (MeshMapper's live feed), it has
     # ``decoded`` (header fields and path, as ``meshcore_packets.decode_packet`` returns them)
     # instead of ``payload``, and optionally ``source_node`` (``public_key``, ``name``,
     # ``lat``, ``lon``) when the sender is known.
+    #
+    # The same observer's reception reported again (it uploads to several servers) is
+    # dropped, unless the copy has the packet bytes the first didn't. Channel messages
+    # in them are decrypted with the radio's channel keys and handed to the plugins like
+    # the radio's own (``MeshTextEvent.source`` is "mqtt"); the app drops the copies of a
+    # message the radio or other observers already delivered.
 
     def add_remote_rx_log_listener(self, listener: RxLogListener) -> None:
         if listener not in self._remote_rx_log_listeners:
@@ -414,11 +427,111 @@ class MeshCoreTransport:
             self._remote_rx_log_listeners.remove(listener)
 
     async def dispatch_remote_rx_log(self, rx_log: dict[str, Any]) -> None:
+        raw = _remote_packet_bytes(rx_log)
+        parsed = parse_packet(raw) if raw is not None else None
+        if self._is_repeated_remote(rx_log, parsed):
+            return
         for listener in list(self._remote_rx_log_listeners):
             try:
                 await listener(dict(rx_log))
             except Exception:
                 LOGGER.exception("MeshCore remote RX log listener failed")
+        if parsed is not None and parsed["payload_type"] == PAYLOAD_TYPE_GRP_TXT:
+            try:
+                await self._handle_remote_channel_msg(rx_log, parsed)
+            except Exception:
+                LOGGER.exception("MeshCore: failed handling a channel message an observer heard")
+
+    def _is_repeated_remote(self, rx_log: dict[str, Any], parsed: Optional[dict[str, Any]]) -> bool:
+        observer = str(rx_log.get("observer_id") or "").strip().upper()
+        decoded = rx_log.get("decoded")
+        if parsed is not None:
+            digest = packet_hash(parsed["payload_type"], parsed["path_len_byte"], parsed["payload"])
+            key = (observer, digest, tuple(parsed["path_hashes"]))
+        elif isinstance(decoded, dict) and decoded.get("hash"):
+            path = decoded.get("path") if isinstance(decoded.get("path"), list) else []
+            key = (observer, str(decoded["hash"]).upper(), tuple(str(hop).upper() for hop in path))
+        else:
+            return False
+        now = time.monotonic()
+        recent = self._recent_remote
+        while recent:
+            oldest = next(iter(recent))
+            if now - recent[oldest][0] < REMOTE_DEDUPE_TTL_SECONDS:
+                break
+            del recent[oldest]
+        full = parsed is not None
+        seen = recent.get(key)
+        if seen is not None and (seen[1] or not full):
+            return True
+        recent.pop(key, None)
+        recent[key] = (now, full)
+        return False
+
+    async def _handle_remote_channel_msg(self, rx_log: dict[str, Any], parsed: dict[str, Any]) -> None:
+        if self._on_text is None:
+            return
+        for slot in self.channel_slots:
+            if not slot["name"] or not any(slot["secret"]):
+                continue
+            decrypted = decrypt_group_text(parsed["payload"], [slot])
+            if decrypted is not None:
+                break
+        else:
+            return
+        raw_text = str(decrypted.get("message") or "").strip()
+        if not raw_text:
+            return
+        channel_index = int(slot["index"])
+        embedded_sender, body = _split_embedded_sender(raw_text)
+        echo_reason = self._local_echo_reason(
+            channel_index=channel_index,
+            sender_pubkey_prefix=None,
+            embedded_sender=embedded_sender,
+            body=body,
+        )
+        if echo_reason is not None:
+            LOGGER.debug("Suppressing an observer's copy of our own channel message: reason=%s", echo_reason)
+            return
+        sender_timestamp = decrypted.get("sender_timestamp")
+        path_hashes = parsed["path_hashes"]
+        raw_packet: dict[str, Any] = {
+            "text": raw_text,
+            "channel_idx": channel_index,
+            "sender_timestamp": sender_timestamp,
+            # As the radio reports a message's route: the repeaters it came through, here to the observer.
+            "path_len": len(path_hashes),
+            "path": "".join(path_hashes).lower(),
+            "path_hash_mode": parsed["path_hash_size"] - 1,
+            "source": SOURCE_MQTT,
+            "network": rx_log.get("network"),
+            "observer_id": rx_log.get("observer_id"),
+            "observer_name": rx_log.get("observer_name"),
+        }
+        for key in ("snr", "rssi"):
+            if rx_log.get(key) is not None:
+                raw_packet[key] = rx_log[key]
+        LOGGER.info(
+            "MeshCore channel message via %s (observer %s): channel=%s sender=%r text=%r",
+            rx_log.get("network") or "MQTT",
+            rx_log.get("observer_name") or str(rx_log.get("observer_id") or "")[:12],
+            channel_index,
+            embedded_sender,
+            body[:80],
+        )
+        await self._on_text(
+            MeshTextEvent(
+                from_id=None,
+                to_id=None,
+                # The same id the radio gives this message, so the app drops whichever copy comes second.
+                packet_id=self._synthetic_inbound_id("ch", str(channel_index), body, sender_timestamp),
+                channel_index=channel_index,
+                text=body,
+                sender_label=embedded_sender or self._channel_sender_label(body, channel_index),
+                raw_packet=raw_packet,
+                source=SOURCE_MQTT,
+            )
+        )
 
     async def query_device_info(self) -> dict[str, Any]:
         """Return the DEVICE_INFO payload (model, firmware version) or ``{}``."""
@@ -754,6 +867,16 @@ class MeshCoreTransport:
     @staticmethod
     def _channel_sender_label(text: str, channel_index: int) -> str:  # noqa: ARG004 - reserved for future heuristics
         return f"ch{channel_index}"
+
+
+def _remote_packet_bytes(rx_log: dict[str, Any]) -> Optional[bytes]:
+    raw_hex = "".join(str(rx_log.get("payload") or "").split())
+    if not raw_hex or len(raw_hex) % 2:
+        return None
+    try:
+        return bytes.fromhex(raw_hex)
+    except ValueError:
+        return None
 
 
 def _split_embedded_sender(raw_text: str) -> tuple[Optional[str], str]:

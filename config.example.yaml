@@ -125,7 +125,8 @@ plugins:
       # transport: websockets
       # token_audience: mqtt.meshmapper.net
       # status_interval_seconds: 300
-      # Also receive other observers' packets for packet_map. They come from
+      # Also receive other observers' packets (packet_map shows them; channel
+      # messages in them reach every plugin, as the radio's do). They come from
       # MeshMapper's public live feed (no account; metadata only, no packet
       # bytes). With a subscriber account from the broker operator they also
       # come over MQTT with their bytes; the live feed stands by while MQTT is
@@ -140,6 +141,37 @@ plugins:
       # sign on-device, set the radio's private key (128 hex characters):
       # private_key: ""
 
+  - name: letsmesh
+    enabled: false
+    settings:
+      # Uploads every packet the radio hears to LetsMesh's packet analyzer
+      # (letsmesh.net) as an observer: its US and/or EU MQTT servers
+      # (mqtt-us-v1 / mqtt-eu-v1.letsmesh.net:443, WebSockets + TLS), logged in
+      # with a token the radio signs, as for MeshMapper.
+      # Required: your region code.
+      iata: "XXX"
+      servers: [us, eu]
+      # status_interval_seconds: 300
+      # Other observers' packets need a subscriber account from the operator:
+      # subscribe_username: ""
+      # subscribe_password: ""
+      # private_key: ""  # only if the firmware can't sign on the radio itself
+
+  - name: meshrank
+    enabled: false
+    settings:
+      # Uploads every packet the radio hears to MeshRank (meshrank.net:8883,
+      # MQTT over TLS) as an observer. No account needed: the radio is known by
+      # its public key. Required: your region code.
+      iata: "XXX"
+      # The login from MeshRank's observer registration (Account -> Observer
+      # Setup) attaches the observer to your account:
+      # username: ""
+      # password: ""
+      # Other observers' packets need a subscriber account from the operator:
+      # subscribe_username: ""
+      # subscribe_password: ""
+
   - name: packet_map
     enabled: false
     settings:
@@ -152,7 +184,7 @@ plugins:
       # PATH ANON_REQ TRACE MULTIPART CONTROL RAW_CUSTOM TYPE_12 TYPE_13 TYPE_14
       # hidden_packet_types: [ACK, PATH]
       # max_packets: 500
-      # max_remote_packets: 1000 # packets from other MeshMapper observers
+      # max_remote_packets: 1000 # packets other observers heard (MQTT)
       max_messages: 1000
       # Nodes and packet history are saved to an SQLite database and restored
       # on restart (inside MESHGRAM_DATA_DIR, default ./data; /app/data in Docker).
@@ -163,8 +195,8 @@ plugins:
     enabled: false
     settings:
       # Weekly check-ins: a channel message containing the keyword (any case)
-      # on a check-in day counts, heard by the radio or by other MeshMapper
-      # observers (those need the subscriber account: the live feed has no
+      # on a check-in day counts, heard by the radio or by other observers over
+      # MQTT (those need a subscriber account: MeshMapper's live feed has no
       # message text). The radio replies with the node's rank this week, its
       # streak (consecutive weeks) and the number of participants so far.
       channel: 0              # radio channel slot (0 is usually Public)

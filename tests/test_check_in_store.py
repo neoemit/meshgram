@@ -73,6 +73,26 @@ class CheckInTests(StoreTestCase):
         # Its next check-in is the same participant.
         self.assertEqual(self.store.record_check_in(record("Newbie", "k2", week=MON + timedelta(weeks=1))), pid)
 
+    def test_first_flood_advert_links_a_name_several_nodes_had(self):
+        self.store.upsert_nodes([NodeSighting(KEY_B, "Twin", 100), NodeSighting(KEY_C, "Twin", 100)], NOW)
+        pid = self.store.record_check_in(record("Twin", "k1"))
+        self.assertIsNone(self.people()["Twin"].node_id)
+        # Heard again in the contact list: still two candidates.
+        self.assertEqual(self.store.upsert_nodes([NodeSighting(KEY_B, "Twin", 150)], NOW), 0)
+        # A flood advert decides; a later one from the other node doesn't move it.
+        self.assertEqual(self.store.upsert_nodes([NodeSighting(KEY_C, "Twin", 200, flood=True)], NOW), 1)
+        self.assertEqual(self.people()["Twin"].node_id, KEY_C)
+        self.store.upsert_nodes([NodeSighting(KEY_B, "Twin", 300, flood=True)], NOW)
+        self.assertEqual(self.people()["Twin"].node_id, KEY_C)
+        self.assertEqual([h.participant_id for h in self.store.histories()], [pid])
+
+    def test_stale_flood_advert_doesnt_link_an_old_name(self):
+        self.store.upsert_nodes([NodeSighting(KEY_A, "Current", 200)], NOW)
+        self.store.record_check_in(record("Unlinked", "k1"))
+        # A replayed older advert of KEY_A under a name it no longer has.
+        self.store.upsert_nodes([NodeSighting(KEY_A, "Unlinked", 100, flood=True)], NOW)
+        self.assertIsNone(self.people()["Unlinked"].node_id)
+
     def test_renamed_node_merges_its_name_only_history(self):
         self.store.upsert_nodes([NodeSighting(KEY_A, "Old", 100)], NOW)
         old = self.store.record_check_in(record("Old", "k1", week=MON - timedelta(weeks=1)))

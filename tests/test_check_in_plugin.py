@@ -24,6 +24,7 @@ from meshgram.plugins.check_in import (
 )
 from meshgram.status import StatusRegistry
 from meshgram.text_utils import utf8_len
+from meshgram.transport import MeshCoreTransport
 from meshgram.types import MeshTextEvent, PluginContext
 from meshgram.web import WebServer
 
@@ -52,9 +53,9 @@ def channel_packet(text: str, timestamp: int, secret: bytes = PUBLIC_SECRET) -> 
     return f"{(5 << 2) | 1:02X}00" + (hashlib.sha256(secret).digest()[:1] + mac + ciphertext).hex()
 
 
-def advert_packet(public_key: str, name: str, timestamp: int = 1000) -> str:
+def advert_packet(public_key: str, name: str, timestamp: int = 1000, route_type: int = 1) -> str:
     payload = bytes.fromhex(public_key) + timestamp.to_bytes(4, "little") + b"\x00" * 64 + bytes([0x81]) + name.encode()
-    return f"{(4 << 2) | 1:02X}00" + payload.hex()
+    return f"{(4 << 2) | route_type:02X}00" + payload.hex()
 
 
 def channel_event(sender: str, text: str, timestamp: int, channel: int = 0) -> MeshTextEvent:
@@ -140,8 +141,17 @@ class CheckInTestCase(unittest.IsolatedAsyncioTestCase):
         return await self.plugin.on_mesh_message(channel_event(sender, text, timestamp, channel), self.context())
 
     async def observed(self, text: str, timestamp: int, secret: bytes = PUBLIC_SECRET):
-        await self.transport.remote_listeners[0](
-            {"payload": channel_packet(text, timestamp, secret), "observer_id": OBSERVER_KEY, "observer_name": "Hill"}
+        """An observer's packet as an MQTT observer plugin hands it on: the radio's transport decrypts it."""
+        radio = MeshCoreTransport(MeshgramSettings(telegram_bot_token="t", telegram_group_id=-1, config_path="config.yaml"))
+        radio._channels = {0: {"channel_name": "Public", "channel_secret": PUBLIC_SECRET}}
+        radio.local_short_name = "Base"
+
+        async def on_text(event):
+            self.sent.extend(await self.plugin.on_mesh_message(event, self.context()))
+
+        radio._on_text = on_text
+        await radio.dispatch_remote_rx_log(
+            {"payload": channel_packet(text, timestamp, secret), "observer_id": OBSERVER_KEY, "observer_name": "Hill", "network": "LetsMesh"}
         )
 
 
@@ -241,6 +251,38 @@ class CheckInTests(CheckInTestCase):
         await self.plugin._flush_nodes()
         entry = (await self.plugin.leaderboard())["leaderboard"][0]
         self.assertEqual((entry["id"], entry["resolved"]), (KEY_B, True))
+
+    async def test_first_flood_advert_links_a_name_other_nodes_had(self):
+        # The radio's contacts know two nodes called "Twin": a check-in from "Twin" is unverified.
+        self.transport.contacts = {KEY_A.lower(): {"adv_name": "Twin", "last_advert": 100}, KEY_B.lower(): {"adv_name": "Twin", "last_advert": 90}}
+        self.plugin._refresh_from_radio()
+        await self.plugin._flush_nodes()
+        await self.check_in("Twin", 1000)
+        self.assertFalse((await self.plugin.leaderboard())["leaderboard"][0]["resolved"])
+        # A zero-hop (direct) advert doesn't decide it; the first flood advert does, whoever heard it.
+        await self.transport.listeners[0]({"payload": advert_packet(KEY_A, "Twin", 2000, route_type=2)})
+        await self.plugin._flush_nodes()
+        self.assertFalse((await self.plugin.leaderboard())["leaderboard"][0]["resolved"])
+        await self.transport.remote_listeners[0]({"payload": advert_packet(KEY_B, "Twin", 2001), "observer_id": OBSERVER_KEY})
+        await self.transport.listeners[0]({"payload": advert_packet(KEY_A, "Twin", 2002)})
+        await self.plugin._flush_nodes()
+        entry = (await self.plugin.leaderboard())["leaderboard"][0]
+        self.assertEqual((entry["id"], entry["resolved"]), (KEY_B, True))
+
+    async def test_flood_advert_from_the_live_feed_links_a_name(self):
+        self.transport.contacts = {KEY_A.lower(): {"adv_name": "Twin", "last_advert": 100}, KEY_B.lower(): {"adv_name": "Twin", "last_advert": 90}}
+        self.plugin._refresh_from_radio()
+        await self.check_in("Twin", 1000)
+        await self.transport.remote_listeners[0](
+            {
+                "decoded": {"hash": "00" * 8, "payload_type": 4, "route_type": 1, "path": []},
+                "observer_id": OBSERVER_KEY,
+                "source_node": {"public_key": KEY_A, "name": "Twin"},
+            }
+        )
+        await self.plugin._flush_nodes()
+        entry = (await self.plugin.leaderboard())["leaderboard"][0]
+        self.assertEqual((entry["id"], entry["resolved"]), (KEY_A, True))
 
     async def test_longest_name_and_title_fit_in_one_message(self):
         # MeshCore node names are at most 31 bytes.

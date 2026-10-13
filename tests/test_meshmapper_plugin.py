@@ -177,6 +177,7 @@ class FeedObservationTests(unittest.TestCase):
         self.assertEqual(
             parse_feed_observation(_feed_data(self.OTHER), PUBKEY_HEX),
             {
+                "network": "MeshMapper",
                 "decoded": {
                     "hash": "73408C45E49BD15F",
                     "payload_type": 4,
@@ -229,6 +230,11 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.tls and config.tls_verify)
         self.assertEqual(config.token_audience, "mqtt.meshmapper.net")
         self.assertIsNone(config.validation_error())
+
+    def test_token_audience_follows_a_server_override(self):
+        config = MeshMapperConfig.from_settings({"iata": "YOW", "server": "regional.example.org"})
+        self.assertEqual(config.token_audience, "regional.example.org")
+        self.assertEqual(MeshMapperConfig.from_settings({"iata": "YOW", "token_audience": ""}).token_audience, "")
 
     def test_iata_is_required(self):
         self.assertIsNotNone(MeshMapperConfig.from_settings({}).validation_error())
@@ -571,7 +577,7 @@ class UploaderTests(unittest.TestCase):
             self.assertEqual(client.client_id, f"meshgram_sub_{PUBKEY_HEX}"[:23])
             topic = "meshcore/YOW/+/packets"
             self.assertEqual(client.subscriptions, [(topic, 0)])
-            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+            with self.assertLogs("meshgram.plugins", level="INFO"):
                 client.on_subscribe(client, None, 1, [_ReasonCode(0)], None)
             self.assertTrue(self.plugin.subscriber.is_subscribed)
 
@@ -583,7 +589,7 @@ class UploaderTests(unittest.TestCase):
                 await asyncio.sleep(0)
             self.assertEqual(
                 self.transport.remote,
-                [{"payload": "1500AABB", "observer_id": other, "observer_name": "Hilltop obs", "snr": 4.0}],
+                [{"payload": "1500AABB", "observer_id": other, "observer_name": "Hilltop obs", "snr": 4.0, "network": "MeshMapper"}],
             )
 
             # A radio reconnect keeps the existing subscriber session.
@@ -613,7 +619,7 @@ class UploaderTests(unittest.TestCase):
             self._enable_subscriber()
             await self._connect_all()
             client = self._subscriber_client()
-            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+            with self.assertLogs("meshgram.plugins", level="WARNING"):
                 client.on_subscribe(client, None, 1, [_ReasonCode(0x80)], None)
             client.on_connect(client, None, None, _ReasonCode(0), None)  # reconnect
             self.assertEqual(len(client.subscriptions), 1)
@@ -637,7 +643,7 @@ class UploaderTests(unittest.TestCase):
     def test_explains_when_nothing_receives_other_observers(self):
         async def scenario():
             self.plugin.config.live_feed = False
-            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO") as logs:
+            with self.assertLogs("meshgram.plugins", level="INFO") as logs:
                 await self._connect()
             self.assertTrue(any("subscribe_username" in line for line in logs.output))
             self.assertEqual(self.feed_sockets, [])
@@ -677,13 +683,13 @@ class UploaderTests(unittest.TestCase):
                 {"type": "configure", "resolvePath": False, "includeObserverKey": True, "includeRepeats": True},
             )
             self.assertEqual((subscribe["type"], subscribe["scope"]), ("subscribe", {"events": ["packetObservation"], "iatas": ["YOW"]}))
-            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+            with self.assertLogs("meshgram.plugins", level="INFO"):
                 await socket.deliver({"v": 1, "type": "subscribed", "id": "subscribe", "subscriptionId": "s1"})
             self.assertEqual(status.get("meshmapper_feed")["state"], "connected")
             self.assertTrue(self.plugin.live_feed.is_subscribed)
 
             other = "AB" * 32
-            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+            with self.assertLogs("meshgram.plugins", level="INFO"):
                 await socket.deliver(_feed_event(other))
             await socket.deliver(_feed_event(PUBKEY_HEX))  # our own upload
             await socket.deliver({"v": 1, "type": "pong", "id": "ping-1"})
@@ -708,18 +714,18 @@ class UploaderTests(unittest.TestCase):
             self._enable_subscriber()
             await self._connect_all()
             client = self._subscriber_client()
-            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+            with self.assertLogs("meshgram.plugins", level="INFO"):
                 client.on_subscribe(client, None, 1, [_ReasonCode(0)], None)
             socket = await self._feed_socket()
-            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+            with self.assertLogs("meshgram.plugins", level="INFO"):
                 await socket.open_subscription()
             other = "AB" * 32
             await socket.deliver(_feed_event(other))
             self.assertEqual(self.transport.remote, [])
 
-            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+            with self.assertLogs("meshgram.plugins", level="WARNING"):
                 client.on_disconnect(client, None, None, _ReasonCode(7), None)
-            with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+            with self.assertLogs("meshgram.plugins", level="INFO"):
                 await socket.deliver(_feed_event(other))
             self.assertEqual([rx["observer_id"] for rx in self.transport.remote], [other])
             await self.plugin.on_shutdown()
@@ -742,18 +748,18 @@ class UploaderTests(unittest.TestCase):
                 "meshgram.plugins.meshmapper.feed_backoff_seconds",
                 side_effect=lambda attempt, jitter: attempts.append(attempt) or 0,
             )
-            with backoff, self.assertLogs("meshgram.plugins.meshmapper", level="WARNING") as logs:
+            with backoff, self.assertLogs("meshgram.plugins", level="WARNING") as logs:
                 await self._connect()
                 socket = await self._feed_socket()
             self.assertIn("unreachable", logs.output[0])
             self.assertEqual(attempts, [0])
 
             with backoff:
-                with self.assertLogs("meshgram.plugins.meshmapper", level="INFO"):
+                with self.assertLogs("meshgram.plugins", level="INFO"):
                     await socket.open_subscription()
                 # The feed sheds load: the next attempt waits the longest.
                 socket.close_code = 1013
-                with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+                with self.assertLogs("meshgram.plugins", level="WARNING"):
                     await socket.deliver(ConnectionError("going away"))
                 await self._feed_socket(2)
             self.assertTrue(socket.closed)
@@ -786,14 +792,14 @@ class UploaderTests(unittest.TestCase):
             subscriber.on_subscribe(subscriber, None, 1, [_ReasonCode(0)], None)
             self.assertEqual(status.get("mqtt_subscribe")["state"], "connected")
 
-            with self.assertLogs("meshgram.plugins.meshmapper", level="WARNING"):
+            with self.assertLogs("meshgram.plugins", level="WARNING"):
                 uploader.on_disconnect(uploader, None, None, _ReasonCode(7), None)
             self.assertEqual(status.get("mqtt_publish")["state"], "disconnected")
             uploader.on_connect(uploader, None, None, _ReasonCode(0), None)
             uploader.on_connect_fail(uploader, None)
             self.assertEqual(status.get("mqtt_publish")["state"], "disconnected")
             self.assertIn("Can't reach", status.get("mqtt_publish")["detail"])
-            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
+            with self.assertLogs("meshgram.plugins", level="ERROR"):
                 subscriber.on_connect(subscriber, None, None, _ReasonCode(135), None)
             self.assertEqual(status.get("mqtt_subscribe")["state"], "disconnected")
             self.assertIn("credentials", status.get("mqtt_subscribe")["detail"])
@@ -819,7 +825,7 @@ class UploaderTests(unittest.TestCase):
             status = StatusRegistry()
             context = _make_context()
             context.status = status
-            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
+            with self.assertLogs("meshgram.plugins", level="ERROR"):
                 await MeshMapperPlugin({}).on_startup(context)
             for key in ("mqtt_publish", "mqtt_subscribe", "meshmapper_feed"):
                 self.assertEqual(status.get(key)["state"], "disabled")
@@ -866,7 +872,7 @@ class UploaderTests(unittest.TestCase):
     def test_auth_failure_triggers_token_refresh(self):
         async def scenario():
             client = await self._connect()
-            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
+            with self.assertLogs("meshgram.plugins", level="ERROR"):
                 client.on_connect(client, None, None, _ReasonCode(135), None)
             for _ in range(20):
                 if len(client.credentials) > 1:
@@ -896,7 +902,7 @@ class UploaderTests(unittest.TestCase):
     def test_mismatched_private_key_falls_back_to_device_signing(self):
         async def scenario():
             self.plugin.config.private_key = _expanded_key(b"\x01" * 32).hex().upper()
-            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
+            with self.assertLogs("meshgram.plugins", level="ERROR"):
                 await self._connect()
             self.assertEqual(len(self.transport.signed), 1)
             await self.plugin.on_shutdown()
@@ -906,7 +912,7 @@ class UploaderTests(unittest.TestCase):
     def test_disabled_without_iata(self):
         async def scenario():
             plugin = MeshMapperPlugin({})
-            with self.assertLogs("meshgram.plugins.meshmapper", level="ERROR"):
+            with self.assertLogs("meshgram.plugins", level="ERROR"):
                 await plugin.on_mesh_connected(self.transport, _make_context())
             self.assertEqual(self.transport.listeners, [])
 

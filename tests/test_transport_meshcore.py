@@ -396,6 +396,75 @@ class MeshCoreTransportTests(unittest.TestCase):
         asyncio.run(transport.dispatch_remote_rx_log(observation))
         self.assertEqual(len(received), 1)
 
+    def test_observers_channel_messages_reach_plugins_like_the_radios(self):
+        received: list = []
+
+        async def collector(event):
+            received.append(event)
+
+        transport = self._make_transport()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(transport.connect(loop, collector))
+            transport.local_short_name = "Base"
+            packet = _channel_packet("Alice: hello there", 1234, bytes(range(16)), path=["B1", "C2"])
+            observation = {"payload": packet, "observer_id": "AB" * 32, "observer_name": "Hill", "network": "LetsMesh", "snr": 4.0}
+            loop.run_until_complete(transport.dispatch_remote_rx_log(observation))
+            # Our own messages, heard by observers, aren't handed on; nor are channels the radio hasn't.
+            loop.run_until_complete(transport.dispatch_remote_rx_log(
+                {"payload": _channel_packet("Base: our reply", 1235, bytes(range(16))), "observer_id": "AB" * 32}))
+            loop.run_until_complete(transport.dispatch_remote_rx_log(
+                {"payload": _channel_packet("Bob: elsewhere", 1236, bytes(16)), "observer_id": "AB" * 32}))
+            # The radio hears the same message: it gets the same id, so the app keeps only one.
+            channel_callback = next(
+                cb for (etype, cb) in transport._mc.subscribed if etype == self._event_cls.CHANNEL_MSG_RECV
+            )
+            loop.run_until_complete(channel_callback(self._stub_event(
+                self._event_cls.CHANNEL_MSG_RECV, {"text": "Alice: hello there", "channel_idx": 0, "sender_timestamp": 1234})))
+        finally:
+            loop.close()
+
+        self.assertEqual(len(received), 2)
+        observed, heard = received
+        self.assertEqual((observed.source, heard.source), ("mqtt", "radio"))
+        self.assertEqual(
+            (observed.channel_index, observed.text, observed.sender_label, observed.to_id),
+            (0, "hello there", "Alice", None),
+        )
+        self.assertEqual(observed.packet_id, heard.packet_id)
+        raw = observed.raw_packet
+        self.assertEqual((raw["text"], raw["sender_timestamp"], raw["path"], raw["path_len"], raw["path_hash_mode"]),
+                         ("Alice: hello there", 1234, "b1c2", 2, 0))
+        self.assertEqual((raw["network"], raw["observer_id"], raw["observer_name"], raw["snr"]), ("LetsMesh", "AB" * 32, "Hill", 4.0))
+
+    def test_an_observers_reception_reported_twice_is_dropped(self):
+        received: list = []
+
+        async def listener(payload):
+            received.append(payload)
+
+        transport = self._make_transport()
+        transport.add_remote_rx_log_listener(listener)
+        packet = "1500AABB"
+        decoded = {"hash": "C9E77EA8831F0FBA", "path": []}  # 1500AABB's hash
+
+        async def scenario():
+            # The same observer uploads to MeshMapper and LetsMesh.
+            await transport.dispatch_remote_rx_log({"payload": packet, "observer_id": "AB" * 32, "network": "MeshMapper"})
+            await transport.dispatch_remote_rx_log({"payload": packet, "observer_id": "AB" * 32, "network": "LetsMesh"})
+            # Another observer heard it too.
+            await transport.dispatch_remote_rx_log({"payload": packet, "observer_id": "CD" * 32, "network": "LetsMesh"})
+            # Metadata first (live feed), then the bytes: the bytes still count; metadata again doesn't.
+            await transport.dispatch_remote_rx_log({"decoded": decoded, "observer_id": "EF" * 32})
+            await transport.dispatch_remote_rx_log({"payload": packet, "observer_id": "EF" * 32})
+            await transport.dispatch_remote_rx_log({"decoded": decoded, "observer_id": "EF" * 32})
+
+        asyncio.run(scenario())
+        self.assertEqual(
+            [(item["observer_id"][:2], item.get("network"), "payload" in item) for item in received],
+            [("AB", "MeshMapper", True), ("CD", "LetsMesh", True), ("EF", None, False), ("EF", None, True)],
+        )
+
     def test_sign_with_device_returns_signature_bytes(self):
         transport = self._make_transport()
         loop = asyncio.new_event_loop()
@@ -422,6 +491,20 @@ class MeshCoreTransportTests(unittest.TestCase):
 
 async def _noop_callback(_event):
     return None
+
+
+def _channel_packet(text: str, timestamp: int, secret: bytes, path: list[str] = ()) -> str:
+    """A flooded GRP_TXT packet: hash(1) || HMAC(2) || AES-128-ECB(timestamp, flags, text)."""
+    import hashlib
+    import hmac
+
+    from Crypto.Cipher import AES
+
+    plain = timestamp.to_bytes(4, "little") + b"\x00" + text.encode("utf-8")
+    plain += b"\x00" * (-len(plain) % 16)
+    ciphertext = AES.new(secret, AES.MODE_ECB).encrypt(plain)
+    mac = hmac.new(secret, ciphertext, hashlib.sha256).digest()[:2]
+    return f"{(5 << 2) | 1:02X}{len(path):02X}" + "".join(path) + (hashlib.sha256(secret).digest()[:1] + mac + ciphertext).hex()
 
 
 if __name__ == "__main__":

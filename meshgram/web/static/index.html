@@ -817,11 +817,11 @@
       <div class="panel-body" id="panel-body">
         <ul class="type-list" id="type-list"></ul>
         <div class="legend-row"><span class="swatch" id="self-swatch"></span><span>This radio</span></div>
-        <div class="legend-row" id="observer-legend" hidden><span class="observer-swatch" aria-hidden="true"></span><span>MeshMapper observer</span></div>
+        <div class="legend-row" id="observer-legend" hidden><span class="observer-swatch" aria-hidden="true"></span><span>MQTT observer</span></div>
         <div class="panel-divider"></div>
         <label class="switch-row"><span class="flow-swatch" aria-hidden="true"></span><span>Live packet flow</span>
           <input class="switch" id="flow-toggle" type="checkbox" role="switch"></label>
-        <label class="switch-row" id="remote-flow-row" hidden><span class="flow-swatch observer" aria-hidden="true"></span><span>MeshMapper packets</span>
+        <label class="switch-row" id="remote-flow-row" hidden><span class="flow-swatch observer" aria-hidden="true"></span><span>MQTT packets</span>
           <input class="switch" id="remote-flow-toggle" type="checkbox" role="switch"></label>
         <p class="panel-note" id="remote-note" hidden></p>
         <p class="panel-note" id="unplaced" hidden></p>
@@ -845,8 +845,8 @@
     </div>
     <div class="source-filter" id="source-filter" role="group" aria-label="Packet source" hidden>
       <button class="seg" type="button" data-source="all">All</button>
-      <button class="seg" type="button" data-source="local">This radio</button>
-      <button class="seg" type="button" data-source="remote" title="Packets other MeshMapper observers heard">MeshMapper <span class="n" id="remote-count"></span></button>
+      <button class="seg" type="button" data-source="local" title="Packets this radio heard">Radio</button>
+      <button class="seg" type="button" data-source="remote" title="Packets other observers heard, from the MQTT servers (MeshMapper, LetsMesh, MeshRank…)">MQTT <span class="n" id="remote-count"></span></button>
     </div>
     <div class="type-chips" id="type-chips" role="group" aria-label="Filter by packet type" hidden></div>
     <div class="list-wrap">
@@ -1064,8 +1064,11 @@ const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value));
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const hasPos = (node) => Boolean(node) && Number.isFinite(node.lat) && Number.isFinite(node.lon);
 const shortId = (id) => (id || "").slice(0, 8);
-// Packets other MeshMapper observers heard (relayed by the meshmapper plugin) rather than this radio.
-const isRemote = (packet) => packet.source === "meshmapper";
+// Packets other observers heard (relayed from MQTT servers by the meshmapper, letsmesh and meshrank
+// plugins) rather than this radio. "meshmapper": saved before there were other MQTT servers.
+const isRemote = (packet) => packet.source === "mqtt" || packet.source === "meshmapper";
+// The service a remote packet came through (MeshMapper, LetsMesh, MeshRank…).
+const networkName = (packet) => packet.network || (packet.source === "meshmapper" ? "MeshMapper" : "MQTT");
 // Packet types hidden in the control panel (Packet map plugin) are left out of the list, filters and flows.
 const isShown = (packet) => !state.hiddenPacketTypes.has(packet.payload_type_name);
 // Hashtag channels may or may not be stored with their "#".
@@ -1187,7 +1190,7 @@ function nodeIcon(node) {
   const meta = nodeMeta(node);
   const size = node.is_self ? 22 : RELAY_TYPES.has(node.type) ? 18 : 15;
   const observer = node.is_observer && !node.is_self;
-  const label = `${node.is_self ? "This radio" : meta.name}${observer ? ", MeshMapper observer" : ""}: ${node.name || shortId(node.id)}`;
+  const label = `${node.is_self ? "This radio" : meta.name}${observer ? ", MQTT observer" : ""}: ${node.name || shortId(node.id)}`;
   const html = `<span class="nm${observer ? " observer" : ""}" style="--c:${node.is_self ? SELF_COLOR : meta.color}">`
     + (node.is_self ? '<span class="nm-halo"></span>' : "")
     + `<svg viewBox="0 0 20 20" role="img" aria-label="${esc(label)}">${SHAPES[node.is_self ? "circle" : meta.shape]}</svg></span>`;
@@ -1215,7 +1218,7 @@ function nodePopup(node) {
   return el("div", { class: "popup" },
     el("div", { class: "popup-chips" },
       el("span", { class: "chip", style: `--c:${node.is_self ? SELF_COLOR : meta.color}` }, node.is_self ? "This radio" : meta.name),
-      node.is_observer && !node.is_self ? el("span", { class: "chip", style: `--c:${OBSERVER_COLOR}` }, "MeshMapper observer") : null),
+      node.is_observer && !node.is_self ? el("span", { class: "chip", style: `--c:${OBSERVER_COLOR}` }, "MQTT observer") : null),
     el("div", { class: "popup-title" }, node.name || shortId(node.id)),
     el("dl", {}, rows.map(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
     el("button", { class: "btn btn-sm", type: "button", onclick: () => { map.closePopup(); setSearch(query); } },
@@ -1368,7 +1371,7 @@ function updateNodeStats() {
 // --- Packet routes ----------------------------------------------------------------------
 
 // Positioned stops in travel order. Flood packets: originator → relays → the radio that heard
-// it (this one, or the MeshMapper observer that reported it).
+// it (this one, or the MQTT observer that reported it).
 // Direct packets carry the remaining route, so they're drawn along it in order.
 // `gap` marks a stop reached through relays we couldn't place on the map.
 function routeStops(packet) {
@@ -1588,10 +1591,10 @@ function observerName(packet) {
   return (node && node.name) || observer.name || shortId(observer.node_id) || "Observer";
 }
 
-// Last stop of a flood route: this radio, or the MeshMapper observer that reported the packet.
+// Last stop of a flood route: this radio, or the MQTT observer that reported the packet.
 function receiverStop(packet) {
   if (!isRemote(packet)) return el("span", { class: "stop self" }, "You");
-  return el("span", { class: "stop observer", title: "MeshMapper observer that heard it" }, observerName(packet));
+  return el("span", { class: "stop observer", title: `Observer that heard it (via ${networkName(packet)})` }, observerName(packet));
 }
 
 function signalView(packet) {
@@ -1617,7 +1620,7 @@ function detailRows(packet) {
     ["Type", `${meta.label} · ${packet.payload_type_name} (${packet.payload_type})${packet.payload_version != null ? ` v${packet.payload_version}` : ""}`],
     ["Route", `${packet.route_type_name} (${packet.route_type})`],
     ["Packet hash", packet.hash, true],
-    isRemote(packet) ? ["Reported by", `${observerName(packet)} (MeshMapper) · ${shortId((packet.observer || {}).node_id)}`] : null,
+    isRemote(packet) ? ["Reported by", `${observerName(packet)} (${networkName(packet)}) · ${shortId((packet.observer || {}).node_id)}`] : null,
     [isRemote(packet) ? "Reports" : "Heard", `${packet.seen_count}×`],
     packet.len != null ? ["Size", `${packet.len} B · payload ${packet.payload_len} B`] : null,
     ["Hops", `${packet.hops} · ${packet.path_hash_size}-byte hashes`],
@@ -1673,7 +1676,7 @@ function packetCard(packet, fresh) {
       packet.message ? el("span", { class: "pkt-msg" }, packet.message) : null,
       routeChain(packet),
       el("span", { class: "pkt-meta" },
-        isRemote(packet) ? el("span", { class: "tag observer", title: `Reported to MeshMapper by ${observerName(packet)}` }, "MeshMapper") : null,
+        isRemote(packet) ? el("span", { class: "tag observer", title: `Reported over MQTT to ${networkName(packet)} by ${observerName(packet)}` }, networkName(packet)) : null,
         signalView(packet),
         el("span", {}, hopsText(packet)),
         packet.advert && packet.advert.lat != null ? el("span", { class: "tag" }, "GPS") : null,
@@ -1857,7 +1860,7 @@ function updateSourceFilter() {
   const observers = new Set(remote.map((p) => (p.observer || {}).node_id)).size;
   $("remote-flow-row").hidden = observers === 0;
   $("remote-note").hidden = observers === 0;
-  $("remote-note").textContent = `Packets from ${plural(observers, "MeshMapper observer", "MeshMapper observers")}`;
+  $("remote-note").textContent = `Packets from ${plural(observers, "MQTT observer", "MQTT observers")}`;
 }
 $("source-filter").addEventListener("click", (event) => {
   const button = event.target.closest(".seg");
@@ -2068,7 +2071,7 @@ function messageDetails(group) {
       i === 0 ? fmtTime(copy.received_at) : `+${(copy.received_at - start).toFixed(1)} s`),
     el("span", { class: "path-chain" }, pathChain(copy)),
     el("span", { class: "path-sig" },
-      isRemote(copy) ? el("span", { class: "tag observer", title: `Reported to MeshMapper by ${observerName(copy)}` }, "MeshMapper") : null,
+      isRemote(copy) ? el("span", { class: "tag observer", title: `Reported over MQTT to ${networkName(copy)} by ${observerName(copy)}` }, networkName(copy)) : null,
       signalView(copy)),
     el("span", { class: "path-action" }, routeStops(copy).length
       ? el("button", { class: "btn btn-sm", type: "button", "data-action": "replay-path", "data-id": copy.id, "aria-label": `Replay path ${i + 1} on the map` },
@@ -2118,9 +2121,9 @@ function messageRows(group, fresh) {
     }, signalCell(group.snr, group.rssi)),
     el("td", {
       class: "cell-heard num",
-      title: group.remote ? `${plural(group.heard - group.remote, "copy", "copies")} heard by this radio, ${group.remote} reported by other MeshMapper observers`
+      title: group.remote ? `${plural(group.heard - group.remote, "copy", "copies")} heard by this radio, ${group.remote} reported by other observers over MQTT`
         : plural(group.heard, "copy heard", "copies heard"),
-    }, `${group.heard}×`, group.remote ? el("span", { class: "sub" }, `${group.remote} via MeshMapper`) : null),
+    }, `${group.heard}×`, group.remote ? el("span", { class: "sub" }, `${group.remote} via MQTT`) : null),
     el("td", { class: "col-actions" }, replayButton(group)));
   const details = el("tr", { class: "msg-details", id: detailsId, "data-hash": group.hash, hidden: !expanded },
     el("td", { colspan: "9" }, expanded ? messageDetails(group) : null));
@@ -2403,7 +2406,7 @@ $("skip-link").addEventListener("click", (event) => {
 // --- Connections -------------------------------------------------------------------------------
 
 // Short header labels; the panel shows the server's full labels.
-const CONN_LABELS = { radio: "Radio", telegram: "Telegram", mqtt_publish: "MQTT ↑", mqtt_subscribe: "MQTT ↓", meshmapper_feed: "Live feed" };
+const CONN_LABELS = { radio: "Radio", telegram: "Telegram" };
 const CONN_STATES = { connected: "Connected", connecting: "Connecting…", disconnected: "Disconnected", disabled: "Off", unknown: "Unknown" };
 const connections = { list: [], stale: false };
 // Whether the control panel may change things (from the server; see control.js).
@@ -2413,16 +2416,35 @@ function connState(conn) {
   return connections.stale ? "unknown" : conn.state;
 }
 
+// The MQTT observers' connections (MeshMapper, LetsMesh, MeshRank) share one header pill; the panel lists each.
+const isMqttConnection = (conn) => /^(mqtt_|meshmapper_|letsmesh_|meshrank_)/.test(conn.key);
+
+// One state for several connections: off if all are, else connected only if every one that's on is.
+function combinedState(conns) {
+  const states = conns.map(connState);
+  if (states.includes("unknown")) return "unknown";
+  const on = states.filter((s) => s !== "disabled");
+  if (on.length === 0) return "disabled";
+  if (on.every((s) => s === "connected")) return "connected";
+  return on.includes("disconnected") ? "disconnected" : "connecting";
+}
+
+function connPill(label, fullLabel, s) {
+  return el("span", { class: "conn", "data-state": s },
+    el("span", { class: "dot", "aria-hidden": "true" }),
+    el("span", { class: "conn-label", "aria-hidden": "true" }, label),
+    el("span", { class: "sr-only" }, `${fullLabel} ${CONN_STATES[s] || s}`));
+}
+
 function renderConnections() {
   const wrap = $("conns-wrap");
   wrap.hidden = connections.list.length === 0;
-  const pills = connections.list.map((conn) => {
-    const s = connState(conn);
-    return el("span", { class: "conn", "data-state": s },
-      el("span", { class: "dot", "aria-hidden": "true" }),
-      el("span", { class: "conn-label", "aria-hidden": "true" }, CONN_LABELS[conn.key] || conn.label),
-      el("span", { class: "sr-only" }, `${conn.label} ${CONN_STATES[s] || s}`));
-  });
+  const mqtt = connections.list.filter(isMqttConnection);
+  const pills = [];
+  for (const conn of connections.list) {
+    if (!isMqttConnection(conn)) pills.push(connPill(CONN_LABELS[conn.key] || conn.label, conn.label, connState(conn)));
+    else if (conn === mqtt[0]) pills.push(connPill("MQTT", "MQTT servers", combinedState(mqtt)));
+  }
   $("conn-pills").replaceChildren(...pills);
   const summary = connections.list.map((conn) => `${conn.label}: ${CONN_STATES[connState(conn)]}`).join("\n");
   $("conns-toggle").title = connections.stale ? `${summary}\n(web app disconnected; status may be out of date)` : summary;

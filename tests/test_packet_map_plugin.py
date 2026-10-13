@@ -20,6 +20,7 @@ from meshgram.plugins.packet_map_store import (
     PacketMapStore,
     PacketMapStoreError,
     RetentionLimits,
+    SavedState,
 )
 from meshgram.web import WebServer
 
@@ -228,10 +229,10 @@ class StateTests(unittest.TestCase):
         self.state.channels = [CHANNEL]
         raw = _flood(5, ["B1"], _channel_payload("Phone: hi from the hill"))
         packet = self.state.ingest_remote_rx_log(
-            {"payload": raw, "snr": 4.5, "rssi": -90, "observer_id": OBSERVER_KEY.lower(), "observer_name": "Hill"},
+            {"payload": raw, "snr": 4.5, "rssi": -90, "observer_id": OBSERVER_KEY.lower(), "observer_name": "Hill", "network": "LetsMesh"},
             now=50.0,
         )
-        self.assertEqual(packet["source"], "meshmapper")
+        self.assertEqual((packet["source"], packet["network"]), ("mqtt", "LetsMesh"))
         self.assertEqual(packet["observer"], {"node_id": OBSERVER_KEY, "name": "Hill Observer"})
         # Decrypted with the radio's channel keys.
         self.assertEqual((packet["channel_name"], packet["sender_name"], packet["message"]), ("#ping", "Phone", "hi from the hill"))
@@ -269,7 +270,7 @@ class StateTests(unittest.TestCase):
              "source_node": {"public_key": sender, "name": "Phone", "lat": 45.3, "lon": -73.3}},
             now=60.0,
         )
-        self.assertEqual((packet["hash"], packet["source"], packet["snr"]), ("0123456789ABCDEF", "meshmapper", 6.0))
+        self.assertEqual((packet["hash"], packet["source"], packet["snr"]), ("0123456789ABCDEF", "mqtt", 6.0))
         self.assertNotIn("raw", packet)
         self.assertNotIn("message", packet)  # nothing to decrypt
         self.assertEqual(packet["path_nodes"][0]["node_id"], REPEATER_KEY)
@@ -446,6 +447,11 @@ class StoreTests(_DataDirMixin, unittest.TestCase):
         state.ingest_remote_rx_log(
             {"payload": _flood(2, [], "C3AA" + "0011"), "observer_id": OBSERVER_KEY, "observer_name": "Hill"}, now=4.0
         )
+
+    def test_history_saved_as_meshmapper_packets_is_still_remote(self):
+        state = PacketMapState()
+        state.restore(SavedState(packets=[{"id": 7, "received_at": 1.0, "hash": "AB" * 8, "source": "meshmapper"}]))
+        self.assertEqual(([p["id"] for p in state.remote_packets], list(state.packets)), ([7], []))
 
     def test_round_trip(self):
         store = self._store()

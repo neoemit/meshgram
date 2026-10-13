@@ -20,6 +20,8 @@ BUILTIN_PLUGINS: dict[str, str] = {
     "dm_http_command": "meshgram.plugins.dm_http_command:DirectMessageHttpCommandPlugin",
     "trace_me": "meshgram.plugins.trace_me:TraceMePlugin",
     "meshmapper": "meshgram.plugins.meshmapper:MeshMapperPlugin",
+    "letsmesh": "meshgram.plugins.letsmesh:LetsMeshPlugin",
+    "meshrank": "meshgram.plugins.meshrank:MeshRankPlugin",
     "packet_map": "meshgram.plugins.packet_map:PacketMapPlugin",
     "check_in": "meshgram.plugins.check_in:CheckInPlugin",
 }
