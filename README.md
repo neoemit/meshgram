@@ -14,7 +14,7 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
 - 🎛️ Web control panel: radio settings, channels (add them by name), contacts, every plugin — turned on/off and configured live — and every other `config.yaml` setting (Telegram bot token and group, radio connection, web app, chunking, logging), applied with a restart from the panel
 - 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `letsmesh`, `meshrank`, `custom_mqtt`, `packet_map`, `check_in`)
-- 🏅 Weekly check-ins ("#MeshCoreMonday") with streaks, a leaderboard API and a [public leaderboard site](leaderboard/)
+- 🏅 Daily or weekly check-ins ("#MeshCoreMonday") with streaks, a leaderboard API and a [public leaderboard site](leaderboard/)
 - 🗺️ Optional MQTT observer uploads to MeshMapper, LetsMesh and MeshRank; other observers' messages reach the plugins like the radio's
 - 📡 Live web map of packet propagation with a packet inspector
 - 🐳 First-class Docker deployment with platform-specific overlays
@@ -681,9 +681,9 @@ Notes:
 - If the file is unreadable (for example corrupt), it's renamed to `packet_map.sqlite3.corrupt-<timestamp>` and a new one is started. If the directory isn't writable, the error is logged and the map runs without persistence.
 - The database contains decrypted channel messages and node positions, like the page itself, so protect the data directory accordingly.
 
-### `check_in` — weekly check-ins with streaks and a leaderboard
+### `check_in` — daily or weekly check-ins with streaks and a leaderboard
 
-Gamifies a weekly ritual: every Monday, nodes post `#MeshCoreMonday` on the Public channel. Any channel message on the check-in channel that **contains the keyword** (any case, anywhere in the text) on a **check-in day** is a check-in, whether your radio heard it or another observer did (over MQTT). The radio answers on the channel:
+Gamifies a daily or weekly ritual: every Monday, say, nodes post `#MeshCoreMonday` on the Public channel. Check-ins are **weekly** (`frequency: weekly`, the default: once a week, on one `day` of the week) or **daily** (`frequency: daily`: once a day, any day). Any channel message on the check-in channel that **contains the keyword** (any case, anywhere in the text) on a **check-in day** is a check-in, whether your radio heard it or another observer did (over MQTT). The radio answers on the channel:
 
 ```text
 📟 MeshCore Monday
@@ -692,13 +692,15 @@ Gamifies a weekly ritual: every Monday, nodes post `#MeshCoreMonday` on the Publ
 👥 13 participants
 ```
 
-- **Rank** is the order of this week's first check-ins; the **streak** counts consecutive weeks with a check-in; **participants** is how many nodes have checked in this week. Checking in again gives the same rank with the current count. Weeks run Monday to Sunday in the configured `timezone`; on other days than `days` the keyword is ignored. A streak survives until a check-in day passes without a check-in.
+- **Weekly:** **rank** is the order of this week's first check-ins; the **streak** counts consecutive weeks with a check-in; **participants** is how many nodes have checked in this week. Weeks run Monday to Sunday in the configured `timezone`; on other days than `day` the keyword is ignored. A streak survives until a check-in day passes without a check-in.
+- **Daily:** the same per day: rank today, a streak of consecutive days ("🏅 LMB-T is #3 today"), participants today. Days run midnight to midnight in `timezone`. Yesterday's streak holds all day today, and breaks once a day passes without a check-in.
+- Checking in again in the same day or week gives the same rank with the current count. Changing `frequency` or `day` keeps the history: every check-in is recorded with its date, and counted by the new schedule from then on (a week with check-ins on several days is one weekly check-in).
 - **Who checked in.** MeshCore channel messages carry the sender's *name* (`"LMB-T: …"`), not its key, so a name is matched to the one node that advertises it: adverts your radio hears, adverts in observers' packets, and the radio's contacts. A name no node has (yet), or that several nodes share, is counted under the name ("name only", **unverified** on the leaderboard) and linked to the node's key once its advert is heard: as soon as that name is the only one of its kind, or at the first **flood advert** of the name heard live, by your radio or an observer over MQTT, even if other nodes (old keys, contacts) went by it before. You can also link it by hand. A linked participant goes by its node's latest advertised name.
 - **Observers.** With an MQTT observer plugin (`meshmapper`, `letsmesh`, `meshrank`) and a **subscriber account**, or a `custom_mqtt` server whose login can read, check-ins heard by other observers in your region count too (MeshMapper's free live feed has no message text, so it can't reveal them; see [Messages other observers heard](#messages-other-observers-heard)). They're decrypted with your radio's key for the channel. The same message heard by your radio and several observers counts, and is answered, once. Turn off `reply_to_observed` to count them without replying.
-- **Control panel.** Besides the settings, the plugin's card has a **Check-ins** panel: everyone with streak, best streak, total, this week's rank and last check-in; per participant, a 26-week grid to add or remove check-ins, set a streak, rename, link to a node, the check-ins on record, and delete. **Export…** saves a **backup** (a JSON file with every participant and every check-in, as they are) or a CSV **summary** (one row per node). **Import…** takes either: a backup brings everything back, here or in another Meshgram (*Add to what's here* skips what's already on record, so importing twice changes nothing; *Replace everything here* restores it exactly); summaries come from another check-in database. **Clear all…** deletes every participant and check-in, so the leaderboard starts from zero (names learned from adverts are kept); it offers to download a backup first.
-- **Import format:** one record per node with its key (or a key prefix, or just a name), its current `streak`, and optionally its `total` check-ins and the date of its `last_check_in`. Each record gives the node `streak` consecutive weekly check-ins up to that date (or the date you pick); `total` adds the earlier check-ins on top. CSV with a header row (`node_id,name,streak,total,last_check_in`) or JSON (`[{...}]` or `{"records": [...]}`). Preview first: nothing is imported while any record has a problem. *Replace* deletes everything first.
-- **Leaderboard API.** `GET /api/plugins/check_in/leaderboard` returns the standings, best streak first: each node's `id` (public key), `hash` (first byte), `name`, `streak`, `best_streak`, `total_check_ins`, `last_check_in`, `checked_in_this_week`, `week_rank` and `resolved` (false for name-only participants), plus where to check in (`channel`: the channel's `name` and `kind`, `public`, `hashtag` or `private`, never its key; `null` until the radio's channels are read), the week, whether the check-in window is open (and when it opens or closes), this week's participant count and `meshgram_title` (the web app's `title`, which the leaderboard site shows as its name). No individual check-ins are exposed. Set `api_token` and send `Authorization: Bearer <token>` to read it without the web app's password; with a token set, requests without it (or the password) are refused even when the web app has no password. The [leaderboard site](leaderboard/) shows it.
-- **Persistence.** Participants, every check-in and the names from adverts are kept in `check_in.sqlite3` in `MESHGRAM_DATA_DIR` (the `meshgram-data` volume in Docker), written as they happen. It survives restarts, rebuilds and `docker compose down` (not `down -v`). Back it up from the control panel (Export… → Download backup) or with `sqlite3 check_in.sqlite3 ".backup backup.sqlite3"`.
+- **Control panel.** Besides the settings, the plugin's card has a **Check-ins** panel: everyone with streak, best streak, total, today's or this week's rank and last check-in; per participant, a grid of the last 26 weeks (or 28 days) to add or remove check-ins, set a streak, rename, link to a node, the check-ins on record, and delete. **Export…** saves a **backup** (a JSON file with every participant and every check-in, as they are) or a CSV **summary** (one row per node). **Import…** takes either: a backup brings everything back, here or in another Meshgram (*Add to what's here* skips what's already on record, so importing twice changes nothing; *Replace everything here* restores it exactly); summaries come from another check-in database. **Clear all…** deletes every participant and check-in, so the leaderboard starts from zero (names learned from adverts are kept); it offers to download a backup first.
+- **Import format:** one record per node with its key (or a key prefix, or just a name), its current `streak`, and optionally its `total` check-ins and the date of its `last_check_in`. Each record gives the node `streak` consecutive daily or weekly check-ins (as the plugin counts them) up to that date (or the date you pick); `total` adds the earlier check-ins on top. CSV with a header row (`node_id,name,streak,total,last_check_in`) or JSON (`[{...}]` or `{"records": [...]}`). Preview first: nothing is imported while any record has a problem. *Replace* deletes everything first.
+- **Leaderboard API.** `GET /api/plugins/check_in/leaderboard` returns the standings, best streak first: each node's `id` (public key), `hash` (first byte), `name`, `streak`, `best_streak`, `total_check_ins`, `last_check_in`, `checked_in_this_period`, `period_rank` and `resolved` (false for name-only participants), plus where to check in (`channel`: the channel's `name` and `kind`, `public`, `hashtag` or `private`, never its key; `null` until the radio's channels are read), `frequency` (`daily` or `weekly`) and `check_in_day` (weekly), the `period` under way (today, or this week's Monday), whether the check-in window is open (and when it opens or closes), the participant count so far (`participants_this_period`) and `meshgram_title` (the web app's `title`, which the leaderboard site shows as its name). No individual check-ins are exposed. The older field names (`week`, `check_in_days`, `participants_this_week`, `checked_in_this_week`, `week_rank`) are still sent for sites made before daily check-ins; see the [leaderboard site's README](leaderboard/README.md#what-the-leaderboard-contains). Set `api_token` and send `Authorization: Bearer <token>` to read it without the web app's password; with a token set, requests without it (or the password) are refused even when the web app has no password. The [leaderboard site](leaderboard/) shows it.
+- **Persistence.** Participants, every check-in (with its date) and the names from adverts are kept in `check_in.sqlite3` in `MESHGRAM_DATA_DIR` (the `meshgram-data` volume in Docker), written as they happen. It survives restarts, rebuilds and `docker compose down` (not `down -v`). Back it up from the control panel (Export… → Download backup) or with `sqlite3 check_in.sqlite3 ".backup backup.sqlite3"`.
 
 ```yaml
 plugins:
@@ -706,6 +708,8 @@ plugins:
     enabled: true
     settings:
       keyword: "#MeshCoreMonday"
+      frequency: weekly   # or daily
+      day: 0              # Monday
       timezone: Europe/Rome
       api_token: "a-long-random-string"
 ```
@@ -715,16 +719,19 @@ plugins:
 | `channel` | `0` | Channel slot where check-ins are posted and answered |
 | `keyword` | `#MeshCoreMonday` | Word or phrase a message must contain (any case) |
 | `title` | `MeshCore Monday` | Heads the reply and the leaderboard; at most 20 characters |
-| `days` | `[0]` | Weekdays check-ins count on, `0` = Monday … `6` = Sunday; `[]` = any day |
+| `frequency` | `weekly` | `weekly`: one check-in a week counts, on `day`; `daily`: one a day, any day. Streaks and ranks are per week or per day |
+| `day` | `0` | Weekly check-ins only: the day of the week they count on, `0` = Monday … `6` = Sunday (or a name, `monday`) |
 | `timezone` | `UTC` | IANA time zone where days and weeks begin |
 | `reply` | `true` | Answer check-ins on the channel |
 | `reply_to_observed` | `true` | Also answer check-ins only other observers heard |
-| `reply_template` | the message above | Placeholders `{title}`, `{name}`, `{rank}`, `{streak}`, `{streak_weeks}` ("15 weeks"), `{participants}`, `{participants_label}` ("13 participants"), `{total}`, `{keyword}`. A reply longer than one radio message (120 bytes with the default chunking settings) gets the name and title shortened (…) to fit; one that still doesn't fit is split between lines. The default reply always goes out as one message. |
+| `reply_template` | the message above | Placeholders `{title}`, `{name}`, `{rank}`, `{this_period}` ("this week" or "today"), `{streak}`, `{streak_label}` ("15 weeks" or "15 days"; `{streak_weeks}` is its older name), `{participants}`, `{participants_label}` ("13 participants"), `{total}`, `{keyword}`. A reply longer than one radio message (120 bytes with the default chunking settings) gets the name and title shortened (…) to fit; one that still doesn't fit is split between lines. The default reply always goes out as one message. |
 | `reply_cooldown_seconds` | `30` | Check-ins from the same node sooner than this after a reply still count, unanswered |
 | `api_token` | none | Bearer token for the leaderboard API (secret) |
 | `db_path` | `check_in.sqlite3` | Database file; a relative path is inside `MESHGRAM_DATA_DIR` |
 
 Everything but `db_path` changes without a restart.
+
+The older `days` setting (a list of weekdays) still works while `day` isn't set: one day becomes `day`. Weekly check-ins have one day now, so a list of several days (or `[]`, any day) counts on the first of them (Monday for `[]`), with a warning in the log; set `day`, or `frequency: daily`, instead.
 
 ---
 
@@ -884,9 +891,9 @@ meshgram/
 │       ├── custom_mqtt.py        # observer on MQTT servers of your choice
 │       ├── packet_map.py         # map/messages data for the web app
 │       ├── packet_map_store.py   # packet map SQLite persistence
-│       ├── check_in.py           # weekly check-ins: detection, replies, management
+│       ├── check_in.py           # daily/weekly check-ins: detection, replies, management
 │       ├── check_in_api.py       # its routes: leaderboard API, control panel
-│       ├── check_in_scoring.py   # weeks, streaks, ranks
+│       ├── check_in_scoring.py   # schedules (days, weeks), streaks, ranks
 │       └── check_in_store.py     # check-in SQLite persistence
 ├── leaderboard/                  # public check-in leaderboard site (deployed separately)
 └── tests/

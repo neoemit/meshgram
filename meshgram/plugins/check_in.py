@@ -1,13 +1,14 @@
-"""Weekly check-ins: nodes post a keyword ("#MeshCoreMonday") on a channel and get counted.
+"""Daily or weekly check-ins: nodes post a keyword ("#MeshCoreMonday") on a channel and get counted.
 
-A channel message containing the keyword (any case, anywhere in the text) on a
-check-in day is a check-in, whether this radio heard it or another observer did
-(the transport decrypts the channel messages in the packets the MQTT observer
-plugins receive and hands them to ``on_mesh_message`` with ``source`` "mqtt";
-MeshMapper's free live feed has no packet bytes, so no text). The
-radio answers on the channel with the sender's rank this week, streak and the
-number of participants so far; asking again gives the same rank with the current
-count.
+Check-ins are counted per day (``frequency: daily``) or per week, on one day of
+the week (``frequency: weekly``, ``day``). A channel message containing the
+keyword (any case, anywhere in the text) on a check-in day is a check-in, whether
+this radio heard it or another observer did (the transport decrypts the channel
+messages in the packets the MQTT observer plugins receive and hands them to
+``on_mesh_message`` with ``source`` "mqtt"; MeshMapper's free live feed has no
+packet bytes, so no text). The radio answers on the channel with the sender's rank
+today or this week, streak and the number of participants so far; asking again
+gives the same rank with the current count.
 
 Channel messages carry the sender's name, not its key, so a name is matched to
 the one node that advertises it (adverts the radio and observers hear, and the
@@ -30,7 +31,7 @@ import re
 import time
 import zoneinfo
 from dataclasses import dataclass, field
-from datetime import date, datetime, time as dtime, timedelta, timezone, tzinfo
+from datetime import date, datetime, time as dtime, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -44,12 +45,13 @@ from meshgram.meshcore_packets import (
 from meshgram.plugin import CHANNEL_FORMAT, BasePlugin
 from meshgram.plugins.check_in_api import register_check_in_routes
 from meshgram.plugins.check_in_scoring import (
+    FREQUENCIES,
     WEEKDAY_NAMES,
+    WEEKLY,
+    Schedule,
     Standing,
-    check_in_window,
-    is_check_in_day,
     local_moment,
-    parse_week,
+    parse_date,
     standings,
     week_start,
 )
@@ -64,6 +66,7 @@ from meshgram.plugins.check_in_store import (
     CheckInStore,
     NodeSighting,
     SummaryRecord,
+    day_in_week,
 )
 from meshgram.radio_admin import channel_kind
 from meshgram.text_utils import channel_message_max_bytes, split_text_by_bytes, utf8_len
@@ -73,12 +76,12 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_KEYWORD = "#MeshCoreMonday"
 DEFAULT_TITLE = "MeshCore Monday"
-# 59 bytes without the numbers, name and title: with a title of up to MAX_TITLE_LENGTH characters,
-# any node name (MeshCore's are at most 31 bytes) and three-digit numbers, it fits in one radio
-# message (120 bytes).
+# 59 bytes without the numbers, name and title ({this_period} is "this week" or "today"): with a
+# title of up to MAX_TITLE_LENGTH characters, any node name (MeshCore's are at most 31 bytes) and
+# three-digit numbers, it fits in one radio message (120 bytes).
 DEFAULT_TEMPLATE = (
     "📟 {title}\n"
-    "🏅 {name} is #{rank} this week\n"
+    "🏅 {name} is #{rank} {this_period}\n"
     "🔥 Streak: {streak}\n"
     "👥 {participants_label}"
 )
@@ -99,9 +102,10 @@ MAX_BACKUP_CHECK_INS = 200_000
 MAX_STREAK = 1000
 MAX_NAME_LENGTH = 64
 MAX_TEXT_LENGTH = 500
-# A backup file says what it is, and which version of the format it's in.
+# A backup file says what it is, and which version of the format it's in
+# (1: check-ins by "week", its Monday; 2: by "day").
 BACKUP_FORMAT = "meshgram-check-ins"
-BACKUP_VERSION = 1
+BACKUP_VERSION = 2
 CHANGE_EVENT = {"type": "control", "what": "check_in"}
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 KEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -142,19 +146,44 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
-def _days(value: Any) -> frozenset[int]:
-    """Weekdays (0 = Monday) from a list or a "0,1" / "mon, tue" string."""
-    if value is None:
-        return frozenset({0})
+def _weekday(value: Any) -> Optional[int]:
+    """A weekday (0 = Monday) from 0-6 or a name ("mon", "Monday"); None if it's neither."""
+    text = str(value).strip().lower()
+    if text.isdigit():
+        return int(text) if 0 <= int(text) <= 6 else None
+    return DAY_ALIASES.get(text[:3]) if len(text) >= 3 else None
+
+
+def _legacy_days(value: Any) -> list[int]:
+    """The weekdays of the old ``days`` setting (a list, or a "0,1" / "mon, tue" string)."""
     items = value.split(",") if isinstance(value, str) else value if isinstance(value, (list, tuple, set)) else [value]
-    days: set[int] = set()
-    for item in items:
-        text = str(item).strip().lower()
-        if text.isdigit() and 0 <= int(text) <= 6:
-            days.add(int(text))
-        elif text[:3] in DAY_ALIASES:
-            days.add(DAY_ALIASES[text[:3]])
-    return frozenset(days)
+    return sorted({day for day in map(_weekday, items) if day is not None})
+
+
+def schedule_from_settings(settings: dict[str, Any]) -> Schedule:
+    """``frequency`` and ``day``; without ``day``, the old ``days`` list's (weekly check-ins have one day)."""
+    frequency = str(settings.get("frequency") or WEEKLY).strip().lower()
+    if frequency not in FREQUENCIES:
+        LOGGER.warning("Check-ins: unknown frequency %r (daily or weekly); counting weekly", settings.get("frequency"))
+        frequency = WEEKLY
+    if settings.get("day") is not None:
+        day = _weekday(settings["day"])
+        if day is None:
+            LOGGER.warning("Check-ins: %r isn't a day of the week (0 = Monday … 6 = Sunday); using Monday", settings["day"])
+        return Schedule(frequency, day or 0)
+    if settings.get("days") is None:
+        return Schedule(frequency)
+    days = _legacy_days(settings["days"])
+    if frequency == WEEKLY and len(days) != 1:
+        chosen = days[0] if days else 0
+        LOGGER.warning(
+            "Check-ins: weekly check-ins count on one day now; days %s became %s. "
+            "Set day (or frequency: daily) in the plugin's settings instead of days",
+            settings["days"],
+            WEEKDAY_NAMES[chosen],
+        )
+        return Schedule(frequency, chosen)
+    return Schedule(frequency, days[0] if days else 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,8 +191,8 @@ class CheckInConfig:
     channel: int = 0
     keyword: str = DEFAULT_KEYWORD
     title: str = DEFAULT_TITLE
-    # Weekdays check-ins count on (0 = Monday); empty: any day.
-    days: frozenset[int] = frozenset({0})
+    # Daily, or weekly on one day.
+    schedule: Schedule = Schedule()
     timezone: str = DEFAULT_TIMEZONE
     reply: bool = True
     reply_to_observed: bool = True
@@ -180,7 +209,7 @@ class CheckInConfig:
             channel=max(0, _as_int(settings.get("channel"), 0)),
             keyword=keyword,
             title=str(settings.get("title") or "").strip() or DEFAULT_TITLE,
-            days=_days(settings.get("days")),
+            schedule=schedule_from_settings(settings),
             timezone=str(settings.get("timezone") or "").strip() or DEFAULT_TIMEZONE,
             reply=_as_bool(settings.get("reply"), True),
             reply_to_observed=_as_bool(settings.get("reply_to_observed"), True),
@@ -268,6 +297,10 @@ def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
+def _this_period(schedule: Schedule) -> str:
+    return "today" if schedule.daily else "this week"
+
+
 def iso_time(timestamp: Optional[float]) -> Optional[str]:
     if timestamp is None:
         return None
@@ -295,10 +328,11 @@ def _packet_bytes(rx_log: dict[str, Any]) -> Optional[bytes]:
 
 class CheckInPlugin(BasePlugin):
     name = "check_in"
-    title = "Weekly check-ins"
+    title = "Check-ins"
     description = (
-        "Counts the nodes that post a keyword (\"#MeshCoreMonday\") on a channel, heard by the radio or by "
-        "MQTT observers, replies with their rank and streak, and serves a leaderboard for other sites."
+        "Counts the nodes that post a keyword (\"#MeshCoreMonday\") on a channel every day or once a week, "
+        "heard by the radio or by MQTT observers, replies with their rank and streak, and serves a leaderboard "
+        "for other sites."
     )
     settings_schema = {
         "type": "object",
@@ -331,14 +365,25 @@ class CheckInPlugin(BasePlugin):
                 ),
                 "default": DEFAULT_TITLE,
             },
-            "days": {
-                "type": "array",
-                "title": "Check-in days",
-                "description": "Check-ins count on these days only; on others the keyword is ignored. None ticked: any day.",
-                "items": {"type": "integer", "enum": list(range(7)), "x-enum-titles": list(WEEKDAY_NAMES)},
-                "uniqueItems": True,
-                "default": [0],
-                "x-keep-empty": True,
+            "frequency": {
+                "type": "string",
+                "title": "Check-ins",
+                "description": (
+                    "Daily: one check-in a day counts, any day; streaks and ranks are per day. "
+                    "Weekly: one a week, on the check-in day; streaks and ranks are per week."
+                ),
+                "enum": list(FREQUENCIES),
+                "x-enum-titles": ["Weekly", "Daily"],
+                "default": WEEKLY,
+            },
+            "day": {
+                "type": "integer",
+                "title": "Check-in day",
+                "description": "Weekly check-ins count on this day only; on others the keyword is ignored.",
+                "enum": list(range(7)),
+                "x-enum-titles": list(WEEKDAY_NAMES),
+                "default": 0,
+                "x-shown-if": {"frequency": [WEEKLY]},
             },
             "timezone": {
                 "type": "string",
@@ -360,8 +405,9 @@ class CheckInPlugin(BasePlugin):
                 "maxLength": 400,
                 "title": "Reply",
                 "description": (
-                    "Placeholders: {title}, {name}, {rank} (this week), {streak}, {streak_weeks} (\"3 weeks\"), "
-                    "{participants}, {participants_label} (\"13 participants\"), {total}, {keyword}. "
+                    "Placeholders: {title}, {name}, {rank} (today or this week), {this_period} (\"today\" or "
+                    "\"this week\"), {streak}, {streak_label} (\"3 days\" or \"3 weeks\"), {participants}, "
+                    "{participants_label} (\"13 participants\"), {total}, {keyword}. "
                     "A reply longer than one radio message gets the name and title shortened (…) to fit; "
                     "one that still doesn't fit is split between lines."
                 ),
@@ -415,7 +461,7 @@ class CheckInPlugin(BasePlugin):
 
     async def on_startup(self, context: PluginContext) -> list[PluginAction]:
         self._context = context
-        store = CheckInStore(self.config.db_path)
+        store = CheckInStore(self.config.db_path, self.config.zone)
         # Raises CheckInStoreError: without its database the plugin doesn't start (the panel says why).
         await asyncio.to_thread(store.open)
         self.store = store
@@ -427,7 +473,13 @@ class CheckInPlugin(BasePlugin):
             self._announce()
         else:
             LOGGER.info("Check-ins: the web app is off (web.enabled), so there's no leaderboard API")
-        LOGGER.info("Check-ins: counting %r on channel %s (%s)", self.config.keyword, self.config.channel, store.path)
+        LOGGER.info(
+            "Check-ins: counting %r on channel %s, %s (%s)",
+            self.config.keyword,
+            self.config.channel,
+            self._schedule_phrase(),
+            store.path,
+        )
         return []
 
     async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
@@ -536,14 +588,15 @@ class CheckInPlugin(BasePlugin):
             return []
         now = self.clock()
         moment = local_moment(now, config.zone)
-        if not is_check_in_day(moment, config.days):
+        schedule = config.schedule
+        if not schedule.counts_on(moment.date()):
             LOGGER.info("Check-ins: ignoring %s's check-in: %s isn't a check-in day", sender, WEEKDAY_NAMES[moment.weekday()])
             return []
         record = CheckInRecord(
             sender_name=sender,
             text=body[:MAX_TEXT_LENGTH],
             received_at=now,
-            week=week_start(moment.date()),
+            day=moment.date(),
             source=source,
             observer_id=observer_id,
             message_key=message_key(self._channel_key(), sender_timestamp, sender, body),
@@ -554,15 +607,16 @@ class CheckInPlugin(BasePlugin):
             participant_id = await asyncio.to_thread(self.store.record_check_in, record)
             if participant_id is None:
                 return []  # Heard already, by the radio or another observer.
-            histories = await asyncio.to_thread(self.store.histories)
-        table = standings(histories, moment, config.days)
+            histories = await asyncio.to_thread(self.store.histories, schedule)
+        table = standings(histories, moment, schedule)
         mine = next(standing for standing in table if standing.participant_id == participant_id)
-        participants = sum(1 for standing in table if standing.checked_in_this_week)
+        participants = sum(1 for standing in table if standing.checked_in_this_period)
         LOGGER.info(
-            "Check-ins: %s checked in (%s): #%s this week, streak %s, %s participants",
+            "Check-ins: %s checked in (%s): #%s %s, streak %s, %s participants",
             sender,
             source,
-            mine.week_rank,
+            mine.period_rank,
+            _this_period(schedule),
             mine.streak,
             participants,
         )
@@ -578,12 +632,17 @@ class CheckInPlugin(BasePlugin):
 
     def render_reply(self, name: str, standing: Standing, participants: int, max_bytes: Optional[int] = None) -> str:
         """The reply to a check-in; with ``max_bytes``, shortened to fit if it can be (``fill_template``)."""
+        schedule = self.config.schedule
+        streak_label = _count(standing.streak, schedule.unit)
         values = {
             "title": self.config.title,
             "name": name,
-            "rank": standing.week_rank,
+            "rank": standing.period_rank,
+            "this_period": _this_period(schedule),
             "streak": standing.streak,
-            "streak_weeks": _count(standing.streak, "week"),
+            "streak_label": streak_label,
+            # The older name of {streak_label}.
+            "streak_weeks": streak_label,
             "participants": participants,
             "participants_label": _count(participants, "participant"),
             "total": standing.total_check_ins,
@@ -710,40 +769,62 @@ class CheckInPlugin(BasePlugin):
             raise CheckInError("The check-in database isn't open", 503)
         return self.store
 
-    def _place(self, week: date) -> float:
-        """Midday of the week's first check-in day: where a check-in that wasn't heard goes."""
-        first_day = min(self.config.days) if self.config.days else 0
-        return datetime.combine(week + timedelta(days=first_day), dtime(12), tzinfo=self.config.zone).timestamp()
+    def _place(self, day: date) -> float:
+        """Midday of ``day``: when a check-in that wasn't heard goes."""
+        return datetime.combine(day, dtime(12), tzinfo=self.config.zone).timestamp()
+
+    def _schedule_phrase(self) -> str:
+        schedule = self.config.schedule
+        return "every day" if schedule.daily else f"every {WEEKDAY_NAMES[schedule.day]}"
+
+    async def _histories(self) -> tuple[datetime, list[Any], list[Standing]]:
+        moment = local_moment(self.clock(), self.config.zone)
+        schedule = self.config.schedule
+        histories = await asyncio.to_thread(self._require_store().histories, schedule)
+        return moment, histories, standings(histories, moment, schedule)
 
     async def _standings(self) -> tuple[datetime, list[Standing]]:
-        moment = local_moment(self.clock(), self.config.zone)
-        histories = await asyncio.to_thread(self._require_store().histories)
-        return moment, standings(histories, moment, self.config.days)
+        moment, _, table = await self._histories()
+        return moment, table
 
     def _overview(self, moment: datetime, table: list[Standing]) -> dict[str, Any]:
-        window = check_in_window(moment, self.config.days)
+        schedule = self.config.schedule
+        window = schedule.window(moment)
         return {
             "title": self.config.title,
             "keyword": self.config.keyword,
             "channel": self._channel_overview(),
             "timezone": self.config.timezone,
-            "check_in_days": [WEEKDAY_NAMES[day] for day in sorted(self.config.days)],
-            "week": week_start(moment.date()).isoformat(),
+            "frequency": schedule.frequency,
+            # Weekly: the day of the week check-ins count on; daily: None.
+            "check_in_day": None if schedule.daily else WEEKDAY_NAMES[schedule.day],
+            # The period under way: today, or this week's Monday.
+            "period": schedule.period_of(moment.date()).isoformat(),
             "window": {
                 "open": window.open,
                 "opens_at": iso_time(window.opens_at.timestamp()),
                 "closes_at": iso_time(window.closes_at.timestamp()),
             },
-            "participants_this_week": sum(1 for standing in table if standing.checked_in_this_week),
+            "participants_this_period": sum(1 for standing in table if standing.checked_in_this_period),
             "generated_at": iso_time(moment.timestamp()),
         }
 
     async def leaderboard(self, limit: Optional[int] = None) -> dict[str, Any]:
-        """Standings for other sites: no raw records, best streak first."""
+        """Standings for other sites: no raw records, best streak first.
+
+        ``week``, ``check_in_days``, ``participants_this_week``, ``checked_in_this_week``
+        and ``week_rank`` are the older names of the period fields, kept for sites
+        made before daily check-ins (for daily ones they're about today).
+        """
         moment, table = await self._standings()
         entries = table[:limit] if limit else table
+        overview = self._overview(moment, table)
+        schedule = self.config.schedule
         return {
-            **self._overview(moment, table),
+            **overview,
+            "week": week_start(moment.date()).isoformat(),
+            "check_in_days": list(WEEKDAY_NAMES) if schedule.daily else [WEEKDAY_NAMES[schedule.day]],
+            "participants_this_week": overview["participants_this_period"],
             # This Meshgram's name (web.title), for sites to credit.
             "meshgram_title": getattr(getattr(self._web, "config", None), "title", None) or "Meshgram",
             "leaderboard": [
@@ -756,8 +837,10 @@ class CheckInPlugin(BasePlugin):
                     "best_streak": standing.best_streak,
                     "total_check_ins": standing.total_check_ins,
                     "last_check_in": iso_time(standing.last_check_in),
-                    "checked_in_this_week": standing.checked_in_this_week,
-                    "week_rank": standing.week_rank,
+                    "checked_in_this_period": standing.checked_in_this_period,
+                    "period_rank": standing.period_rank,
+                    "checked_in_this_week": standing.checked_in_this_period,
+                    "week_rank": standing.period_rank,
                     "resolved": standing.node_id is not None,
                 }
                 for standing in entries
@@ -765,11 +848,9 @@ class CheckInPlugin(BasePlugin):
         }
 
     async def participants(self) -> dict[str, Any]:
-        """Everyone with their weeks, for the control panel."""
-        moment = local_moment(self.clock(), self.config.zone)
-        histories = await asyncio.to_thread(self._require_store().histories)
-        table = standings(histories, moment, self.config.days)
-        weeks = {history.participant_id: history for history in histories}
+        """Everyone with the periods they checked in, for the control panel."""
+        moment, histories, table = await self._histories()
+        by_id = {history.participant_id: history for history in histories}
         return {
             **self._overview(moment, table),
             "participants": [
@@ -781,11 +862,11 @@ class CheckInPlugin(BasePlugin):
                     "streak": standing.streak,
                     "best_streak": standing.best_streak,
                     "total_check_ins": standing.total_check_ins,
-                    "extra_check_ins": weeks[standing.participant_id].extra_check_ins,
+                    "extra_check_ins": by_id[standing.participant_id].extra_check_ins,
                     "last_check_in": standing.last_check_in,
-                    "checked_in_this_week": standing.checked_in_this_week,
-                    "week_rank": standing.week_rank,
-                    "weeks": sorted((week.isoformat() for week in weeks[standing.participant_id].weeks), reverse=True),
+                    "checked_in_this_period": standing.checked_in_this_period,
+                    "period_rank": standing.period_rank,
+                    "periods": sorted((period.isoformat() for period in by_id[standing.participant_id].periods), reverse=True),
                 }
                 for standing in table
             ],
@@ -818,22 +899,26 @@ class CheckInPlugin(BasePlugin):
         self._last_reply.pop(participant_id, None)
         self._announce()
 
-    async def set_week(self, participant_id: int, week: date, present: bool) -> None:
-        await asyncio.to_thread(self._require_store().set_week, participant_id, week, present, self._place)
+    async def set_period(self, participant_id: int, day: date, present: bool) -> None:
+        """Check in (or not) for the period ``day`` is in."""
+        schedule = self.config.schedule
+        await asyncio.to_thread(
+            self._require_store().set_period, participant_id, schedule.period_of(day), present, schedule, self._place
+        )
         self._announce()
 
-    async def set_streak(self, participant_id: int, streak: int, week: Optional[date]) -> None:
-        last_week = week or self.default_as_of()
-        await asyncio.to_thread(self._require_store().set_streak, participant_id, streak, last_week, self._place)
+    async def set_streak(self, participant_id: int, streak: int, as_of: Optional[date]) -> None:
+        """That many periods with a check-in, up to the one ``as_of`` is in (default: the latest so far)."""
+        schedule = self.config.schedule
+        last_period = schedule.period_of(as_of) if as_of else self.default_as_of()
+        await asyncio.to_thread(
+            self._require_store().set_streak, participant_id, streak, last_period, schedule, self._place
+        )
         self._announce()
 
     def default_as_of(self) -> date:
-        """The week of the latest check-in day so far: this week once its first check-in day began."""
-        moment = local_moment(self.clock(), self.config.zone)
-        this_week = week_start(moment.date())
-        days = self.config.days
-        started = not days or any(day <= moment.weekday() for day in days)
-        return this_week if started else this_week - timedelta(days=7)
+        """The period of the latest check-in day so far: today, or this week once its check-in day began."""
+        return self.config.schedule.latest_period(local_moment(self.clock(), self.config.zone))
 
     async def import_summary(
         self, records: list[Any], *, as_of: Optional[date], replace: bool, dry_run: bool
@@ -841,12 +926,13 @@ class CheckInPlugin(BasePlugin):
         """Per-node summaries from another database; see ``CheckInStore.import_summary``."""
         if len(records) > MAX_IMPORT_RECORDS:
             raise CheckInError(f"Import at most {MAX_IMPORT_RECORDS} records at a time")
-        default_week = as_of or self.default_as_of()
+        schedule = self.config.schedule
+        default_period = schedule.period_of(as_of) if as_of else self.default_as_of()
         parsed: list[SummaryRecord] = []
         errors: list[dict[str, Any]] = []
         for row, raw in enumerate(records, start=1):
             try:
-                parsed.append(summary_record(row, raw, default_week))
+                parsed.append(summary_record(row, raw, default_period, schedule))
             except ValueError as exc:
                 errors.append({"row": row, "message": str(exc)})
         store = self._require_store()
@@ -854,11 +940,16 @@ class CheckInPlugin(BasePlugin):
         await self._flush_nodes()
         result = await asyncio.to_thread(
             lambda: store.import_summary(
-                parsed, replace=replace, dry_run=dry_run or bool(errors), place=self._place, now=self.clock()
+                parsed,
+                replace=replace,
+                dry_run=dry_run or bool(errors),
+                schedule=schedule,
+                place=self._place,
+                now=self.clock(),
             )
         )
         result["errors"] = sorted(errors + result["errors"], key=lambda error: error["row"])
-        result["as_of"] = default_week.isoformat()
+        result["as_of"] = default_period.isoformat()
         if result["saved"]:
             LOGGER.info(
                 "Check-ins: imported %d records (%d new, %d updated, %d linked)",
@@ -888,6 +979,7 @@ class CheckInPlugin(BasePlugin):
             "exported_at": iso_time(self.clock()),
             "title": self.config.title,
             "timezone": self.config.timezone,
+            "frequency": self.config.schedule.frequency,
             "participants": participants,
         }
 
@@ -933,13 +1025,13 @@ class CheckInPlugin(BasePlugin):
 _FIELD_ALIASES = {
     "node_id": ("node_id", "public_key", "pubkey", "key", "id", "node"),
     "name": ("name", "node_name", "adv_name"),
-    "streak": ("streak", "current_streak", "streak_weeks", "weeks"),
+    "streak": ("streak", "current_streak", "streak_weeks", "streak_days", "weeks"),
     "total": ("total", "total_check_ins", "total_checkins", "check_ins", "checkins"),
     "last_check_in": ("last_check_in", "last_checkin", "last_week", "last_seen", "as_of"),
 }
 
 
-def summary_record(row: int, raw: Any, default_week: date) -> SummaryRecord:
+def summary_record(row: int, raw: Any, default_period: date, schedule: Schedule) -> SummaryRecord:
     """An import record (a dict with any of the alias keys) -> ``SummaryRecord``; ``ValueError`` says what's wrong."""
     if not isinstance(raw, dict):
         raise ValueError("must be an object")
@@ -973,13 +1065,13 @@ def summary_record(row: int, raw: Any, default_week: date) -> SummaryRecord:
         raise ValueError("total is smaller than the streak")
     last = pick("last_check_in")
     if last is None:
-        last_week = default_week
+        last_period = default_period
     else:
         try:
-            last_week = parse_week(str(last).strip()[:10])
+            last_period = schedule.period_of(parse_date(str(last).strip()[:10]))
         except ValueError:
             raise ValueError(f"last check-in {last!r} isn't a date (YYYY-MM-DD)") from None
-    return SummaryRecord(row=row, node_id=node_id, name=name or None, streak=streak, total=total, last_week=last_week)
+    return SummaryRecord(row=row, node_id=node_id, name=name or None, streak=streak, total=total, last_period=last_period)
 
 
 def parse_backup(data: Any) -> tuple[list[BackupParticipant], list[dict[str, Any]]]:
@@ -1002,18 +1094,23 @@ def parse_backup(data: Any) -> tuple[list[BackupParticipant], list[dict[str, Any
     check_ins = sum(len(item["check_ins"]) for item in items if isinstance(item, dict) and isinstance(item.get("check_ins"), list))
     if check_ins > MAX_BACKUP_CHECK_INS:
         raise CheckInError(f"Restore at most {MAX_BACKUP_CHECK_INS} check-ins at a time")
+    # Check-ins of a version 1 backup have their week: dated by when they were received, in its time zone.
+    zone = resolve_zone(str(data.get("timezone") or "")) if version == 1 else None
     participants: list[BackupParticipant] = []
     errors: list[dict[str, Any]] = []
     for row, item in enumerate(items, start=1):
         try:
-            participants.append(backup_participant(row, item))
+            participants.append(backup_participant(row, item, zone))
         except ValueError as exc:
             errors.append({"row": row, "message": str(exc)})
     return participants, errors
 
 
-def backup_participant(row: int, raw: Any) -> BackupParticipant:
-    """One participant of a backup -> ``BackupParticipant``; ``ValueError`` says what's wrong."""
+def backup_participant(row: int, raw: Any, week_zone: Optional[tzinfo] = None) -> BackupParticipant:
+    """One participant of a backup -> ``BackupParticipant``; ``ValueError`` says what's wrong.
+
+    With ``week_zone`` its check-ins are from a version 1 backup: by week, not day.
+    """
     if not isinstance(raw, dict):
         raise ValueError("must be an object")
     node_id = raw.get("node_id")
@@ -1035,22 +1132,25 @@ def backup_participant(row: int, raw: Any) -> BackupParticipant:
     check_ins = []
     for index, item in enumerate(items, start=1):
         try:
-            check_ins.append(_backup_check_in(item))
+            check_ins.append(_backup_check_in(item, week_zone))
         except ValueError as exc:
             raise ValueError(f"check-in {index}: {exc}") from None
     return BackupParticipant(row, node_id, name.strip(), extra, tuple(check_ins))
 
 
-def _backup_check_in(raw: Any) -> BackupCheckIn:
+def _backup_check_in(raw: Any, week_zone: Optional[tzinfo] = None) -> BackupCheckIn:
     if not isinstance(raw, dict):
         raise ValueError("must be an object")
-    try:
-        week = parse_week(str(raw.get("week") or ""))
-    except ValueError:
-        raise ValueError("week must be a date (YYYY-MM-DD)") from None
     received_at = raw.get("received_at")
     if isinstance(received_at, bool) or not isinstance(received_at, (int, float)) or not 0 < received_at < 1e11:
         raise ValueError("received_at must be a Unix time in seconds")
+    label = "week" if week_zone is not None else "day"
+    try:
+        day = parse_date(str(raw.get(label) or ""))
+    except ValueError:
+        raise ValueError(f"{label} must be a date (YYYY-MM-DD)") from None
+    if week_zone is not None:
+        day = day_in_week(week_start(day), float(received_at), week_zone)
     source = raw.get("source")
     if source not in SOURCES:
         raise ValueError(f"source must be one of {', '.join(SOURCES)}")
@@ -1060,7 +1160,7 @@ def _backup_check_in(raw: Any) -> BackupCheckIn:
         if observer_id is None:
             raise ValueError("observer_id must be a public key or null")
     return BackupCheckIn(
-        week=week,
+        day=day,
         received_at=float(received_at),
         source=source,
         sender_name=_optional_text(raw.get("sender_name"), "sender_name", MAX_NAME_LENGTH),

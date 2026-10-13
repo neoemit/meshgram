@@ -1384,6 +1384,23 @@
     const isWide = (s) => types(s).includes("object") || (types(s).includes("array") && (isChannel(s.items) || Boolean(s.items && s.items.enum)));
     for (const [name, child] of children) if (isWide(properties[name])) child.el.classList.add("wide");
     const grid = el("div", { class: "form-grid" }, ...children.map(([, child]) => child.el));
+    // x-shown-if: {"<other setting>": [values]}: shown only while that setting (or its default) is one of them.
+    const conditional = children.filter(([name]) => properties[name]["x-shown-if"]);
+    if (conditional.length) {
+      const editors = Object.fromEntries(children);
+      const current = (name) => {
+        let value;
+        try { value = editors[name] ? editors[name].get() : undefined; } catch { value = undefined; }
+        return value === undefined && properties[name] ? properties[name].default : value;
+      };
+      const update = () => {
+        for (const [name, child] of conditional) {
+          child.el.hidden = !Object.entries(properties[name]["x-shown-if"]).every(([other, values]) => values.includes(current(other)));
+        }
+      };
+      grid.addEventListener("change", update);
+      update();
+    }
     const node = top ? grid : el("fieldset", { class: "wide" }, el("legend", {}, labelOf(schema, key)), schema.description ? el("p", { class: "hint" }, schema.description) : null, grid);
     if (!top) register(ctx, path, node);
     return {

@@ -1,15 +1,15 @@
 # 🏅 MeshCore check-in leaderboard
 
-A public web page for the weekly mesh check-in (`#MeshCoreMonday`): who's on the air this week, in order, the longest running streaks, and everyone's standing. It shows what Meshgram's [`check_in` plugin](../README.md#check_in--weekly-check-ins-with-streaks-and-a-leaderboard) records and is deployed **separately from Meshgram**, on any machine that can reach Meshgram's web app.
+A public web page for the daily or weekly mesh check-in (`#MeshCoreMonday`): who's on the air today or this week, in order, the longest running streaks, and everyone's standing. It shows what Meshgram's [`check_in` plugin](../README.md#check_in--daily-or-weekly-check-ins-with-streaks-and-a-leaderboard) records and is deployed **separately from Meshgram**, on any machine that can reach Meshgram's web app.
 
 - **One small container:** nginx (unprivileged, read-only filesystem, no capabilities) serves the page and proxies the leaderboard from Meshgram. Nothing is stored here.
 - **The token stays server-side.** Browsers only talk to this site; nginx adds `Authorization: Bearer <token>` when it asks Meshgram (`GET /api/plugins/check_in/leaderboard`). No CORS, no credentials in the page.
 - **Meshgram is shielded.** One answer is shared by every visitor for `CACHE_SECONDS` (concurrent requests wait for one fetch), so traffic to this site never turns into traffic to the radio host. While Meshgram can't be reached, the last leaderboard is served; the page says "Signal lost" and keeps retrying.
-- **The page:** plain HTML/CSS/JS, no build step and no third-party requests (strict CSP). What to send and on which channel, a live "on air" lamp and countdown to the next check-in, stats, a podium, this week's roll call, a searchable leaderboard, new check-ins flashing in, light and dark themes, phone layout, and an animated mesh in the background (still with reduced motion).
+- **The page:** plain HTML/CSS/JS, no build step and no third-party requests (strict CSP). What to send and on which channel, a live "on air" lamp and countdown to the next check-in, stats, a podium, today's or this week's roll call, a searchable leaderboard, new check-ins flashing in, light and dark themes, phone layout, and an animated mesh in the background (still with reduced motion).
 
 ## Set up
 
-1. **In Meshgram** (control panel → Plugins → *Weekly check-ins*): turn the plugin on and set **Leaderboard API token** to a long random string, e.g. `openssl rand -hex 32`. Check it from the leaderboard's host:
+1. **In Meshgram** (control panel → Plugins → *Check-ins*): turn the plugin on and set **Leaderboard API token** to a long random string, e.g. `openssl rand -hex 32`. Check it from the leaderboard's host:
 
    ```bash
    curl -H "Authorization: Bearer $TOKEN" http://<meshgram-host>:8080/api/plugins/check_in/leaderboard
@@ -65,21 +65,26 @@ The page reads `api/leaderboard` (this site's proxy) and `config.json` (the refr
   "keyword": "#MeshCoreMonday",
   "channel": {"name": "Public", "kind": "public"},
   "timezone": "Europe/Rome",
-  "check_in_days": ["Monday"],
-  "week": "2026-10-12",
+  "frequency": "weekly",
+  "check_in_day": "Monday",
+  "period": "2026-10-12",
   "window": {"open": true, "opens_at": "2026-10-11T22:00:00Z", "closes_at": "2026-10-12T22:00:00Z"},
-  "participants_this_week": 13,
+  "participants_this_period": 13,
   "generated_at": "2026-10-12T09:30:00Z",
   "meshgram_title": "LMB Meshgram",
   "leaderboard": [
     {"rank": 1, "id": "A1B2…", "hash": "A1", "name": "LMB-T", "streak": 15, "best_streak": 20,
-     "total_check_ins": 40, "last_check_in": "2026-10-12T07:02:11Z", "checked_in_this_week": true,
-     "week_rank": 13, "resolved": true}
+     "total_check_ins": 40, "last_check_in": "2026-10-12T07:02:11Z", "checked_in_this_period": true,
+     "period_rank": 13, "resolved": true}
   ]
 }
 ```
 
-`meshgram_title` is Meshgram's `web.title` (control panel → Settings → Web app → Title): the page's top bar and footer credit it ("live from the mesh via LMB Meshgram"). Sorted by streak, longest first; of equal streaks, whoever checked in first ranks higher (those checked in this week before those still on last week's streak). Nodes without a streak share the last `rank`. `id` is the node's public key and `hash` its first byte; both are `null` (and `resolved` false) for a node known by name only, until Meshgram hears its advert. Individual check-ins are never exposed.
+`frequency` is `daily` or `weekly`. Check-ins, streaks and ranks are counted per **period**: a day (daily), or a week, Monday to Sunday, with check-ins on `check_in_day` only (weekly; `null` for daily). `period` is the one under way (today, or this week's Monday), `window` the check-in day under way or the next one; for daily check-ins it's always open, until midnight. Streaks are in days or weeks accordingly, and the page words everything to match ("Checked in today", "🔥 12 days", …).
+
+The response also has the older names of these fields, for pages made before daily check-ins: `week` (this week's Monday), `check_in_days` (every day for daily check-ins), `participants_this_week`, and per node `checked_in_this_week` and `week_rank` (for daily check-ins they're about today). This page reads either, so it also works with an older Meshgram.
+
+`meshgram_title` is Meshgram's `web.title` (control panel → Settings → Web app → Title): the page's top bar and footer credit it ("live from the mesh via LMB Meshgram"). Sorted by streak, longest first; of equal streaks, whoever checked in first ranks higher (those checked in this period before those still on the previous one's streak). Nodes without a streak share the last `rank`. `id` is the node's public key and `hash` its first byte; both are `null` (and `resolved` false) for a node known by name only, until Meshgram hears its advert. Individual check-ins are never exposed.
 
 `channel` is where check-ins count: the check-in channel's `name` on Meshgram's radio and its `kind` (`public`, `hashtag` or `private`; never its key). The page shows it next to the keyword (*Hashtag channel #local*; tap to copy, with a hint on joining it). It's `null` until Meshgram has read its radio's channels, and then the page just says "on the mesh".
 

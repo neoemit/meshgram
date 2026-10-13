@@ -1,8 +1,8 @@
 "use strict";
 // Control panel: the check_in plugin's participants, shown in its plugin card while it runs.
-// Edit a participant (name, node key, weeks, streak), add one, back everything up to a file and
-// import it again, import summaries from another check-in database (CSV or JSON), export them,
-// and clear everything. Talks to meshgram/plugins/check_in_api.py.
+// Edit a participant (name, node key, the days or weeks checked in, streak), add one, back
+// everything up to a file and import it again, import summaries from another check-in database
+// (CSV or JSON), export them, and clear everything. Talks to meshgram/plugins/check_in_api.py.
 // Loaded after control.js; uses the page's helpers (el, icon, esc, fmtAgo, plural, shortId)
 // and the kit control.js hands to plugin panels (api, toast, act, button, field, …).
 
@@ -10,21 +10,32 @@
   if (!window.MeshgramControl || !window.MeshgramControl.registerPluginPanel) return;
 
   const BASE = "api/plugins/check_in";
-  const GRID_WEEKS = 26;
+  // How many periods the participant grid shows, and how often it labels one: half a year of
+  // weeks, or four weeks of days.
+  // ``narrow``: cells per row on a small screen.
+  const GRID = { weekly: { count: 26, narrow: 13, label: 4, days: 7 }, daily: { count: 28, narrow: 14, label: 7, days: 1 } };
   const MAX_ROWS = 300;
   const SOURCE_LABELS = { radio: "Radio", observer: "Observer", manual: "Added here", import: "Imported" };
   // What a backup file (GET backup) says it is.
   const BACKUP_FORMAT = "meshgram-check-ins";
 
-  // Weeks are "YYYY-MM-DD" Mondays in the plugin's time zone; plain date arithmetic keeps them so.
+  // Periods are "YYYY-MM-DD" days, or weeks by their Monday, in the plugin's time zone; plain
+  // date arithmetic keeps them so.
   const addDays = (iso, days) => {
     const [y, m, d] = iso.split("-").map(Number);
     return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
   };
   const fmtWeek = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-  const fmtShortWeek = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "short", timeZone: "UTC" });
+  const fmtShortDate = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "short", timeZone: "UTC" });
   const fmtStamp = (ts) => new Date(ts * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const fmtWhen = (iso) => new Date(iso).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const fmtDay = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+
+  // Words for the plugin's frequency (the participants response's ``frequency``).
+  const isDaily = (data) => Boolean(data && data.frequency === "daily");
+  const units = (data) => (isDaily(data) ? ["day", "days"] : ["week", "weeks"]);
+  const thisPeriod = (data) => (isDaily(data) ? "today" : "this week");
+  const periodName = (data, iso) => (isDaily(data) ? fmtDay(iso) : `Week of ${fmtWeek(iso)}`);
 
   // --- Import files --------------------------------------------------------------------------
 
@@ -80,9 +91,9 @@
     return { kind: "summary", records: parseCsv(trimmed) };
   }
 
-  function describeFile(parsed) {
+  function describeFile(parsed, data) {
     if (parsed.kind === "summary") {
-      return `${plural(parsed.records.length, "summary record", "summary records")}: each node gets its streak (and total) of weekly check-ins.`;
+      return `${plural(parsed.records.length, "summary record", "summary records")}: each node gets its streak (and total) of ${isDaily(data) ? "daily" : "weekly"} check-ins.`;
     }
     const { participants, exported_at: exportedAt, title } = parsed.backup;
     const checkIns = participants.reduce((sum, p) => sum + (Array.isArray(p && p.check_ins) ? p.check_ins.length : 0), 0);
@@ -141,15 +152,15 @@
       const data = state.data;
       if (!data) { summary.replaceChildren(); return; }
       const win = data.window;
-      const days = data.check_in_days.length ? data.check_in_days.join(", ") : "any day";
+      const when = isDaily(data) ? "every day" : `every ${data.check_in_day}`;
       summary.replaceChildren(
         el("span", { class: "ci-pill", "data-open": String(win.open) },
           el("span", { class: "ci-dot", "aria-hidden": "true" }),
           win.open ? `Open now, until ${fmtWhen(win.closes_at)}` : `Next check-in ${fmtWhen(win.opens_at)}`),
-        el("span", { class: "ci-pill" }, `Week of ${fmtWeek(data.week)}`),
-        el("span", { class: "ci-pill" }, `${plural(data.participants_this_week, "check-in", "check-ins")} this week`),
+        el("span", { class: "ci-pill" }, periodName(data, data.period)),
+        el("span", { class: "ci-pill" }, `${plural(data.participants_this_period, "check-in", "check-ins")} ${thisPeriod(data)}`),
         el("span", { class: "ci-pill" }, plural(data.participants.length, "participant", "participants")),
-        el("span", { class: "hint" }, `“${data.keyword}” on ${days} (${data.timezone})`));
+        el("span", { class: "hint" }, `“${data.keyword}” ${when} (${data.timezone})`));
     }
 
     function drawTable() {
@@ -176,7 +187,7 @@
           el("td", { class: "num" }, p.streak ? el("span", { class: "ci-streak" }, `🔥 ${p.streak}`) : el("span", { class: "muted" }, "0")),
           el("td", { class: "num" }, p.best_streak),
           el("td", { class: "num" }, p.total_check_ins),
-          el("td", {}, p.checked_in_this_week ? el("span", { class: "ci-this-week" }, el("span", { html: icon("check") }), `#${p.week_rank}`) : el("span", { class: "muted" }, "—")),
+          el("td", {}, p.checked_in_this_period ? el("span", { class: "ci-this-week" }, el("span", { html: icon("check") }), `#${p.period_rank}`) : el("span", { class: "muted" }, "—")),
           el("td", { class: "muted" }, p.last_check_in ? fmtAgo(p.last_check_in) : "—"),
           el("td", { class: "actions" }, edit));
       });
@@ -188,7 +199,7 @@
               el("th", { scope: "col", class: "num" }, "#"),
               ...["Name", "Key"].map((label) => el("th", { scope: "col" }, label)),
               ...["Streak", "Best", "Total"].map((label) => el("th", { scope: "col", class: "num" }, label)),
-              el("th", { scope: "col" }, "This week"),
+              el("th", { scope: "col" }, isDaily(state.data) ? "Today" : "This week"),
               el("th", { scope: "col" }, "Last check-in"),
               el("th", { scope: "col", class: "actions" }, el("span", { class: "sr-only" }, "Actions")))),
             el("tbody", {}, ...rows))),
@@ -281,7 +292,7 @@
       if (!initial) { entry.dialog.close(); return; }
 
       const facts = el("div", { class: "ci-facts" });
-      const grid = el("div", { class: "ci-weeks", role: "group", "aria-label": "Weeks checked in (newest last)" });
+      const grid = el("div", { class: "ci-weeks", role: "group" });
       const log = el("div", { class: "ci-log" });
 
       // Name and node.
@@ -310,22 +321,23 @@
       });
 
       // Streak.
+      const [unit, unitPlural] = units(state.data);
       const streak = kit.numberInput(initial.streak, { min: 0, max: 1000, step: 1 });
-      const asOf = el("input", { type: "date", value: state.data.week });
+      const asOf = el("input", { type: "date", value: state.data.period });
       const setStreak = el("button", { class: "btn btn-sm", type: "submit", "data-change": "" }, "Set streak");
       const streakForm = el("form", { class: "ci-form" },
         el("div", { class: "form-grid" },
-          field("Streak (weeks)", streak),
-          field("Up to the week of", asOf, { hint: "Those weeks get a check-in; the week before them none." })),
+          field(`Streak (${unitPlural})`, streak),
+          field(isDaily(state.data) ? "Up to" : "Up to the week of", asOf, { hint: `Those ${unitPlural} get a check-in; the ${unit} before them none.` })),
         el("div", { class: "input-group ci-actions-row" }, setStreak));
       streakForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const value = Number(streak.value);
         if (!Number.isInteger(value) || value < 0) { toast("The streak must be a whole number", "error"); return; }
         await act(setStreak, async () => {
-          await api("PUT", `${BASE}/participants/${participantId}/streak`, { streak: value, week: asOf.value || null });
+          await api("PUT", `${BASE}/participants/${participantId}/streak`, { streak: value, as_of: asOf.value || null });
           await refresh();
-        }, `Streak set to ${plural(value, "week", "weeks")}`);
+        }, `Streak set to ${plural(value, unit, unitPlural)}`);
       });
 
       const remove = button("Delete participant", { iconName: "trash", kind: "btn-danger" });
@@ -344,16 +356,16 @@
 
       entry.body.append(
         facts,
-        el("section", { class: "ci-section" }, el("h3", {}, "Weeks"), el("p", { class: "hint" }, "Click a week to add or remove its check-in."), grid),
+        el("section", { class: "ci-section" }, el("h3", {}, isDaily(state.data) ? "Days" : "Weeks"), el("p", { class: "hint" }, `Click a ${unit} to add or remove its check-in.`), grid),
         el("section", { class: "ci-section" }, el("h3", {}, "Name and node"), identity),
         el("section", { class: "ci-section" }, el("h3", {}, "Streak"), streakForm),
         el("section", { class: "ci-section" }, el("h3", {}, "Check-ins on record"), log),
         el("div", { class: "dialog-actions ci-danger-row" }, remove));
       kit.disableIfReadOnly(entry.body);
 
-      async function toggleWeek(week, present, cell) {
+      async function togglePeriod(period, present, cell) {
         await act(cell, async () => {
-          await api(present ? "DELETE" : "PUT", `${BASE}/participants/${participantId}/weeks/${week}`);
+          await api(present ? "DELETE" : "PUT", `${BASE}/participants/${participantId}/periods/${period}`);
           await refresh();
         });
       }
@@ -365,7 +377,7 @@
             el("span", { class: "ci-log-when" }, fmtStamp(row.received_at)),
             el("span", { class: `tag ci-source ${row.source}` }, SOURCE_LABELS[row.source] || row.source),
             row.sender_name ? el("span", { class: "name" }, row.sender_name) : null,
-            row.text ? el("span", { class: "ci-log-text" }, row.text) : el("span", { class: "muted" }, `week of ${fmtShortWeek(row.week)}`)))) : el("p", { class: "hint" }, "None."));
+            row.text ? el("span", { class: "ci-log-text" }, row.text) : el("span", { class: "muted" }, `on ${fmtShortDate(row.day)}`)))) : el("p", { class: "hint" }, "None."));
         } catch (err) {
           log.replaceChildren(el("p", { class: "hint" }, err.message));
         }
@@ -380,22 +392,26 @@
           el("div", { class: "ci-fact" }, el("span", {}, "Streak"), el("strong", {}, p.streak ? `🔥 ${p.streak}` : "0")),
           el("div", { class: "ci-fact" }, el("span", {}, "Best"), el("strong", {}, p.best_streak)),
           el("div", { class: "ci-fact" }, el("span", {}, "Total"), el("strong", {}, p.total_check_ins,
-            p.extra_check_ins ? el("small", { class: "muted", title: "Imported as a total, beyond the weeks on record" }, ` (${p.extra_check_ins} imported)`) : null)),
+            p.extra_check_ins ? el("small", { class: "muted", title: `Imported as a total, beyond the ${units(state.data)[1]} on record` }, ` (${p.extra_check_ins} imported)`) : null)),
           el("div", { class: "ci-fact" }, el("span", {}, "Rank"), el("strong", {}, `#${p.rank}`)));
-        const weeks = new Set(p.weeks);
+        const periods = new Set(p.periods);
+        const layout = GRID[isDaily(state.data) ? "daily" : "weekly"];
         const cells = [];
-        for (let offset = GRID_WEEKS - 1; offset >= 0; offset -= 1) {
-          const week = addDays(state.data.week, -7 * offset);
-          const present = weeks.has(week);
+        for (let offset = layout.count - 1; offset >= 0; offset -= 1) {
+          const period = addDays(state.data.period, -layout.days * offset);
+          const present = periods.has(period);
+          const name = periodName(state.data, period);
           const cell = el("button", {
             type: "button", class: "ci-week", "data-on": String(present), "data-current": String(offset === 0), "data-change": "",
-            "aria-pressed": String(present), title: `Week of ${fmtWeek(week)}${present ? ": checked in" : ""}`,
-            "aria-label": `Week of ${fmtWeek(week)}`,
-          }, offset % 4 === 0 ? el("span", { class: "ci-week-label" }, fmtShortWeek(week)) : null);
-          cell.addEventListener("click", () => toggleWeek(week, present, cell));
+            "aria-pressed": String(present), title: `${name}${present ? ": checked in" : ""}`, "aria-label": name,
+          }, offset % layout.label === 0 ? el("span", { class: "ci-week-label" }, fmtShortDate(period)) : null);
+          cell.addEventListener("click", () => togglePeriod(period, present, cell));
           if (!canChange()) cell.disabled = true;
           cells.push(cell);
         }
+        grid.setAttribute("aria-label", `${isDaily(state.data) ? "Days" : "Weeks"} checked in (newest last)`);
+        grid.style.setProperty("--ci-cells", String(layout.count));
+        grid.style.setProperty("--ci-cells-narrow", String(layout.narrow));
         grid.replaceChildren(...cells);
         loadLog();
       };
@@ -448,7 +464,7 @@
       const paste = el("textarea", { rows: 5, spellcheck: "false", placeholder: "node_id,name,streak,total,last_check_in\nA1B2…,LMB-T,15,22,2026-10-05" });
       const detected = el("div", { class: "ci-detected", role: "status" });
       const asOf = el("input", { type: "date" });
-      const asOfField = field("Streaks without a date run up to", asOf, { hint: "Empty: the latest check-in week." });
+      const asOfField = field("Streaks without a date run up to", asOf, { hint: `Empty: the latest check-in ${isDaily(state.data) ? "day" : "week"}.` });
       const mode = kit.selectInput([["merge", "Add to what's here"], ["replace", "Replace everything here"]], "merge");
       const result = el("div", { class: "ci-import-result", role: "status" });
       const preview = el("button", { class: "btn", type: "button", "data-change": "" }, "Preview");
@@ -466,7 +482,7 @@
         if (text.trim()) {
           try {
             parsed = parseImport(text, name);
-            detected.append(notice("info", describeFile(parsed)));
+            detected.append(notice("info", describeFile(parsed, state.data)));
           } catch (err) {
             detected.append(notice("bad", err.message));
           }
@@ -518,7 +534,9 @@
           return notice("bad", `${plural(errors.length, `${what.toLowerCase()} has`, `${what.toLowerCase()}s have`)} problems; nothing is imported until they're fixed.`,
             [el("ul", { class: "change-list" }, ...errors.slice(0, 50).map((error) => el("li", {}, `${what} ${error.row}: ${error.message}`)))]);
         }
-        const asOfNote = parsed.kind === "summary" ? ` Streaks without a last check-in date count up to the week of ${fmtWeek(outcome.as_of)}.` : "";
+        const asOfNote = parsed.kind === "summary"
+          ? ` Streaks without a last check-in date count up to ${isDaily(state.data) ? fmtDay(outcome.as_of) : `the week of ${fmtWeek(outcome.as_of)}`}.`
+          : "";
         return notice("info", `Importing gives: ${counts(outcome)}.${asOfNote}`);
       };
 

@@ -586,7 +586,7 @@
   .ci-fact { display: grid; gap: 2px; min-width: 0; }
   .ci-fact > span:first-child { font-size: 12px; font-weight: 650; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; }
   .ci-fact strong { font-size: 17px; font-variant-numeric: tabular-nums; }
-  .ci-weeks { display: grid; grid-template-columns: repeat(26, minmax(0, 1fr)); gap: 3px; padding-top: 18px; }
+  .ci-weeks { display: grid; grid-template-columns: repeat(var(--ci-cells, 26), minmax(0, 1fr)); gap: 3px; padding-top: 18px; }
   .ci-week { position: relative; height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-3); cursor: pointer; }
   .ci-week[data-on="true"] { border-color: transparent; background: linear-gradient(160deg, #ffb347, #ff6b3d); }
   .ci-week[data-current="true"] { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -619,7 +619,7 @@
   .ci-clear-actions { flex-wrap: wrap; }
   .ci-clear-actions .spacer { flex: 1; }
   @media (max-width: 640px) {
-    .ci-weeks { grid-template-columns: repeat(13, minmax(0, 1fr)); row-gap: 22px; }
+    .ci-weeks { grid-template-columns: repeat(var(--ci-cells-narrow, 13), minmax(0, 1fr)); row-gap: 22px; }
   }
   .form-errors { margin: 0; padding: 10px 14px 10px 30px; border-radius: 10px; background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--bad); font-size: 13px; }
   .cpanel a:not(.btn) { color: var(--accent-text); font-weight: 650; }

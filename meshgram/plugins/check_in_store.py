@@ -12,8 +12,10 @@ guarded by a lock; every change is one transaction.
   name is the only one in the directory, or as soon as a flood advert of that name
   is heard live (by the radio or an observer): the first one decides, even if other
   nodes went by the name before.
-- ``check_ins``: every check-in message, repeats included. ``week`` is the Monday of
-  its week; ``message_key`` identifies one message however many radios heard it.
+- ``check_ins``: every check-in message, repeats included. ``day`` is its date in
+  the plugin's time zone; which period (day or week) it counts for follows from the
+  plugin's ``Schedule`` when it's read, so changing the schedule keeps the history.
+  ``message_key`` identifies one message however many radios heard it.
 - ``nodes``: names from adverts (the radio's contacts, packets it and observers
   heard), the newest advert winning. Resolves senders' names to keys.
 """
@@ -26,15 +28,16 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Optional
 
-from .check_in_scoring import WEEK, History
+from .check_in_scoring import History, Schedule, week_start
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+# 1: check-ins by week (its Monday); 2: by day.
+SCHEMA_VERSION = 2
 
 SOURCE_RADIO = "radio"
 SOURCE_OBSERVER = "observer"
@@ -52,19 +55,9 @@ CREATE TABLE IF NOT EXISTS participants (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS participants_by_name ON participants (name);
-CREATE TABLE IF NOT EXISTS check_ins (
-    id INTEGER PRIMARY KEY,
-    participant_id INTEGER NOT NULL REFERENCES participants (id) ON DELETE CASCADE,
-    week TEXT NOT NULL,
-    received_at REAL NOT NULL,
-    sender_name TEXT,
-    text TEXT,
-    source TEXT NOT NULL,
-    observer_id TEXT,
-    message_key TEXT UNIQUE
-);
-CREATE INDEX IF NOT EXISTS check_ins_by_participant ON check_ins (participant_id, week);
-CREATE INDEX IF NOT EXISTS check_ins_by_week ON check_ins (week, received_at);
+{check_ins}
+CREATE INDEX IF NOT EXISTS check_ins_by_participant ON check_ins (participant_id, day);
+CREATE INDEX IF NOT EXISTS check_ins_by_day ON check_ins (day, received_at);
 CREATE TABLE IF NOT EXISTS nodes (
     node_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -73,8 +66,21 @@ CREATE TABLE IF NOT EXISTS nodes (
 );
 CREATE INDEX IF NOT EXISTS nodes_by_name ON nodes (name);
 """
+_CHECK_INS_TABLE = """
+CREATE TABLE IF NOT EXISTS {name} (
+    id INTEGER PRIMARY KEY,
+    participant_id INTEGER NOT NULL REFERENCES participants (id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    received_at REAL NOT NULL,
+    sender_name TEXT,
+    text TEXT,
+    source TEXT NOT NULL,
+    observer_id TEXT,
+    message_key TEXT UNIQUE
+);"""
+_SCHEMA = _SCHEMA.format(check_ins=_CHECK_INS_TABLE.format(name="check_ins"))
 
-# Where a check-in that wasn't heard (entered by hand, imported) is placed in its week.
+# When a check-in that wasn't heard (entered by hand, imported) on that day is placed.
 Placement = Callable[[date], float]
 
 
@@ -108,7 +114,8 @@ class CheckInRecord:
     sender_name: str
     text: str
     received_at: float
-    week: date
+    # The local date it was sent on.
+    day: date
     source: str
     observer_id: Optional[str] = None
     message_key: Optional[str] = None
@@ -116,19 +123,19 @@ class CheckInRecord:
 
 @dataclass(frozen=True, slots=True)
 class SummaryRecord:
-    """One participant of an import: a streak (and total) as of a week."""
+    """One participant of an import: a streak (and total) as of a period."""
 
     row: int
     node_id: Optional[str]
     name: Optional[str]
     streak: int
     total: Optional[int] = None
-    last_week: Optional[date] = None
+    last_period: Optional[date] = None
 
 
 @dataclass(frozen=True, slots=True)
 class BackupCheckIn:
-    week: date
+    day: date
     received_at: float
     source: str
     sender_name: Optional[str] = None
@@ -148,14 +155,22 @@ class BackupParticipant:
     check_ins: tuple[BackupCheckIn, ...] = ()
 
 
-_CHECK_IN_FIELDS = ("week", "received_at", "sender_name", "text", "source", "observer_id", "message_key")
+_CHECK_IN_FIELDS = ("day", "received_at", "sender_name", "text", "source", "observer_id", "message_key")
 
 _UNSET: Any = object()
 
 
+def day_in_week(week: date, received_at: float, zone: tzinfo) -> date:
+    """The day of a check-in recorded by week: when it was received, in ``zone``, if that's in the week."""
+    day = datetime.fromtimestamp(received_at, zone).date()
+    return day if week_start(day) == week else week
+
+
 class CheckInStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, zone: tzinfo = timezone.utc):
         self.path = Path(path)
+        # The plugin's time zone: dates the check-ins of an older database (by week) by it.
+        self.zone = zone
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = threading.Lock()
 
@@ -203,8 +218,31 @@ class CheckInStore:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA foreign_keys=ON")
+        if version == 1:
+            self._migrate_from_weeks(conn)
         conn.executescript(f"BEGIN; {_SCHEMA} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;")
         conn.execute("SELECT COUNT(*) FROM check_ins").fetchone()  # surfaces a corrupt file now
+
+    def _migrate_from_weeks(self, conn: sqlite3.Connection) -> None:
+        """Schema 1 -> 2: every check-in gets its day (in ``zone``) instead of its week."""
+        columns = ("id", "participant_id", "received_at", "sender_name", "text", "source", "observer_id", "message_key")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(f"SELECT week, {', '.join(columns)} FROM check_ins").fetchall()
+            conn.execute(_CHECK_INS_TABLE.format(name="check_ins_v2"))
+            conn.executemany(
+                f"INSERT INTO check_ins_v2 (day, {', '.join(columns)}) VALUES ({', '.join('?' * (len(columns) + 1))})",
+                # values[2]: received_at.
+                [(day_in_week(date.fromisoformat(week), values[2], self.zone).isoformat(), *values) for week, *values in rows],
+            )
+            conn.execute("DROP TABLE check_ins")
+            conn.execute("ALTER TABLE check_ins_v2 RENAME TO check_ins")
+            conn.execute("PRAGMA user_version=2")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+        LOGGER.info("Check-ins: %s updated to record each check-in's day (%d check-ins)", self.path, len(rows))
 
     def close(self) -> None:
         with self._lock:
@@ -247,11 +285,11 @@ class CheckInStore:
                 return None
             participant_id, _ = self._resolve(conn, record.sender_name, record.received_at)
             conn.execute(
-                "INSERT INTO check_ins (participant_id, week, received_at, sender_name, text, source, observer_id, message_key)"
+                "INSERT INTO check_ins (participant_id, day, received_at, sender_name, text, source, observer_id, message_key)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     participant_id,
-                    record.week.isoformat(),
+                    record.day.isoformat(),
                     record.received_at,
                     record.sender_name,
                     record.text,
@@ -262,8 +300,8 @@ class CheckInStore:
             )
             return participant_id
 
-    def histories(self) -> list[History]:
-        """Every participant with the first check-in of each week, for ``check_in_scoring.standings``."""
+    def histories(self, schedule: Schedule) -> list[History]:
+        """Every participant with the first check-in of each period, for ``check_in_scoring.standings``."""
         with self._lock:
             conn = self._connection()
             histories = {
@@ -273,13 +311,15 @@ class CheckInStore:
                 )
             }
             rows = conn.execute(
-                "SELECT participant_id, week, MIN(received_at), MAX(received_at) FROM check_ins GROUP BY participant_id, week"
+                "SELECT participant_id, day, MIN(received_at), MAX(received_at) FROM check_ins GROUP BY participant_id, day"
             )
-            for participant_id, week, first, last in rows:
+            for participant_id, day, first, last in rows:
                 history = histories.get(participant_id)
                 if history is None:
                     continue
-                history.weeks[date.fromisoformat(week)] = first
+                period = schedule.period_of(date.fromisoformat(day))
+                known = history.periods.get(period)
+                history.periods[period] = first if known is None else min(known, first)
                 history.last_check_in = last if history.last_check_in is None else max(history.last_check_in, last)
             return list(histories.values())
 
@@ -288,11 +328,11 @@ class CheckInStore:
             conn = self._connection()
             self._require_participant(conn, participant_id)
             rows = conn.execute(
-                "SELECT id, week, received_at, sender_name, text, source, observer_id FROM check_ins"
+                "SELECT id, day, received_at, sender_name, text, source, observer_id FROM check_ins"
                 " WHERE participant_id = ? ORDER BY received_at DESC, id DESC LIMIT ?",
                 (participant_id, limit),
             )
-            keys = ("id", "week", "received_at", "sender_name", "text", "source", "observer_id")
+            keys = ("id", "day", "received_at", "sender_name", "text", "source", "observer_id")
             return [dict(zip(keys, row)) for row in rows]
 
     # --- Node directory ---------------------------------------------------------------
@@ -394,19 +434,21 @@ class CheckInStore:
             self._require_participant(conn, participant_id)
             conn.execute("DELETE FROM participants WHERE id = ?", (participant_id,))
 
-    def set_week(self, participant_id: int, week: date, present: bool, place: Placement) -> None:
-        """Give a participant a check-in in ``week`` (if it has none), or take that week's check-ins away."""
+    def set_period(self, participant_id: int, period: date, present: bool, schedule: Schedule, place: Placement) -> None:
+        """Give a participant a check-in in ``period`` (if it has none), or take that period's check-ins away."""
         with self._transaction() as conn:
             self._require_participant(conn, participant_id)
             if present:
-                self._ensure_week(conn, participant_id, week, place, SOURCE_MANUAL)
+                self._ensure_period(conn, participant_id, period, schedule, place, SOURCE_MANUAL)
             else:
-                conn.execute("DELETE FROM check_ins WHERE participant_id = ? AND week = ?", (participant_id, week.isoformat()))
+                self._delete_period(conn, participant_id, period, schedule)
 
-    def set_streak(self, participant_id: int, streak: int, last_week: date, place: Placement) -> None:
+    def set_streak(
+        self, participant_id: int, streak: int, last_period: date, schedule: Schedule, place: Placement
+    ) -> None:
         with self._transaction() as conn:
             self._require_participant(conn, participant_id)
-            self._set_streak(conn, participant_id, streak, last_week, place, SOURCE_MANUAL)
+            self._set_streak(conn, participant_id, streak, last_period, schedule, place, SOURCE_MANUAL)
 
     def import_summary(
         self,
@@ -414,14 +456,16 @@ class CheckInStore:
         *,
         replace: bool,
         dry_run: bool,
+        schedule: Schedule,
         place: Placement,
         now: float,
     ) -> dict[str, Any]:
         """Bring in per-node summaries (from another check-in database), all or nothing.
 
         Each record's participant is found by key (or a key prefix only one known node
-        has), else by name, else created; it then gets ``streak`` consecutive weekly
-        check-ins up to ``last_week`` and, with ``total``, the check-ins beyond those.
+        has), else by name, else created; it then gets check-ins in ``streak``
+        consecutive periods of ``schedule`` up to ``last_period`` and, with ``total``,
+        the check-ins beyond those.
         ``replace`` first removes every participant. A dry run, or a record that can't
         be imported, changes nothing; the result says what would be (or was) done.
         """
@@ -436,16 +480,21 @@ class CheckInStore:
                     try:
                         participant_id, outcome = self._import_target(conn, record, now)
                         if record.streak > 0:
-                            if record.last_week is None:
-                                raise CheckInError("needs the week of its last check-in")
-                            self._set_streak(conn, participant_id, record.streak, record.last_week, place, SOURCE_IMPORT)
+                            if record.last_period is None:
+                                raise CheckInError("needs the date of its last check-in")
+                            self._set_streak(
+                                conn, participant_id, record.streak, record.last_period, schedule, place, SOURCE_IMPORT
+                            )
                         if record.total is not None:
-                            weeks = conn.execute(
-                                "SELECT COUNT(DISTINCT week) FROM check_ins WHERE participant_id = ?", (participant_id,)
-                            ).fetchone()[0]
+                            periods = {
+                                schedule.period_of(date.fromisoformat(day))
+                                for (day,) in conn.execute(
+                                    "SELECT DISTINCT day FROM check_ins WHERE participant_id = ?", (participant_id,)
+                                )
+                            }
                             conn.execute(
                                 "UPDATE participants SET extra_check_ins = ?, updated_at = ? WHERE id = ?",
-                                (max(0, record.total - weeks), now, participant_id),
+                                (max(0, record.total - len(periods)), now, participant_id),
                             )
                         result[outcome] += 1
                     except CheckInError as exc:
@@ -549,22 +598,22 @@ class CheckInStore:
     @staticmethod
     def _restore_check_in(conn: sqlite3.Connection, participant_id: int, check_in: BackupCheckIn) -> bool:
         """Add one check-in unless it's here already; whether it was added."""
-        week = check_in.week.isoformat()
+        day = check_in.day.isoformat()
         if check_in.message_key is not None and conn.execute(
             "SELECT 1 FROM check_ins WHERE message_key = ?", (check_in.message_key,)
         ).fetchone():
             return False
         if conn.execute(
-            "SELECT 1 FROM check_ins WHERE participant_id = ? AND week = ? AND received_at = ? AND source = ?",
-            (participant_id, week, check_in.received_at, check_in.source),
+            "SELECT 1 FROM check_ins WHERE participant_id = ? AND day = ? AND received_at = ? AND source = ?",
+            (participant_id, day, check_in.received_at, check_in.source),
         ).fetchone():
             return False
         conn.execute(
-            "INSERT INTO check_ins (participant_id, week, received_at, sender_name, text, source, observer_id, message_key)"
+            "INSERT INTO check_ins (participant_id, day, received_at, sender_name, text, source, observer_id, message_key)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 participant_id,
-                week,
+                day,
                 check_in.received_at,
                 check_in.sender_name,
                 check_in.text,
@@ -669,25 +718,49 @@ class CheckInStore:
         raise CheckInError(f"no known node has a key starting with {key}")
 
     def _set_streak(
-        self, conn: sqlite3.Connection, participant_id: int, streak: int, last_week: date, place: Placement, source: str
+        self,
+        conn: sqlite3.Connection,
+        participant_id: int,
+        streak: int,
+        last_period: date,
+        schedule: Schedule,
+        place: Placement,
+        source: str,
     ) -> None:
-        """Make the participant's streak ``streak`` weeks up to ``last_week``: those weeks checked in, the one before not."""
+        """Make the streak ``streak`` periods up to ``last_period``: those periods checked in, the one before not."""
         for offset in range(streak):
-            self._ensure_week(conn, participant_id, last_week - offset * WEEK, place, source)
-        conn.execute(
-            "DELETE FROM check_ins WHERE participant_id = ? AND week = ?",
-            (participant_id, (last_week - streak * WEEK).isoformat()),
-        )
+            self._ensure_period(conn, participant_id, last_period - offset * schedule.step, schedule, place, source)
+        self._delete_period(conn, participant_id, last_period - streak * schedule.step, schedule)
 
     @staticmethod
-    def _ensure_week(conn: sqlite3.Connection, participant_id: int, week: date, place: Placement, source: str) -> None:
+    def _period_days(period: date, schedule: Schedule) -> tuple[str, str]:
+        """The period's first day and the day after it, for ``day >= ? AND day < ?``."""
+        return period.isoformat(), (period + schedule.step).isoformat()
+
+    def _ensure_period(
+        self,
+        conn: sqlite3.Connection,
+        participant_id: int,
+        period: date,
+        schedule: Schedule,
+        place: Placement,
+        source: str,
+    ) -> None:
         if conn.execute(
-            "SELECT 1 FROM check_ins WHERE participant_id = ? AND week = ?", (participant_id, week.isoformat())
+            "SELECT 1 FROM check_ins WHERE participant_id = ? AND day >= ? AND day < ?",
+            (participant_id, *self._period_days(period, schedule)),
         ).fetchone():
             return
+        day = schedule.check_in_day(period)
         conn.execute(
-            "INSERT INTO check_ins (participant_id, week, received_at, source) VALUES (?, ?, ?, ?)",
-            (participant_id, week.isoformat(), place(week), source),
+            "INSERT INTO check_ins (participant_id, day, received_at, source) VALUES (?, ?, ?, ?)",
+            (participant_id, day.isoformat(), place(day), source),
+        )
+
+    def _delete_period(self, conn: sqlite3.Connection, participant_id: int, period: date, schedule: Schedule) -> None:
+        conn.execute(
+            "DELETE FROM check_ins WHERE participant_id = ? AND day >= ? AND day < ?",
+            (participant_id, *self._period_days(period, schedule)),
         )
 
     @staticmethod
