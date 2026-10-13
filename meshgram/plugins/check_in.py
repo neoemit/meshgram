@@ -63,6 +63,7 @@ from meshgram.plugins.check_in_store import (
     NodeSighting,
     SummaryRecord,
 )
+from meshgram.radio_admin import channel_kind
 from meshgram.text_utils import channel_message_max_bytes, split_text_by_bytes, utf8_len
 from meshgram.types import MeshTextEvent, PluginAction, PluginContext, SendMeshAction
 
@@ -593,6 +594,13 @@ class CheckInPlugin(BasePlugin):
                 return {"name": slot["name"], "secret": slot["secret"], "hash": slot["hash"]}
         return None
 
+    def _channel_overview(self) -> Optional[dict[str, str]]:
+        """Where to check in, for the leaderboard: the channel's name and kind (no key); None until the radio says."""
+        channel = self._channel_entry()
+        if channel is None:
+            return None
+        return {"name": channel["name"], "kind": channel_kind(channel["name"], channel["secret"])}
+
     def _channel_key(self) -> str:
         channel = self._channel_entry()
         return channel["hash"] if channel else f"slot{self.config.channel}"
@@ -681,6 +689,7 @@ class CheckInPlugin(BasePlugin):
         return {
             "title": self.config.title,
             "keyword": self.config.keyword,
+            "channel": self._channel_overview(),
             "timezone": self.config.timezone,
             "check_in_days": [WEEKDAY_NAMES[day] for day in sorted(self.config.days)],
             "week": week_start(moment.date()).isoformat(),

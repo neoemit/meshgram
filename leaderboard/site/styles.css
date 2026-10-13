@@ -240,6 +240,21 @@ button, input { font: inherit; color: inherit; }
 .keyword svg { width: 20px; height: 20px; flex: none; margin-left: var(--space-1); fill: none; stroke: var(--text-3); stroke-width: 2; }
 .keyword[data-copied] svg { stroke: var(--green); }
 
+/* Where to send it: as quiet as the air box, so the keyword stays the call to action. */
+.channel {
+  display: inline-flex; align-items: center; gap: var(--space-4); min-height: 60px; padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--panel-border); border-radius: var(--radius-md); background: var(--panel);
+  text-align: left; cursor: pointer; transition: transform .15s, border-color .15s;
+}
+.channel[hidden] { display: none; }
+.channel:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--cyan) 45%, transparent); }
+.channel:active { transform: translateY(0); }
+.channel-body { display: grid; gap: 6px; min-width: 0; flex: 1; }
+.channel-label { color: var(--text-3); font: 700 var(--text-xs) / 1.2 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.channel-text { font: 800 var(--text-xl) / 1.15 var(--mono); letter-spacing: -.01em; overflow-wrap: anywhere; }
+.channel svg { width: 20px; height: 20px; flex: none; fill: none; stroke: var(--text-3); stroke-width: 2; }
+.channel[data-copied] svg { stroke: var(--cyan); }
+
 .air {
   display: inline-flex; align-items: center; gap: var(--space-4); min-height: 60px; padding: var(--space-3) var(--space-6) var(--space-3) var(--space-5);
   border: 1px solid var(--panel-border); border-radius: var(--radius-md); background: var(--panel);

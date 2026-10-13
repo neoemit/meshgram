@@ -98,6 +98,17 @@
     return `every ${short.slice(0, -1).join(", ")} & ${short[short.length - 1]}`;
   }
 
+  // The check-in channel ({name, kind}), or null while Meshgram hasn't read it from its radio.
+  const CHANNEL_LABELS = { public: "Channel", hashtag: "Hashtag channel", private: "Private channel" };
+  const CHANNEL_HINTS = {
+    hashtag: "Not on it yet? Join it as a hashtag channel in your MeshCore app.",
+    private: "It's a private channel: ask for its key to join.",
+  };
+
+  function channelPhrase(channel) {
+    return channel ? `the ${channel.name} channel` : "the mesh";
+  }
+
   // --- Feedback ---------------------------------------------------------------------------------
 
   let toastTimer = null;
@@ -159,8 +170,9 @@
     renderBrand(brand);
     $("title").textContent = data.title;
     $("keyword-text").textContent = data.keyword;
+    renderChannel(data.channel);
     $("eyebrow").textContent = `Weekly check-in · ${daysPhrase(data.check_in_days)}`;
-    $("lede").textContent = `Send ${data.keyword} on the mesh ${daysPhrase(data.check_in_days)} to check in. `
+    $("lede").textContent = `Send ${data.keyword} on ${channelPhrase(data.channel)} ${daysPhrase(data.check_in_days)} to check in. `
       + "Come back week after week to grow your streak and climb the tower.";
 
     renderStats(entries, data);
@@ -172,6 +184,13 @@
     $("footer-text").textContent = `Week of ${new Date(`${data.week}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })}${zone}`
       + ` · updated ${new Date(state.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
       + ` · refreshes every ${state.refreshSeconds} s · live from the mesh via ${brand}`;
+  }
+
+  function renderChannel(channel) {
+    $("channel").hidden = !channel;
+    if (!channel) return;
+    $("channel-label").textContent = CHANNEL_LABELS[channel.kind] || "Channel";
+    $("channel-text").textContent = channel.name;
   }
 
   function renderStats(entries, data) {
@@ -265,7 +284,9 @@
       empty.hidden = true;
     } else {
       empty.hidden = false;
-      empty.textContent = data.leaderboard.length ? "No node matches." : `Nobody has checked in yet. Send ${data.keyword} to be the first!`;
+      empty.textContent = data.leaderboard.length
+        ? "No node matches."
+        : `Nobody has checked in yet. Send ${data.keyword} on ${channelPhrase(data.channel)} to be the first!`;
     }
   }
 
@@ -346,16 +367,28 @@
 
   $("search").addEventListener("input", (event) => { state.query = event.target.value; renderBoard(); });
   $("active-only").addEventListener("change", (event) => { state.activeOnly = event.target.checked; renderBoard(); });
-  $("keyword").addEventListener("click", async () => {
-    const text = $("keyword-text").textContent;
+  async function copy(button, text, copied, fallback) {
     try {
       await navigator.clipboard.writeText(text);
-      $("keyword").dataset.copied = "";
-      setTimeout(() => delete $("keyword").dataset.copied, 1500);
-      toast(`Copied ${text}. Send it on the mesh!`);
+      button.dataset.copied = "";
+      setTimeout(() => delete button.dataset.copied, 1500);
+      toast(copied);
     } catch {
-      toast(`Send ${text} on the mesh to check in`);
+      toast(fallback);
     }
+  }
+
+  $("keyword").addEventListener("click", () => {
+    const text = $("keyword-text").textContent;
+    const where = channelPhrase(state.data && state.data.channel);
+    copy($("keyword"), text, `Copied ${text}. Send it on ${where}!`, `Send ${text} on ${where} to check in`);
+  });
+  $("channel").addEventListener("click", () => {
+    const channel = state.data && state.data.channel;
+    if (!channel) return;
+    const hint = CHANNEL_HINTS[channel.kind];
+    copy($("channel"), channel.name, `Copied ${channel.name}.${hint ? ` ${hint}` : ""}`,
+      `Check in on ${channelPhrase(channel)}.${hint ? ` ${hint}` : ""}`);
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.updatedAt && Date.now() - state.updatedAt > state.refreshSeconds * 1000) poll();

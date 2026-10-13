@@ -167,6 +167,16 @@ class CheckInTests(CheckInTestCase):
         self.assertTrue(board["window"]["open"])
         self.assertEqual(board["week"], "2026-10-12")
 
+    async def test_leaderboard_says_where_to_check_in(self):
+        self.assertEqual((await self.plugin.leaderboard())["channel"], {"name": "Public", "kind": "public"})
+        local = hashlib.sha256(b"#local").digest()[:16]
+        self.transport.channel_slots[1] = {"index": 1, "name": "#local", "secret": local, "hash": "x"}
+        await self.plugin.apply_settings({"channel": 1})
+        self.assertEqual((await self.plugin.leaderboard())["channel"], {"name": "#local", "kind": "hashtag"})
+        # An empty slot, or a radio that hasn't been read: nothing to show.
+        await self.plugin.apply_settings({"channel": 2})
+        self.assertIsNone((await self.plugin.leaderboard())["channel"])
+
     async def test_streak_over_weeks(self):
         self.now = MONDAY_9AM - 7 * 86400
         await self.check_in("LMB-T", 900)
