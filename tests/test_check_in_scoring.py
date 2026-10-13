@@ -94,19 +94,37 @@ class StandingsTests(unittest.TestCase):
         monday_noon = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
         first = monday_noon.timestamp() - 3600
         histories = [
-            History(1, "A" * 64, "Alpha", {week: first for week in weeks_back(2)}, first),
+            History(1, "A" * 64, "Alpha", {week: first for week in weeks_back(2)}, first, extra_check_ins=4),
             History(2, None, "Bravo", {week: first + 60 for week in weeks_back(5)}, first + 60),
-            History(3, "C" * 64, "Charlie", {week: first - 60 for week in weeks_back(2)}, first - 60, extra_check_ins=4),
+            History(3, "C" * 64, "Charlie", {week: first - 60 for week in weeks_back(2)}, first - 60),
             History(4, "D" * 64, "Delta", {MON - timedelta(weeks=3): first}, first),
         ]
         table = standings(histories, monday_noon, MONDAY)
+        # Equal streaks: Charlie checked in before Alpha, more check-ins or not.
         self.assertEqual([s.name for s in table], ["Bravo", "Charlie", "Alpha", "Delta"])
-        self.assertEqual([s.rank for s in table], [1, 2, 2, 4])  # equal streaks share a rank
+        self.assertEqual([s.rank for s in table], [1, 2, 3, 4])
         self.assertEqual([s.streak for s in table], [5, 2, 2, 0])
-        self.assertEqual(table[1].total_check_ins, 6)
+        self.assertEqual(table[2].total_check_ins, 6)
         # This week's order: Charlie first, then Alpha, then Bravo.
         self.assertEqual({s.name: s.week_rank for s in table}, {"Charlie": 1, "Alpha": 2, "Bravo": 3, "Delta": None})
         self.assertFalse(table[3].checked_in_this_week)
+
+    def test_equal_streaks_checked_in_this_week_first_and_no_streak_shares_a_rank(self):
+        monday_noon = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+        now = monday_noon.timestamp()
+        last_week = MON - timedelta(weeks=1)
+        histories = [
+            # Still on last week's streak of 2 (checked in early that Monday), not yet this week.
+            History(1, "A" * 64, "Alpha", {week: now - 7 * 86400 - 3600 for week in weeks_back(2, last_week)}, now - 7 * 86400),
+            # A streak of 2 up to this week, checked in a minute ago.
+            History(2, "B" * 64, "Bravo", {week: now - 60 for week in weeks_back(2)}, now - 60),
+            History(3, "C" * 64, "Charlie", {MON - timedelta(weeks=4): now}, now),
+            History(4, "D" * 64, "Delta", {MON - timedelta(weeks=6): now}, now),
+        ]
+        table = standings(histories, monday_noon, MONDAY)
+        self.assertEqual([s.name for s in table], ["Bravo", "Alpha", "Charlie", "Delta"])
+        self.assertEqual([s.streak for s in table], [2, 2, 0, 0])
+        self.assertEqual([s.rank for s in table], [1, 2, 3, 3])
 
 
 if __name__ == "__main__":

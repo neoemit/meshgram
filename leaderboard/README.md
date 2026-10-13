@@ -79,7 +79,7 @@ The page reads `api/leaderboard` (this site's proxy) and `config.json` (the refr
 }
 ```
 
-`meshgram_title` is Meshgram's `web.title` (control panel → Settings → Web app → Title): the page's top bar and footer credit it ("live from the mesh via LMB Meshgram"). Sorted by streak, longest first (`rank` is shared by equal streaks). `id` is the node's public key and `hash` its first byte; both are `null` (and `resolved` false) for a node known by name only, until Meshgram hears its advert. Individual check-ins are never exposed.
+`meshgram_title` is Meshgram's `web.title` (control panel → Settings → Web app → Title): the page's top bar and footer credit it ("live from the mesh via LMB Meshgram"). Sorted by streak, longest first; of equal streaks, whoever checked in first ranks higher (those checked in this week before those still on last week's streak). Nodes without a streak share the last `rank`. `id` is the node's public key and `hash` its first byte; both are `null` (and `resolved` false) for a node known by name only, until Meshgram hears its advert. Individual check-ins are never exposed.
 
 `channel` is where check-ins count: the check-in channel's `name` on Meshgram's radio and its `kind` (`public`, `hashtag` or `private`; never its key). The page shows it next to the keyword (*Hashtag channel #local*; tap to copy, with a hint on joining it). It's `null` until Meshgram has read its radio's channels, and then the page just says "on the mesh".
 

@@ -69,6 +69,16 @@ def check_in_window(moment: datetime, days: frozenset[int]) -> Window:
     return Window(is_open, midnight(start, zone), midnight(end, zone))
 
 
+def streak_end(weeks: Iterable[date], this_week: date, still_open: bool) -> Optional[date]:
+    """The current streak's latest week: this week, last week while ``still_open``, or None (no streak)."""
+    weeks = set(weeks)
+    if this_week in weeks:
+        return this_week
+    if still_open and this_week - WEEK in weeks:
+        return this_week - WEEK
+    return None
+
+
 def current_streak(weeks: Iterable[date], this_week: date, still_open: bool) -> int:
     """Consecutive weeks with a check-in, up to this week.
 
@@ -76,11 +86,8 @@ def current_streak(weeks: Iterable[date], this_week: date, still_open: bool) -> 
     ``still_open`` (a check-in day is under way or to come); after that it's broken.
     """
     weeks = set(weeks)
-    if this_week in weeks:
-        week = this_week
-    elif still_open and this_week - WEEK in weeks:
-        week = this_week - WEEK
-    else:
+    week = streak_end(weeks, this_week, still_open)
+    if week is None:
         return 0
     streak = 0
     while week in weeks:
@@ -124,12 +131,16 @@ class Standing:
     checked_in_this_week: bool
     # Order of this week's first check-ins (1 = first); None when not checked in this week.
     week_rank: Optional[int]
-    # Competition rank by streak (equal streaks share a rank).
+    # Competition rank by streak, equal streaks by who checked in first (those without a streak share one).
     rank: int = 0
 
 
 def standings(histories: Iterable[History], moment: datetime, days: frozenset[int]) -> list[Standing]:
-    """Everyone, best first: by streak, then total check-ins, best streak and name."""
+    """Everyone, best first: by streak, then who checked in first, total check-ins, best streak and name.
+
+    Of equal streaks, those already checked in this week come before those still on
+    last week's, each by the time of that week's first check-in, earliest first.
+    """
     histories = list(histories)
     this_week = week_start(moment.date())
     still_open = week_still_open(moment, days)
@@ -139,8 +150,10 @@ def standings(histories: Iterable[History], moment: datetime, days: frozenset[in
     )
     week_ranks = {history.participant_id: index for index, history in enumerate(this_week_order, start=1)}
 
-    result = [
-        Standing(
+    ranked: list[tuple[tuple, Standing]] = []
+    for history in histories:
+        end = streak_end(history.weeks, this_week, still_open)
+        standing = Standing(
             participant_id=history.participant_id,
             node_id=history.node_id,
             name=history.name,
@@ -151,13 +164,14 @@ def standings(histories: Iterable[History], moment: datetime, days: frozenset[in
             checked_in_this_week=history.participant_id in week_ranks,
             week_rank=week_ranks.get(history.participant_id),
         )
-        for history in histories
-    ]
-    result.sort(key=lambda s: (-s.streak, -s.total_check_ins, -s.best_streak, s.name.casefold(), s.participant_id))
-    previous_streak: Optional[int] = None
-    for index, standing in enumerate(result, start=1):
-        standing.rank = result[index - 2].rank if standing.streak == previous_streak else index
-        previous_streak = standing.streak
+        ranked.append(((-standing.streak, (-end.toordinal(), history.weeks[end]) if end else ()), standing))
+    ranked.sort(key=lambda pair: (
+        pair[0], -pair[1].total_check_ins, -pair[1].best_streak, pair[1].name.casefold(), pair[1].participant_id,
+    ))
+    result: list[Standing] = []
+    for index, (key, standing) in enumerate(ranked):
+        standing.rank = result[-1].rank if index and key == ranked[index - 1][0] else index + 1
+        result.append(standing)
     return result
 
 
