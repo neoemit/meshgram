@@ -13,6 +13,11 @@ if TYPE_CHECKING:
 # (``expected_ack`` codes, or digests of the sender, timestamp and text).
 MeshPacketRef = str
 
+# Where a mesh message was heard: by the radio, or by another observer that uploaded it
+# to an MQTT server (MeshMapper, LetsMesh, MeshRank, ...). Plugins treat both alike.
+SOURCE_RADIO = "radio"
+SOURCE_MQTT = "mqtt"
+
 
 @dataclass(slots=True)
 class TelegramMessageEvent:
@@ -37,6 +42,9 @@ class MeshTextEvent:
     text: str
     sender_label: str
     raw_packet: dict[str, Any] = field(default_factory=dict)
+    # SOURCE_RADIO, or SOURCE_MQTT for a channel message another observer heard
+    # (``raw_packet`` then also has ``network``, ``observer_id`` and ``observer_name``).
+    source: str = SOURCE_RADIO
 
 
 @dataclass(slots=True)

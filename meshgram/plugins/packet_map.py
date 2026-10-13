@@ -5,10 +5,12 @@ Feeds the web app's Map and Messages views: every node that shares a position
 packet the radio hears. Repeater hashes in each packet's path are resolved to
 known nodes so the route a packet took can be drawn on the map.
 
-Packets heard by other MeshMapper observers (relayed by the meshmapper plugin
-through the transport's remote RX log listeners) are shown too, routed to the
-observer that heard them, in a buffer of their own. Those from MeshMapper's
-live feed arrive as metadata only (no bytes), so they can't be decrypted.
+Packets heard by other observers (relayed from MQTT servers by the meshmapper,
+letsmesh and meshrank plugins through the transport's remote RX log listeners)
+are shown too, as ``source`` "mqtt" with the ``network`` they came from, routed
+to the observer that heard them, in a buffer of their own. Those from
+MeshMapper's live feed arrive as metadata only (no bytes), so they can't be
+decrypted.
 
 Nodes and packet history are saved to SQLite (see ``packet_map_store``) and
 restored on startup, so the map survives restarts and redeploys.
@@ -52,7 +54,7 @@ from meshgram.plugins.packet_map_store import (
     SavedState,
     encode,
 )
-from meshgram.types import PluginAction, PluginContext
+from meshgram.types import SOURCE_MQTT, PluginAction, PluginContext
 
 LOGGER = logging.getLogger(__name__)
 
@@ -135,6 +137,11 @@ class PacketMapConfig:
 # --- State -------------------------------------------------------------------
 
 
+def is_remote(packet: dict[str, Any]) -> bool:
+    """Another observer's packet ("meshmapper": saved before there were other MQTT servers)."""
+    return packet.get("source") in (SOURCE_MQTT, "meshmapper")
+
+
 def _clean_key(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         return bytes(value).hex().upper()
@@ -164,7 +171,7 @@ class PacketMapState:
     def __init__(self, max_packets: int = 500, max_messages: int = 1000, max_remote_packets: int = 1000):
         self.nodes: dict[str, dict[str, Any]] = {}
         self.packets: deque[dict[str, Any]] = deque(maxlen=max_packets)
-        # Packets other MeshMapper observers heard; kept apart so a busy region
+        # Packets other observers heard (over MQTT); kept apart so a busy region
         # can't push this radio's own packets out of the buffer.
         self.remote_packets: deque[dict[str, Any]] = deque(maxlen=max_remote_packets)
         # Channel secrets (``name``, ``secret``, ``hash``) for decrypting channel
@@ -195,7 +202,7 @@ class PacketMapState:
         for packet in saved.packets:
             # Keep the "heard N×" count the packet had when it arrived.
             seen_count = packet.get("seen_count")
-            if packet.get("source") == "meshmapper":
+            if is_remote(packet):
                 self._track(self.remote_packets, self._remote_hash_counts, packet)
             else:
                 self._track(self.packets, self._hash_counts, packet)
@@ -219,7 +226,7 @@ class PacketMapState:
             (
                 packet["id"],
                 packet["received_at"],
-                int(packet.get("source") == "meshmapper"),
+                int(is_remote(packet)),
                 int(bool(packet.get("message"))),
                 encode(packet),
             )
@@ -373,7 +380,7 @@ class PacketMapState:
         return self._ingest(rx_log, now, observer_id=None)
 
     def ingest_remote_rx_log(self, rx_log: dict[str, Any], now: Optional[float] = None) -> Optional[dict[str, Any]]:
-        """Ingest a packet another MeshMapper observer heard (``observer_id``/``observer_name`` keys)."""
+        """Ingest a packet another observer heard (``observer_id``, ``observer_name``, ``network`` keys)."""
         observer_id = _clean_key(rx_log.get("observer_id"))
         if not observer_id or observer_id == self.self_id:
             return None
@@ -437,7 +444,8 @@ class PacketMapState:
 
         changed_nodes: list[dict[str, Any]] = []
         if observer_id:
-            packet["source"] = "meshmapper"
+            packet["source"] = SOURCE_MQTT
+            packet["network"] = str(rx_log.get("network") or "").strip() or None
             observer_node = self._upsert_observer(observer_id, rx_log.get("observer_name"))
             if observer_node is not None:
                 changed_nodes.append(observer_node)
@@ -552,7 +560,7 @@ class PacketMapPlugin(BasePlugin):
     title = "Packet map"
     description = (
         "Feeds the web app's Map and Messages views: nodes with a position, every packet the radio "
-        "(and other MeshMapper observers) hears, with routes, and decrypted channel messages."
+        "(and other MQTT observers) hears, with routes, and decrypted channel messages."
     )
     settings_schema = {
         "type": "object",

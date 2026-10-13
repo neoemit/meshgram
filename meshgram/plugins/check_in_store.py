@@ -9,7 +9,9 @@ guarded by a lock; every change is one transaction.
   uppercase), or NULL while the participant is known by name only: channel messages
   carry the sender's name, not its key. Such a participant is linked to the node
   (and merged into the participant that already has the key) once a node of that
-  name is the only one in the directory.
+  name is the only one in the directory, or as soon as a flood advert of that name
+  is heard live (by the radio or an observer): the first one decides, even if other
+  nodes went by the name before.
 - ``check_ins``: every check-in message, repeats included. ``week`` is the Monday of
   its week; ``message_key`` identifies one message however many radios heard it.
 - ``nodes``: names from adverts (the radio's contacts, packets it and observers
@@ -96,6 +98,9 @@ class NodeSighting:
     advert_at: Optional[float] = None
     # Only fill in a node that isn't known yet (MeshMapper's guess of who sent a packet).
     fill_only: bool = False
+    # A flood advert heard just now (not the radio's contact list): the node is around
+    # under this name, so participants known only by it are linked to it.
+    flood: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,7 +302,10 @@ class CheckInStore:
         changed = 0
         with self._transaction() as conn:
             names: set[str] = set()
+            flooded: dict[str, str] = {}  # name -> the first node heard flooding an advert of it
             for sighting in sightings:
+                if sighting.flood and not sighting.fill_only:
+                    flooded.setdefault(sighting.name, sighting.node_id)
                 row = conn.execute("SELECT name, advert_at FROM nodes WHERE node_id = ?", (sighting.node_id,)).fetchone()
                 if row is not None:
                     known_name, known_advert_at = row
@@ -330,6 +338,11 @@ class CheckInStore:
                 node_ids = [node_id for (node_id,) in conn.execute("SELECT node_id FROM nodes WHERE name = ?", (name,))]
                 if len(node_ids) == 1 and self._has_unresolved(conn, name):
                     self._link(conn, node_ids[0], name, now)
+                    changed += 1
+            for name, node_id in flooded.items():
+                # Still unresolved: other nodes (old keys, contacts) go by the name too.
+                if self._has_unresolved(conn, name) and self._directory_name(conn, node_id) == name:
+                    self._link(conn, node_id, name, now)
                     changed += 1
         return changed
 
