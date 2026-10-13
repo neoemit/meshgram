@@ -1,17 +1,21 @@
 """The check_in plugin's routes on the web app, added while the plugin runs.
 
     GET    /api/plugins/check_in/leaderboard[?limit=N]          standings for other sites (see below)
-    GET    /api/plugins/check_in/participants                   everyone with their weeks (control panel)
+    GET    /api/plugins/check_in/participants                   everyone with their periods (control panel)
     POST   /api/plugins/check_in/participants                   {"name", "node_id"?} -> 201
     DELETE /api/plugins/check_in/participants                   everyone and every check-in -> how many
     PATCH  /api/plugins/check_in/participants/{id}              {"name"?, "node_id"?}; a key another
                                                                 participant has merges the two
     DELETE /api/plugins/check_in/participants/{id}
     GET    /api/plugins/check_in/participants/{id}/check-ins    the check-ins on record, newest first
-    PUT    /api/plugins/check_in/participants/{id}/weeks/{week} check in for that week (any date in it)
-    DELETE /api/plugins/check_in/participants/{id}/weeks/{week} remove that week's check-ins
-    PUT    /api/plugins/check_in/participants/{id}/streak       {"streak", "week"?}: that many weeks up to
-                                                                ``week`` (default: the latest check-in week)
+    PUT    /api/plugins/check_in/participants/{id}/periods/{date}
+                                                                check in for that period (the day, or the
+                                                                week: any date in it)
+    DELETE /api/plugins/check_in/participants/{id}/periods/{date}
+                                                                remove that period's check-ins
+    PUT    /api/plugins/check_in/participants/{id}/streak       {"streak", "as_of"?}: that many periods (days
+                                                                or weeks) up to the one ``as_of`` is in
+                                                                (default: the latest check-in period)
     POST   /api/plugins/check_in/import                         {"records": [...], "as_of"?, "mode"?:
                                                                 "merge"|"replace", "dry_run"?}
     GET    /api/plugins/check_in/export?format=csv|json         everyone, in the import format
@@ -20,6 +24,7 @@
                                                                 "replace", "dry_run"?}
     GET    /api/plugins/check_in/nodes?q=                       known nodes, to link participants to
 
+Periods are days or weeks (Monday to Sunday), as the plugin's ``frequency`` says.
 The leaderboard is a public route: it takes ``Authorization: Bearer <api_token>``
 (the plugin's setting) as well as the web app's password, so a leaderboard site
 can read it without the password. The other routes are the control panel's: the
@@ -35,7 +40,7 @@ import json
 from datetime import date
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from meshgram.plugins.check_in_scoring import parse_week
+from meshgram.plugins.check_in_scoring import parse_date
 from meshgram.plugins.check_in_store import CheckInError, CheckInStoreError
 from meshgram.web.server import (
     MAX_BODY_BYTES,
@@ -87,9 +92,9 @@ def _participant_id(request: Request) -> int:
         raise HttpError(404, "There's no such participant") from None
 
 
-def _week(value: Any, what: str = "week") -> date:
+def _date(value: Any, what: str = "date") -> date:
     try:
-        return parse_week(str(value))
+        return parse_date(str(value))
     except ValueError:
         raise HttpError(400, f"The {what} must be a date (YYYY-MM-DD)") from None
 
@@ -196,14 +201,14 @@ def register_check_in_routes(web: WebServer, plugin: "CheckInPlugin") -> list[An
     async def check_ins(request: Request) -> Response:
         return json_response({"check_ins": await plugin.check_ins(_participant_id(request))})
 
-    @route("PUT", "/participants/{id}/weeks/{week}")
-    async def add_week(request: Request) -> Response:
-        await plugin.set_week(_participant_id(request), _week(request.params["week"]), True)
+    @route("PUT", "/participants/{id}/periods/{date}")
+    async def add_period(request: Request) -> Response:
+        await plugin.set_period(_participant_id(request), _date(request.params["date"]), True)
         return no_content()
 
-    @route("DELETE", "/participants/{id}/weeks/{week}")
-    async def remove_week(request: Request) -> Response:
-        await plugin.set_week(_participant_id(request), _week(request.params["week"]), False)
+    @route("DELETE", "/participants/{id}/periods/{date}")
+    async def remove_period(request: Request) -> Response:
+        await plugin.set_period(_participant_id(request), _date(request.params["date"]), False)
         return no_content()
 
     @route("PUT", "/participants/{id}/streak")
@@ -212,8 +217,8 @@ def register_check_in_routes(web: WebServer, plugin: "CheckInPlugin") -> list[An
         streak = body.get("streak")
         if isinstance(streak, bool) or not isinstance(streak, int) or not 0 <= streak <= 1000:
             raise HttpError(400, "The streak must be a whole number from 0 to 1000")
-        week = _week(body["week"]) if body.get("week") else None
-        await plugin.set_streak(_participant_id(request), streak, week)
+        as_of = _date(body["as_of"], "as_of date") if body.get("as_of") else None
+        await plugin.set_streak(_participant_id(request), streak, as_of)
         return no_content()
 
     @route("POST", "/import")
@@ -223,7 +228,7 @@ def register_check_in_routes(web: WebServer, plugin: "CheckInPlugin") -> list[An
         if not isinstance(records, list):
             raise HttpError(400, "records must be a list")
         replace = _mode(body)
-        as_of = _week(body["as_of"], "as_of date") if body.get("as_of") else None
+        as_of = _date(body["as_of"], "as_of date") if body.get("as_of") else None
         result = await plugin.import_summary(records, as_of=as_of, replace=replace, dry_run=bool(body.get("dry_run")))
         return json_response(result)
 

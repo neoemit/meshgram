@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Leaderboard</title>
-  <meta name="description" content="Weekly mesh radio check-ins: who's on the air, this week's roll call and the longest streaks.">
+  <meta name="description" content="Daily or weekly mesh radio check-ins: who's on the air, the roll call and the longest streaks.">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#05070d" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#f3f6fb" media="(prefers-color-scheme: light)">
@@ -62,9 +62,9 @@
       </div>
     </section>
 
-    <section class="stats" aria-label="This week in numbers">
+    <section class="stats" id="stats" aria-label="This week in numbers">
       <article class="stat stat-green">
-        <span class="stat-label">Checked in this week</span>
+        <span class="stat-label" id="stat-week-label">Checked in this week</span>
         <strong class="stat-value" id="stat-week"></strong>
         <span class="stat-sub" id="stat-week-sub"></span>
       </article>
@@ -117,7 +117,7 @@
         </div>
       </div>
       <div class="board-header" aria-hidden="true">
-        <span>#</span><span>Node</span><span>Streak</span><span>Best</span><span>Total</span><span>This week</span>
+        <span>#</span><span>Node</span><span>Streak</span><span>Best</span><span>Total</span><span id="board-period">This week</span>
       </div>
       <ol class="board" id="board" aria-label="Nodes by streak"></ol>
       <p class="empty" id="board-empty" hidden></p>

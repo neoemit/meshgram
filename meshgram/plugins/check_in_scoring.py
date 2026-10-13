@@ -1,9 +1,10 @@
-"""Week, window, streak and ranking arithmetic for the check_in plugin (no I/O).
+"""Period, window, streak and ranking arithmetic for the check_in plugin (no I/O).
 
-Weeks run Monday to Sunday in the plugin's time zone and are identified by the
-date of their Monday. A check-in counts on the configured weekdays only (all of
-them when none are configured); a streak is the number of consecutive weeks with
-at least one check-in.
+Check-ins are counted per *period* of a ``Schedule``: a day (daily check-ins) or a
+week, Monday to Sunday (weekly check-ins), in the plugin's time zone. A period is
+identified by the date it starts on: the day itself, or that week's Monday.
+Daily check-ins count on any day; weekly ones on the schedule's one weekday only.
+A streak is the number of consecutive periods with at least one check-in.
 """
 from __future__ import annotations
 
@@ -14,6 +15,10 @@ from typing import Iterable, Optional
 WEEK = timedelta(days=7)
 DAY = timedelta(days=1)
 WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+WEEKLY = "weekly"
+DAILY = "daily"
+FREQUENCIES = (WEEKLY, DAILY)
 
 
 def week_start(day: date) -> date:
@@ -29,13 +34,9 @@ def midnight(day: date, zone: tzinfo) -> datetime:
     return datetime.combine(day, time(0), tzinfo=zone)
 
 
-def is_check_in_day(moment: datetime, days: frozenset[int]) -> bool:
-    return not days or moment.weekday() in days
-
-
-def week_still_open(moment: datetime, days: frozenset[int]) -> bool:
-    """Whether a check-in day of ``moment``'s week is under way or still to come."""
-    return not days or any(day >= moment.weekday() for day in days)
+def parse_date(value: str) -> date:
+    """``YYYY-MM-DD`` -> that date. Raises ``ValueError``."""
+    return date.fromisoformat(str(value).strip())
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,75 +48,113 @@ class Window:
     closes_at: datetime
 
 
-def check_in_window(moment: datetime, days: frozenset[int]) -> Window:
-    """Consecutive check-in days form one window (Saturday and Sunday, say)."""
-    zone = moment.tzinfo
-    assert zone is not None, "moment must be timezone-aware"
-    today = moment.date()
-    if not days or len(days) == 7:
-        monday = week_start(today)
-        return Window(True, midnight(monday, zone), midnight(monday + WEEK, zone))
-    if today.weekday() in days:
-        start, is_open = today, True
-        while (start - DAY).weekday() in days:
-            start -= DAY
-    else:
-        start, is_open = today + DAY, False
-        while start.weekday() not in days:
-            start += DAY
-    end = start + DAY
-    while end.weekday() in days:
-        end += DAY
-    return Window(is_open, midnight(start, zone), midnight(end, zone))
+@dataclass(frozen=True, slots=True)
+class Schedule:
+    """When check-ins count: every day (``daily``), or once a week on ``day`` (0 = Monday)."""
+
+    frequency: str = WEEKLY
+    day: int = 0
+
+    def __post_init__(self) -> None:
+        if self.frequency not in FREQUENCIES:
+            raise ValueError(f"frequency must be one of {', '.join(FREQUENCIES)}")
+        if not 0 <= self.day <= 6:
+            raise ValueError("day must be 0 (Monday) to 6 (Sunday)")
+
+    @property
+    def daily(self) -> bool:
+        return self.frequency == DAILY
+
+    @property
+    def step(self) -> timedelta:
+        """How long a period is."""
+        return DAY if self.daily else WEEK
+
+    @property
+    def unit(self) -> str:
+        """What a period is called: "day" or "week"."""
+        return "day" if self.daily else "week"
+
+    def period_of(self, day: date) -> date:
+        """The period ``day`` is in: the day itself, or its week's Monday."""
+        return day if self.daily else week_start(day)
+
+    def check_in_day(self, period: date) -> date:
+        """The date check-ins count on in ``period``."""
+        return period if self.daily else period + timedelta(days=self.day)
+
+    def counts_on(self, day: date) -> bool:
+        """Whether a check-in on ``day`` counts."""
+        return self.daily or day.weekday() == self.day
+
+    def still_open(self, moment: datetime) -> bool:
+        """Whether the check-in day of ``moment``'s period is under way or still to come."""
+        return self.daily or moment.weekday() <= self.day
+
+    def latest_period(self, moment: datetime) -> date:
+        """The latest period whose check-in day has begun: the current one, or (weekly) last week."""
+        period = self.period_of(moment.date())
+        return period if self.check_in_day(period) <= moment.date() else period - self.step
+
+    def window(self, moment: datetime) -> Window:
+        """The check-in day under way, or the next one."""
+        zone = moment.tzinfo
+        assert zone is not None, "moment must be timezone-aware"
+        today = moment.date()
+        if self.counts_on(today):
+            return Window(True, midnight(today, zone), midnight(today + DAY, zone))
+        start = today + timedelta(days=(self.day - today.weekday()) % 7)
+        return Window(False, midnight(start, zone), midnight(start + DAY, zone))
 
 
-def streak_end(weeks: Iterable[date], this_week: date, still_open: bool) -> Optional[date]:
-    """The current streak's latest week: this week, last week while ``still_open``, or None (no streak)."""
-    weeks = set(weeks)
-    if this_week in weeks:
-        return this_week
-    if still_open and this_week - WEEK in weeks:
-        return this_week - WEEK
+def streak_end(periods: Iterable[date], this_period: date, still_open: bool, step: timedelta = WEEK) -> Optional[date]:
+    """The current streak's latest period: this one, the one before while ``still_open``, or None (no streak)."""
+    periods = set(periods)
+    if this_period in periods:
+        return this_period
+    if still_open and this_period - step in periods:
+        return this_period - step
     return None
 
 
-def current_streak(weeks: Iterable[date], this_week: date, still_open: bool) -> int:
-    """Consecutive weeks with a check-in, up to this week.
+def current_streak(periods: Iterable[date], this_period: date, still_open: bool, step: timedelta = WEEK) -> int:
+    """Consecutive periods with a check-in, up to this one.
 
-    A participant who hasn't checked in yet this week keeps last week's streak while
-    ``still_open`` (a check-in day is under way or to come); after that it's broken.
+    A participant who hasn't checked in yet this period keeps the previous period's
+    streak while ``still_open`` (a check-in day is under way or to come); after that
+    it's broken.
     """
-    weeks = set(weeks)
-    week = streak_end(weeks, this_week, still_open)
-    if week is None:
+    periods = set(periods)
+    period = streak_end(periods, this_period, still_open, step)
+    if period is None:
         return 0
     streak = 0
-    while week in weeks:
+    while period in periods:
         streak += 1
-        week -= WEEK
+        period -= step
     return streak
 
 
-def best_streak(weeks: Iterable[date]) -> int:
+def best_streak(periods: Iterable[date], step: timedelta = WEEK) -> int:
     best = run = 0
     previous: Optional[date] = None
-    for week in sorted(set(weeks)):
-        run = run + 1 if previous is not None and week - previous == WEEK else 1
+    for period in sorted(set(periods)):
+        run = run + 1 if previous is not None and period - previous == step else 1
         best = max(best, run)
-        previous = week
+        previous = period
     return best
 
 
 @dataclass(slots=True)
 class History:
-    """A participant's check-ins: the first one of each week (Unix time) and the latest."""
+    """A participant's check-ins: the first one of each period (Unix time) and the latest."""
 
     participant_id: int
     node_id: Optional[str]
     name: str
-    weeks: dict[date, float] = field(default_factory=dict)
+    periods: dict[date, float] = field(default_factory=dict)
     last_check_in: Optional[float] = None
-    # Check-ins imported as a total, beyond the weeks on record.
+    # Check-ins imported as a total, beyond the periods on record.
     extra_check_ins: int = 0
 
 
@@ -128,43 +167,44 @@ class Standing:
     best_streak: int
     total_check_ins: int
     last_check_in: Optional[float]
-    checked_in_this_week: bool
-    # Order of this week's first check-ins (1 = first); None when not checked in this week.
-    week_rank: Optional[int]
+    checked_in_this_period: bool
+    # Order of this period's first check-ins (1 = first); None when not checked in this period.
+    period_rank: Optional[int]
     # Competition rank by streak, equal streaks by who checked in first (those without a streak share one).
     rank: int = 0
 
 
-def standings(histories: Iterable[History], moment: datetime, days: frozenset[int]) -> list[Standing]:
+def standings(histories: Iterable[History], moment: datetime, schedule: Schedule) -> list[Standing]:
     """Everyone, best first: by streak, then who checked in first, total check-ins, best streak and name.
 
-    Of equal streaks, those already checked in this week come before those still on
-    last week's, each by the time of that week's first check-in, earliest first.
+    Of equal streaks, those already checked in this period come before those still on
+    the previous one's, each by the time of that period's first check-in, earliest first.
     """
     histories = list(histories)
-    this_week = week_start(moment.date())
-    still_open = week_still_open(moment, days)
-    this_week_order = sorted(
-        (history for history in histories if this_week in history.weeks),
-        key=lambda history: (history.weeks[this_week], history.participant_id),
+    step = schedule.step
+    this_period = schedule.period_of(moment.date())
+    still_open = schedule.still_open(moment)
+    this_period_order = sorted(
+        (history for history in histories if this_period in history.periods),
+        key=lambda history: (history.periods[this_period], history.participant_id),
     )
-    week_ranks = {history.participant_id: index for index, history in enumerate(this_week_order, start=1)}
+    period_ranks = {history.participant_id: index for index, history in enumerate(this_period_order, start=1)}
 
     ranked: list[tuple[tuple, Standing]] = []
     for history in histories:
-        end = streak_end(history.weeks, this_week, still_open)
+        end = streak_end(history.periods, this_period, still_open, step)
         standing = Standing(
             participant_id=history.participant_id,
             node_id=history.node_id,
             name=history.name,
-            streak=current_streak(history.weeks, this_week, still_open),
-            best_streak=best_streak(history.weeks),
-            total_check_ins=len(history.weeks) + max(0, history.extra_check_ins),
+            streak=current_streak(history.periods, this_period, still_open, step),
+            best_streak=best_streak(history.periods, step),
+            total_check_ins=len(history.periods) + max(0, history.extra_check_ins),
             last_check_in=history.last_check_in,
-            checked_in_this_week=history.participant_id in week_ranks,
-            week_rank=week_ranks.get(history.participant_id),
+            checked_in_this_period=history.participant_id in period_ranks,
+            period_rank=period_ranks.get(history.participant_id),
         )
-        ranked.append(((-standing.streak, (-end.toordinal(), history.weeks[end]) if end else ()), standing))
+        ranked.append(((-standing.streak, (-end.toordinal(), history.periods[end]) if end else ()), standing))
     ranked.sort(key=lambda pair: (
         pair[0], -pair[1].total_check_ins, -pair[1].best_streak, pair[1].name.casefold(), pair[1].participant_id,
     ))
@@ -173,8 +213,3 @@ def standings(histories: Iterable[History], moment: datetime, days: frozenset[in
         standing.rank = result[-1].rank if index and key == ranked[index - 1][0] else index + 1
         result.append(standing)
     return result
-
-
-def parse_week(value: str) -> date:
-    """``YYYY-MM-DD`` (any day of the week) -> that week's Monday. Raises ``ValueError``."""
-    return week_start(date.fromisoformat(str(value).strip()))

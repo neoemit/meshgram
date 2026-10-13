@@ -21,7 +21,7 @@
     timer: null,
     query: "",
     activeOnly: false,
-    seen: null,          // keys checked in this week at the last update
+    seen: null,          // keys checked in this period (today or this week) at the last update
     shown: new Map(),    // stat element -> number on screen
   };
 
@@ -91,12 +91,36 @@
     return days ? `${days}d ${time}` : time;
   }
 
-  function daysPhrase(days) {
+  // Check-ins are daily or weekly (on one day). A Meshgram from before daily check-ins sends the
+  // weekly names only (week, check_in_days, checked_in_this_week, week_rank, …): read either.
+  function normalize(data) {
+    const days = Array.isArray(data.check_in_days) ? data.check_in_days : [];
+    return {
+      ...data,
+      daily: data.frequency === "daily",
+      period: data.period || data.week,
+      checkInDay: data.check_in_day || (days.length === 1 ? days[0] : null),
+      checkInDays: days,
+      participantsThisPeriod: data.participants_this_period ?? data.participants_this_week ?? 0,
+      leaderboard: data.leaderboard.map((entry) => ({
+        ...entry,
+        inThisPeriod: Boolean(entry.checked_in_this_period ?? entry.checked_in_this_week),
+        periodRank: entry.period_rank ?? entry.week_rank,
+      })),
+    };
+  }
+
+  function schedulePhrase(data) {
+    if (data.daily) return "every day";
+    if (data.checkInDay) return `every ${data.checkInDay}`;
+    const days = data.checkInDays;
     if (!days.length) return "once a week, any day";
-    if (days.length === 1) return `every ${days[0]}`;
     const short = days.map((day) => day.slice(0, 3));
     return `every ${short.slice(0, -1).join(", ")} & ${short[short.length - 1]}`;
   }
+
+  const thisPeriod = (data) => (data.daily ? "today" : "this week");
+  const unit = (data) => (data.daily ? "day" : "week");
 
   // The check-in channel ({name, kind}), or null while Meshgram hasn't read it from its radio.
   const CHANNEL_LABELS = { public: "Channel", hashtag: "Hashtag channel", private: "Private channel" };
@@ -171,9 +195,10 @@
     $("title").textContent = data.title;
     $("keyword-text").textContent = data.keyword;
     renderChannel(data.channel);
-    $("eyebrow").textContent = `Weekly check-in · ${daysPhrase(data.check_in_days)}`;
-    $("lede").textContent = `Send ${data.keyword} on ${channelPhrase(data.channel)} ${daysPhrase(data.check_in_days)} to check in. `
-      + "Come back week after week to grow your streak and climb the tower.";
+    $("eyebrow").textContent = `${data.daily ? "Daily" : "Weekly"} check-in · ${schedulePhrase(data)}`;
+    $("lede").textContent = `Send ${data.keyword} on ${channelPhrase(data.channel)} ${schedulePhrase(data)} to check in. `
+      + `Come back ${unit(data)} after ${unit(data)} to grow your streak and climb the tower.`;
+    renderPeriodLabels(data);
 
     renderStats(entries, data);
     renderPodium(entries);
@@ -181,9 +206,19 @@
     renderBoard(fresh);
     renderAir();
     const zone = data.timezone && data.timezone !== "UTC" ? ` (${data.timezone})` : " (UTC)";
-    $("footer-text").textContent = `Week of ${new Date(`${data.week}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })}${zone}`
+    const day = new Date(`${data.period}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+    $("footer-text").textContent = `${data.daily ? "Today" : "Week of"} ${day}${zone}`
       + ` · updated ${new Date(state.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
       + ` · refreshes every ${state.refreshSeconds} s · live from the mesh via ${brand}`;
+  }
+
+  // The page's fixed words for "this week", "today" when check-ins are daily.
+  function renderPeriodLabels(data) {
+    const period = thisPeriod(data);
+    $("stats").setAttribute("aria-label", `${data.daily ? "Today" : "This week"} in numbers`);
+    $("stat-week-label").textContent = `Checked in ${period}`;
+    $("rollcall-title").textContent = data.daily ? "Today's roll call" : "This week's roll call";
+    $("board-period").textContent = data.daily ? "Today" : "This week";
   }
 
   function renderChannel(channel) {
@@ -198,15 +233,15 @@
     const longest = entries.reduce((best, entry) => Math.max(best, entry.streak), 0);
     const leaders = entries.filter((entry) => longest > 0 && entry.streak === longest);
     const total = entries.reduce((sum, entry) => sum + entry.total_check_ins, 0);
-    const first = entries.find((entry) => entry.week_rank === 1);
+    const first = entries.find((entry) => entry.periodRank === 1);
 
-    countUp($("stat-week"), data.participants_this_week);
-    $("stat-week-sub").replaceChildren(...(first ? ["First on air", h("strong", {}, first.name)] : ["Be the first this week"]));
+    countUp($("stat-week"), data.participantsThisPeriod);
+    $("stat-week-sub").replaceChildren(...(first ? ["First on air", h("strong", {}, first.name)] : [`Be the first ${thisPeriod(data)}`]));
     countUp($("stat-active"), active.length);
     $("stat-active-sub").textContent = entries.length ? `of ${plural(entries.length, "node")}` : "No nodes yet";
     countUp($("stat-longest"), longest);
     $("stat-longest-sub").replaceChildren(...(leaders.length
-      ? [h("strong", {}, leaders[0].name, leaders.length > 1 ? ` +${leaders.length - 1}` : ""), plural(longest, "week")]
+      ? [h("strong", {}, leaders[0].name, leaders.length > 1 ? ` +${leaders.length - 1}` : ""), plural(longest, unit(data))]
       : ["No streaks yet"]));
     countUp($("stat-total"), total);
     $("stat-total-sub").textContent = entries.length ? `by ${plural(entries.length, "node")}` : " ";
@@ -222,24 +257,24 @@
     podium.replaceChildren(...top.map((entry, index) => h("li", { class: `place-${index + 1}` },
       badge(entry),
       h("span", { class: "podium-name", title: entry.name }, entry.name),
-      h("span", { class: "podium-streak" }, "🔥", h("strong", {}, entry.streak), entry.streak === 1 ? "week" : "weeks"),
+      h("span", { class: "podium-streak" }, "🔥", h("strong", {}, entry.streak), entry.streak === 1 ? unit(state.data) : `${unit(state.data)}s`),
       h("span", { class: "podium-meta" }, h("span", {}, `best ${entry.best_streak}`), " · ", h("span", {}, plural(entry.total_check_ins, "check-in"))),
       h("div", { class: "podium-block", "aria-label": `Rank ${entry.rank}` }, entry.rank))));
   }
 
   function renderRollCall(entries, fresh) {
     const list = $("rollcall");
-    const checked = entries.filter((entry) => entry.checked_in_this_week).sort((a, b) => a.week_rank - b.week_rank);
+    const checked = entries.filter((entry) => entry.inThisPeriod).sort((a, b) => a.periodRank - b.periodRank);
     $("rollcall-note").textContent = checked.length ? `${plural(checked.length, "node")} in order of check-in` : "In order of check-in";
     if (!checked.length) {
       list.replaceChildren(h("li", { class: "rollcall-empty" }, h("span", { class: "rollcall-name" },
-        state.data.window.open ? "Nobody yet. The air is yours!" : "Nobody yet this week.")));
+        state.data.window.open ? "Nobody yet. The air is yours!" : `Nobody yet ${thisPeriod(state.data)}.`)));
       return;
     }
     list.replaceChildren(...checked.map((entry, index) => h("li", {
       class: fresh.has(keyOf(entry)) ? "fresh" : null,
       "--delay": `${index * 30}ms`,
-    }, badge(entry), h("span", { class: "rollcall-rank" }, `#${entry.week_rank}`), h("span", { class: "rollcall-name", title: entry.name }, entry.name))));
+    }, badge(entry), h("span", { class: "rollcall-rank" }, `#${entry.periodRank}`), h("span", { class: "rollcall-name", title: entry.name }, entry.name))));
   }
 
   function renderBoard(fresh = new Set()) {
@@ -254,11 +289,12 @@
     $("board").replaceChildren(...rows.map((entry) => {
       const shortKey = entry.id ? `${entry.id.slice(0, 8)}…` : "name only";
       const last = relative(entry.last_check_in);
-      const weekStatus = entry.checked_in_this_week
-        ? h("span", { class: "week-status", "data-in": true, title: "Checked in this week" }, svg(ICON_SIGNAL),
-          h("span", {}, h("span", { class: "sr-only" }, "Checked in this week: "), `#${entry.week_rank}`, h("small", {}, last)))
-        : h("span", { class: "week-status", title: "Not checked in this week" }, svg(ICON_QUIET),
-          h("span", {}, h("span", { class: "sr-only" }, "Not checked in this week. "), h("span", { "aria-hidden": "true" }, "—"),
+      const period = thisPeriod(data);
+      const weekStatus = entry.inThisPeriod
+        ? h("span", { class: "week-status", "data-in": true, title: `Checked in ${period}` }, svg(ICON_SIGNAL),
+          h("span", {}, h("span", { class: "sr-only" }, `Checked in ${period}: `), `#${entry.periodRank}`, h("small", {}, last)))
+        : h("span", { class: "week-status", title: `Not checked in ${period}` }, svg(ICON_QUIET),
+          h("span", {}, h("span", { class: "sr-only" }, `Not checked in ${period}. `), h("span", { "aria-hidden": "true" }, "—"),
             last ? h("small", {}, h("span", { class: "sr-only" }, "Last check-in "), last) : null));
       return h("li", { class: [entry.rank <= 3 && entry.streak > 0 ? "top" : "", fresh.has(keyOf(entry)) ? "fresh" : ""].join(" ").trim() || null },
         h("span", { class: "board-rank" }, h("span", { class: "sr-only" }, "Rank "), entry.rank),
@@ -270,7 +306,7 @@
         h("div", { class: "board-streak" },
           h("span", { class: "board-streak-value" },
             h("span", { class: "sr-only" }, "Streak: "),
-            entry.streak ? [h("span", { class: "flame", "aria-hidden": "true" }, "🔥"), plural(entry.streak, "week")] : h("span", { class: "zero" }, "No streak")),
+            entry.streak ? [h("span", { class: "flame", "aria-hidden": "true" }, "🔥"), plural(entry.streak, unit(data))] : h("span", { class: "zero" }, "No streak")),
           h("div", { class: "meter", "aria-hidden": "true" }, h("span", { "--fill": `${(entry.streak / maxStreak) * 100}%` }))),
         h("div", { class: "board-meta" },
           h("span", { class: "board-num", title: "Best streak" }, h("span", { class: "board-label" }, "Best "), entry.best_streak),
@@ -307,8 +343,9 @@
 
   // --- Data ---------------------------------------------------------------------------------------------
 
-  function apply(data) {
-    const current = new Set(data.leaderboard.filter((entry) => entry.checked_in_this_week).map(keyOf));
+  function apply(raw) {
+    const data = normalize(raw);
+    const current = new Set(data.leaderboard.filter((entry) => entry.inThisPeriod).map(keyOf));
     const fresh = state.seen ? new Set([...current].filter((key) => !state.seen.has(key))) : new Set();
     state.seen = current;
     state.data = data;
