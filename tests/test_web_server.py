@@ -107,6 +107,10 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         # Refused from the headers alone, before the body is read.
         status, _, _ = await http(server.port, "POST", "/api/things/a", raw_body=b"", headers={"Content-Type": "application/json", "Content-Length": "300000"})
         self.assertEqual(status, 413)
+        # A route can take more (a file upload).
+        server.route("POST", "/api/upload", handler, max_body=1024 * 1024)
+        status, _, _ = await http(server.port, "POST", "/api/upload", body={"k": "x" * 300_000})
+        self.assertEqual(status, 201)
 
     async def test_public_routes_and_removing_routes(self):
         server = await self._start(password="pw")

@@ -3,6 +3,7 @@
     GET    /api/plugins/check_in/leaderboard[?limit=N]          standings for other sites (see below)
     GET    /api/plugins/check_in/participants                   everyone with their weeks (control panel)
     POST   /api/plugins/check_in/participants                   {"name", "node_id"?} -> 201
+    DELETE /api/plugins/check_in/participants                   everyone and every check-in -> how many
     PATCH  /api/plugins/check_in/participants/{id}              {"name"?, "node_id"?}; a key another
                                                                 participant has merges the two
     DELETE /api/plugins/check_in/participants/{id}
@@ -14,6 +15,9 @@
     POST   /api/plugins/check_in/import                         {"records": [...], "as_of"?, "mode"?:
                                                                 "merge"|"replace", "dry_run"?}
     GET    /api/plugins/check_in/export?format=csv|json         everyone, in the import format
+    GET    /api/plugins/check_in/backup                         every participant and check-in, as a file
+    POST   /api/plugins/check_in/restore                        {"backup": <that file>, "mode"?: "merge"|
+                                                                "replace", "dry_run"?}
     GET    /api/plugins/check_in/nodes?q=                       known nodes, to link participants to
 
 The leaderboard is a public route: it takes ``Authorization: Bearer <api_token>``
@@ -23,6 +27,7 @@ web app's password and its checks on changes apply.
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import hmac
 import io
@@ -32,13 +37,23 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from meshgram.plugins.check_in_scoring import parse_week
 from meshgram.plugins.check_in_store import CheckInError, CheckInStoreError
-from meshgram.web.server import HttpError, Request, Response, WebServer, json_response, no_content
+from meshgram.web.server import (
+    MAX_BODY_BYTES,
+    HttpError,
+    Request,
+    Response,
+    WebServer,
+    json_response,
+    no_content,
+)
 
 if TYPE_CHECKING:
     from meshgram.plugins.check_in import CheckInPlugin
 
 PREFIX = "/api/plugins/check_in"
 EXPORT_FIELDS = ("node_id", "name", "streak", "total", "best_streak", "last_check_in")
+# A backup holds every check-in: years of a busy channel.
+MAX_BACKUP_BYTES = 16 * 1024 * 1024
 
 Handler = Callable[[Request], Awaitable[Response]]
 
@@ -55,11 +70,14 @@ def _wrap(handler: Handler) -> Handler:
     return wrapped
 
 
-def _body(request: Request) -> dict[str, Any]:
-    body = request.json()
+def _object(body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HttpError(400, "The request body must be a JSON object")
     return body
+
+
+def _body(request: Request) -> dict[str, Any]:
+    return _object(request.json())
 
 
 def _participant_id(request: Request) -> int:
@@ -92,6 +110,19 @@ def _node_id(value: Any) -> Any:
     return key
 
 
+def _mode(body: dict[str, Any]) -> bool:
+    """Whether to replace everything (``"mode": "replace"``) rather than add to it."""
+    mode = body.get("mode") or "merge"
+    if mode not in {"merge", "replace"}:
+        raise HttpError(400, "mode must be merge or replace")
+    return mode == "replace"
+
+
+def _attachment(body: bytes, content_type: str, name: str, extension: str) -> Response:
+    disposition = f'attachment; filename="{name}-{date.today().isoformat()}.{extension}"'
+    return Response(200, body, content_type, {"Content-Disposition": disposition})
+
+
 def _bearer_matches(request: Request, token: str) -> bool:
     scheme, _, credentials = request.headers.get("authorization", "").partition(" ")
     return scheme.lower() == "bearer" and hmac.compare_digest(credentials.strip().encode("utf-8"), token.encode("utf-8"))
@@ -101,9 +132,9 @@ def register_check_in_routes(web: WebServer, plugin: "CheckInPlugin") -> list[An
     """Add the routes; returns them for ``WebServer.remove_route`` when the plugin stops."""
     routes: list[Any] = []
 
-    def route(method: str, path: str, *, public: bool = False):
+    def route(method: str, path: str, *, public: bool = False, max_body: int = MAX_BODY_BYTES):
         def decorator(handler: Handler) -> Handler:
-            routes.append(web.route(method, f"{PREFIX}{path}", _wrap(handler), public=public))
+            routes.append(web.route(method, f"{PREFIX}{path}", _wrap(handler), public=public, max_body=max_body))
             return handler
 
         return decorator
@@ -137,6 +168,10 @@ def register_check_in_routes(web: WebServer, plugin: "CheckInPlugin") -> list[An
         body = _body(request)
         participant_id = await plugin.create_participant(_name(body.get("name")), _node_id(body.get("node_id")))
         return json_response({"id": participant_id}, 201)
+
+    @route("DELETE", "/participants")
+    async def clear(request: Request) -> Response:
+        return json_response(await plugin.clear())
 
     @route("PATCH", "/participants/{id}")
     async def update_participant(request: Request) -> Response:
@@ -187,11 +222,9 @@ def register_check_in_routes(web: WebServer, plugin: "CheckInPlugin") -> list[An
         records = body.get("records")
         if not isinstance(records, list):
             raise HttpError(400, "records must be a list")
-        mode = body.get("mode") or "merge"
-        if mode not in {"merge", "replace"}:
-            raise HttpError(400, "mode must be merge or replace")
+        replace = _mode(body)
         as_of = _week(body["as_of"], "as_of date") if body.get("as_of") else None
-        result = await plugin.import_summary(records, as_of=as_of, replace=mode == "replace", dry_run=bool(body.get("dry_run")))
+        result = await plugin.import_summary(records, as_of=as_of, replace=replace, dry_run=bool(body.get("dry_run")))
         return json_response(result)
 
     @route("GET", "/export")
@@ -206,8 +239,20 @@ def register_check_in_routes(web: WebServer, plugin: "CheckInPlugin") -> list[An
         else:
             body = json.dumps({"records": rows}, indent=2, ensure_ascii=False).encode("utf-8")
             content_type, extension = "application/json", "json"
-        disposition = f'attachment; filename="check-ins-{date.today().isoformat()}.{extension}"'
-        return Response(200, body, content_type, {"Content-Disposition": disposition})
+        return _attachment(body, content_type, "check-ins", extension)
+
+    @route("GET", "/backup")
+    async def backup(request: Request) -> Response:
+        body = json.dumps(await plugin.backup(), indent=2, ensure_ascii=False).encode("utf-8")
+        return _attachment(body, "application/json", "check-ins-backup", "json")
+
+    @route("POST", "/restore", max_body=MAX_BACKUP_BYTES)
+    async def restore(request: Request) -> Response:
+        # Parsed off the event loop: a backup can be megabytes.
+        body = _object(await asyncio.to_thread(request.json))
+        replace = _mode(body)
+        result = await plugin.restore(body.get("backup"), replace=replace, dry_run=bool(body.get("dry_run")))
+        return json_response(result)
 
     @route("GET", "/nodes")
     async def nodes(request: Request) -> Response:

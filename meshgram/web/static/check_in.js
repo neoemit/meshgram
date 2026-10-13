@@ -1,7 +1,8 @@
 "use strict";
 // Control panel: the check_in plugin's participants, shown in its plugin card while it runs.
-// Edit a participant (name, node key, weeks, streak), add one, import summaries from another
-// check-in database (CSV or JSON) and export them. Talks to meshgram/plugins/check_in_api.py.
+// Edit a participant (name, node key, weeks, streak), add one, back everything up to a file and
+// import it again, import summaries from another check-in database (CSV or JSON), export them,
+// and clear everything. Talks to meshgram/plugins/check_in_api.py.
 // Loaded after control.js; uses the page's helpers (el, icon, esc, fmtAgo, plural, shortId)
 // and the kit control.js hands to plugin panels (api, toast, act, button, field, …).
 
@@ -12,6 +13,8 @@
   const GRID_WEEKS = 26;
   const MAX_ROWS = 300;
   const SOURCE_LABELS = { radio: "Radio", observer: "Observer", manual: "Added here", import: "Imported" };
+  // What a backup file (GET backup) says it is.
+  const BACKUP_FORMAT = "meshgram-check-ins";
 
   // Weeks are "YYYY-MM-DD" Mondays in the plugin's time zone; plain date arithmetic keeps them so.
   const addDays = (iso, days) => {
@@ -59,17 +62,32 @@
     return rows.slice(1).map((values) => Object.fromEntries(header.map((name, index) => [name, (values[index] || "").trim()])));
   }
 
+  // A backup (``{kind: "backup", backup}``) or summary records (``{kind: "summary", records}``).
   function parseImport(text, fileName = "") {
     const trimmed = text.trim();
     if (!trimmed) throw new Error("There's nothing to import");
     if (/\.json$/i.test(fileName) || trimmed.startsWith("[") || trimmed.startsWith("{")) {
       let data;
       try { data = JSON.parse(trimmed); } catch (err) { throw new Error(`That isn't valid JSON: ${err.message}`); }
+      if (data && data.format === BACKUP_FORMAT) {
+        if (!Array.isArray(data.participants)) throw new Error("The backup has no list of participants");
+        return { kind: "backup", backup: data };
+      }
       const records = Array.isArray(data) ? data : data && Array.isArray(data.records) ? data.records : null;
-      if (!records) throw new Error('JSON must be a list of records, or {"records": [...]}');
-      return records;
+      if (!records) throw new Error('JSON must be a backup, a list of records, or {"records": [...]}');
+      return { kind: "summary", records };
     }
-    return parseCsv(trimmed);
+    return { kind: "summary", records: parseCsv(trimmed) };
+  }
+
+  function describeFile(parsed) {
+    if (parsed.kind === "summary") {
+      return `${plural(parsed.records.length, "summary record", "summary records")}: each node gets its streak (and total) of weekly check-ins.`;
+    }
+    const { participants, exported_at: exportedAt, title } = parsed.backup;
+    const checkIns = participants.reduce((sum, p) => sum + (Array.isArray(p && p.check_ins) ? p.check_ins.length : 0), 0);
+    const made = Date.parse(exportedAt) ? `, made ${fmtStamp(Date.parse(exportedAt) / 1000)}` : "";
+    return `Backup${title ? ` of ${title}` : ""}${made}: ${plural(participants.length, "participant", "participants")} and ${plural(checkIns, "check-in", "check-ins")}.`;
   }
 
   // --- The panel -----------------------------------------------------------------------------------
@@ -82,21 +100,21 @@
     const summary = el("div", { class: "ci-summary", role: "status" });
     const search = el("input", { type: "search", placeholder: "Search name or key…", "aria-label": "Search participants", autocomplete: "off" });
     search.addEventListener("input", () => { state.query = search.value; drawTable(); });
-    const addButton = button("Add", { iconName: "plus", onClick: () => openAddDialog() });
-    const importButton = button("Import…", { iconName: "file", onClick: () => openImportDialog() });
-    addButton.dataset.change = "";
-    importButton.dataset.change = "";
-    const exportCsv = el("a", { class: "btn btn-sm", href: `${BASE}/export?format=csv`, download: "", html: `${icon("download")}<span>CSV</span>`, title: "Export everyone as CSV (the import format)" });
-    const exportJson = el("a", { class: "btn btn-sm", href: `${BASE}/export?format=json`, download: "", html: `${icon("download")}<span>JSON</span>`, title: "Export everyone as JSON (the import format)" });
+    const addButton = button("Add", { iconName: "plus", onClick: () => openAddDialog(), title: "Add a participant" });
+    const importButton = button("Import…", { iconName: "upload", onClick: () => openImportDialog(), title: "Import a backup, or summaries from another check-in database" });
+    const exportButton = button("Export…", { iconName: "download", onClick: () => openExportDialog(), title: "Save everything to a file" });
+    const clearButton = button("Clear all…", { iconName: "trash", kind: "btn-danger", onClick: () => openClearDialog(), title: "Delete every participant and check-in" });
+    const changes = [addButton, importButton, clearButton];
+    changes.forEach((node) => { node.dataset.change = ""; });
     const tableBox = el("div", { class: "ci-table" });
     container.append(
       summary,
       el("div", { class: "ci-tools" },
         el("div", { class: "search" }, el("span", { html: icon("search") }), search),
         el("span", { class: "spacer" }),
-        addButton, importButton, exportCsv, exportJson),
+        addButton, importButton, exportButton, clearButton),
       tableBox);
-    if (!canChange()) [addButton, importButton].forEach((node) => { node.disabled = true; });
+    if (!canChange()) changes.forEach((node) => { node.disabled = true; });
 
     async function refresh() {
       if (state.loading) { state.again = true; return; }
@@ -146,7 +164,7 @@
       if (!matches.length) {
         tableBox.replaceChildren(el("p", { class: "hint" }, all.length
           ? "Nobody matches."
-          : `Nobody has checked in yet. Check-ins appear here as they're heard; import earlier ones with Import….`));
+          : "Nobody has checked in yet. Check-ins appear here as they're heard; Import… brings in a backup or earlier ones."));
         return;
       }
       const rows = matches.slice(0, MAX_ROWS).map((p) => {
@@ -174,7 +192,7 @@
               el("th", { scope: "col" }, "Last check-in"),
               el("th", { scope: "col", class: "actions" }, el("span", { class: "sr-only" }, "Actions")))),
             el("tbody", {}, ...rows))),
-        matches.length > MAX_ROWS ? el("p", { class: "hint", style: "margin-top:10px" }, `Showing ${MAX_ROWS} of ${matches.length}; search to narrow it down.`) : null);
+        ...(matches.length > MAX_ROWS ? [el("p", { class: "hint", style: "margin-top:10px" }, `Showing ${MAX_ROWS} of ${matches.length}; search to narrow it down.`)] : []));
     }
 
     // --- Dialogs ---------------------------------------------------------------------------------
@@ -384,71 +402,142 @@
       entry.refresh();
     }
 
+    // A download link styled as a button; ``closes``: the dialog it's in closes once the download starts.
+    function downloadLink(href, label, { primary = false, small = true, closes = false } = {}) {
+      const link = el("a", { class: `btn ${small ? "btn-sm" : ""} ${primary ? "btn-primary" : ""}`.replace(/\s+/g, " ").trim(), href, download: "", html: `${icon("download")}<span>${esc(label)}</span>` });
+      if (closes) link.addEventListener("click", () => setTimeout(() => link.closest("dialog").close()));
+      return link;
+    }
+
+    const choice = (title, text, action) => el("section", { class: "ci-choice" },
+      el("div", {}, el("h3", {}, title), el("p", { class: "hint" }, text)), action);
+
+    function openExportDialog() {
+      const { body } = openDialog("Export check-ins");
+      body.append(
+        choice("Backup", "Every participant and every check-in, in a file that Import… brings back here or into another Meshgram.",
+          downloadLink(`${BASE}/backup`, "Download backup", { primary: true, closes: true })),
+        choice("Summary", "One row per node: streak, best streak, total and last check-in. For a spreadsheet, or another check-in database.",
+          downloadLink(`${BASE}/export?format=csv`, "Download CSV", { closes: true })));
+    }
+
+    function openClearDialog() {
+      const { body, dialog } = openDialog("Clear all check-ins?");
+      const count = state.data ? state.data.participants.length : 0;
+      const clear = el("button", { class: "btn btn-danger", type: "button", "data-change": "" }, "Delete everything");
+      const cancel = el("button", { class: "btn", type: "button" }, "Cancel");
+      cancel.addEventListener("click", () => dialog.close());
+      clear.addEventListener("click", () => act(clear, async () => {
+        const cleared = await api("DELETE", `${BASE}/participants`);
+        dialog.close();
+        await refresh();
+        return cleared;
+      }, (cleared) => `Deleted ${plural(cleared.participants, "participant", "participants")} and ${plural(cleared.check_ins, "check-in", "check-ins")}`));
+      body.append(
+        el("p", {}, `${count ? `All ${plural(count, "participant", "participants")} and their check-ins are deleted` : "Every participant and check-in is deleted"}, so the leaderboard starts from zero. Node names learned from adverts are kept.`),
+        notice("bad", "This can't be undone. Download a backup first if you may want them back."),
+        el("div", { class: "dialog-actions ci-clear-actions" },
+          downloadLink(`${BASE}/backup`, "Download backup", { small: false }), el("span", { class: "spacer" }), cancel, clear));
+      kit.disableIfReadOnly(body);
+      cancel.focus();
+    }
+
     function openImportDialog() {
       const { body, dialog } = openDialog("Import check-ins", { wide: true });
-      const file = el("input", { type: "file", accept: ".csv,.json,text/csv,application/json" });
-      const paste = el("textarea", { rows: 6, spellcheck: "false", placeholder: "node_id,name,streak,total,last_check_in\nA1B2…,LMB-T,15,22,2026-10-05" });
+      const file = el("input", { type: "file", accept: ".json,.csv,application/json,text/csv" });
+      const paste = el("textarea", { rows: 5, spellcheck: "false", placeholder: "node_id,name,streak,total,last_check_in\nA1B2…,LMB-T,15,22,2026-10-05" });
+      const detected = el("div", { class: "ci-detected", role: "status" });
       const asOf = el("input", { type: "date" });
+      const asOfField = field("Streaks without a date run up to", asOf, { hint: "Empty: the latest check-in week." });
       const mode = kit.selectInput([["merge", "Add to what's here"], ["replace", "Replace everything here"]], "merge");
       const result = el("div", { class: "ci-import-result", role: "status" });
       const preview = el("button", { class: "btn", type: "button", "data-change": "" }, "Preview");
       const submit = el("button", { class: "btn btn-primary", type: "submit", "data-change": "", disabled: true }, "Import");
-      let records = null;
+      let parsed = null;
       let previewed = false;
+      let timer = null;
 
       const invalidate = () => { previewed = false; submit.disabled = true; result.replaceChildren(); };
-      [paste, asOf, mode].forEach((node) => node.addEventListener("input", () => { records = null; invalidate(); }));
-      mode.addEventListener("change", invalidate);
-      file.addEventListener("change", async () => {
-        records = null;
+      // What the file or pasted text is: a backup, summaries, or something wrong.
+      function read(text, name = "") {
+        parsed = null;
         invalidate();
+        detected.replaceChildren();
+        if (text.trim()) {
+          try {
+            parsed = parseImport(text, name);
+            detected.append(notice("info", describeFile(parsed)));
+          } catch (err) {
+            detected.append(notice("bad", err.message));
+          }
+        }
+        asOfField.hidden = Boolean(parsed && parsed.kind === "backup");
+      }
+      file.addEventListener("change", async () => {
         const chosen = file.files && file.files[0];
-        if (!chosen) return;
+        paste.value = "";
+        if (!chosen) { read(""); return; }
         try {
-          paste.value = await chosen.text();
-          records = parseImport(paste.value, chosen.name);
-          result.replaceChildren(el("p", { class: "hint" }, `${plural(records.length, "record", "records")} read from ${chosen.name}. Preview to check them.`));
+          read(await chosen.text(), chosen.name);
         } catch (err) {
-          result.replaceChildren(notice("bad", err.message));
+          read("");
+          detected.append(notice("bad", `Couldn't read ${chosen.name}: ${err.message}`));
         }
       });
+      paste.addEventListener("input", () => {
+        file.value = "";
+        clearTimeout(timer);
+        timer = setTimeout(() => read(paste.value), 300);
+      });
+      asOf.addEventListener("input", invalidate);
+      mode.addEventListener("change", invalidate);
 
       const request = (dryRun) => {
-        if (!records) records = parseImport(paste.value);
-        return api("POST", `${BASE}/import`, { records, as_of: asOf.value || null, mode: mode.value, dry_run: dryRun });
+        if (!parsed) throw new Error("Choose a file, or paste what to import");
+        return parsed.kind === "backup"
+          ? api("POST", `${BASE}/restore`, { backup: parsed.backup, mode: mode.value, dry_run: dryRun })
+          : api("POST", `${BASE}/import`, { records: parsed.records, as_of: asOf.value || null, mode: mode.value, dry_run: dryRun });
       };
 
-      const describe = (outcome, dryRun) => {
-        const counts = [
+      const counts = (outcome) => (parsed.kind === "backup"
+        ? [
+          outcome.created && plural(outcome.created, "new participant", "new participants"),
+          outcome.updated && `${plural(outcome.updated, "participant", "participants")} already here`,
+          plural(outcome.check_ins, "check-in", "check-ins") + (outcome.duplicates ? ` (${outcome.duplicates} already on record)` : ""),
+        ]
+        : [
           outcome.created && plural(outcome.created, "new participant", "new participants"),
           outcome.updated && plural(outcome.updated, "update", "updates"),
           outcome.linked && plural(outcome.linked, "link to a node", "links to nodes"),
-        ].filter(Boolean).join(", ") || "no changes";
+        ]).filter(Boolean).join(", ") || "no changes";
+
+      const describe = (outcome) => {
         const errors = outcome.errors || [];
-        return el("div", {},
-          errors.length
-            ? notice("bad", `${plural(errors.length, "record has", "records have")} problems; nothing is imported until they're fixed.`,
-              [el("ul", { class: "change-list" }, ...errors.slice(0, 50).map((error) => el("li", {}, `Record ${error.row}: ${error.message}`)))])
-            : notice("info", `${dryRun ? "Importing gives" : "Imported:"} ${counts}. Streaks without a last check-in date count up to the week of ${fmtWeek(outcome.as_of)}.`));
+        const what = parsed.kind === "backup" ? "Participant" : "Record";
+        if (errors.length) {
+          return notice("bad", `${plural(errors.length, `${what.toLowerCase()} has`, `${what.toLowerCase()}s have`)} problems; nothing is imported until they're fixed.`,
+            [el("ul", { class: "change-list" }, ...errors.slice(0, 50).map((error) => el("li", {}, `${what} ${error.row}: ${error.message}`)))]);
+        }
+        const asOfNote = parsed.kind === "summary" ? ` Streaks without a last check-in date count up to the week of ${fmtWeek(outcome.as_of)}.` : "";
+        return notice("info", `Importing gives: ${counts(outcome)}.${asOfNote}`);
       };
 
       preview.addEventListener("click", () => act(preview, async () => {
         const outcome = await request(true);
-        result.replaceChildren(describe(outcome, true));
+        result.replaceChildren(describe(outcome));
         previewed = !(outcome.errors || []).length;
         submit.disabled = !previewed;
       }));
 
       const form = el("form", { class: "ci-form" },
-        el("p", { class: "hint" },
-          "One record per node, from another check-in database: its key (or a key prefix) and/or name, its current streak, and optionally its total check-ins and the date of its last check-in. ",
-          "CSV columns: ", el("code", {}, "node_id, name, streak, total, last_check_in"), " (an export from here has them). ",
-          "Each record gives the node that many consecutive weekly check-ins up to its last check-in."),
-        field("File", file, { hint: "CSV with a header row, or JSON (a list of records)." }),
+        el("ul", { class: "ci-formats hint" },
+          el("li", {}, el("strong", {}, "Backup"), " (from Export…): every participant and check-in, as they were."),
+          el("li", {}, el("strong", {}, "Summaries"), " from another check-in database, CSV or JSON: one record per node with its key (or a key prefix) and/or name, its streak, and optionally its total check-ins and the date of its last one. Columns: ",
+            el("code", {}, "node_id, name, streak, total, last_check_in"), ".")),
+        field("File", file, { hint: "A backup (.json), or summaries (.csv or .json)." }),
         field("…or paste it", paste),
-        el("div", { class: "form-grid" },
-          field("Streaks without a date run up to", asOf, { hint: "Empty: the latest check-in week." }),
-          field("Mode", mode)),
+        detected,
+        el("div", { class: "form-grid" }, field("Mode", mode), asOfField),
         result,
         el("div", { class: "dialog-actions" }, preview, submit));
       form.addEventListener("submit", async (event) => {
@@ -458,16 +547,19 @@
           const ok = await confirmDialog({ title: "Replace everything?", text: "Every participant and check-in here is deleted first. This can't be undone.", ok: "Replace", danger: true });
           if (!ok) return;
         }
+        const kind = parsed.kind;
         await act(submit, async () => {
           const outcome = await request(false);
           if (!outcome.saved) {
-            result.replaceChildren(describe(outcome, true));
+            result.replaceChildren(describe(outcome));
             throw new Error("Nothing was imported");
           }
           dialog.close();
           await refresh();
           return outcome;
-        }, (outcome) => `Imported ${plural(outcome.created + outcome.updated + outcome.linked, "record", "records")}`);
+        }, (outcome) => (kind === "backup"
+          ? `Imported ${plural(outcome.created + outcome.updated, "participant", "participants")} and ${plural(outcome.check_ins, "check-in", "check-ins")}`
+          : `Imported ${plural(outcome.created + outcome.updated + outcome.linked, "record", "records")}`));
       });
       body.append(form);
       kit.disableIfReadOnly(form);

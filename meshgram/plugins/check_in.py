@@ -54,6 +54,9 @@ from meshgram.plugins.check_in_scoring import (
 from meshgram.plugins.check_in_store import (
     SOURCE_OBSERVER,
     SOURCE_RADIO,
+    SOURCES,
+    BackupCheckIn,
+    BackupParticipant,
     CheckInError,
     CheckInRecord,
     CheckInStore,
@@ -71,7 +74,7 @@ DEFAULT_TEMPLATE = (
     "📟 {title}\n"
     "🏅 {name} is #{rank} to check in this week!\n"
     "🔥 Streak: {streak_weeks}\n"
-    "👥 {participants_label} so far."
+    "👥 {participants_label} so far"
 )
 DEFAULT_DB_FILE = "check_in.sqlite3"
 DEFAULT_TIMEZONE = "UTC"
@@ -82,8 +85,13 @@ FALLBACK_CHUNK_DELAY_MS = 2500
 NODE_FLUSH_SECONDS = 5.0
 CONTACT_REFRESH_SECONDS = 60.0
 MAX_IMPORT_RECORDS = 5000
+MAX_BACKUP_CHECK_INS = 200_000
 MAX_STREAK = 1000
 MAX_NAME_LENGTH = 64
+MAX_TEXT_LENGTH = 500
+# A backup file says what it is, and which version of the format it's in.
+BACKUP_FORMAT = "meshgram-check-ins"
+BACKUP_VERSION = 1
 CHANGE_EVENT = {"type": "control", "what": "check_in"}
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 KEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -494,7 +502,7 @@ class CheckInPlugin(BasePlugin):
             return []
         record = CheckInRecord(
             sender_name=sender,
-            text=body[:500],
+            text=body[:MAX_TEXT_LENGTH],
             received_at=now,
             week=week_start(moment.date()),
             source=source,
@@ -818,6 +826,45 @@ class CheckInPlugin(BasePlugin):
             self._announce()
         return result
 
+    async def clear(self) -> dict[str, int]:
+        """Delete every participant and check-in; how many there were."""
+        counts = await asyncio.to_thread(self._require_store().clear)
+        LOGGER.info("Check-ins: cleared %d participants and %d check-ins", counts["participants"], counts["check_ins"])
+        self._last_reply.clear()
+        self._announce()
+        return counts
+
+    async def backup(self) -> dict[str, Any]:
+        """Every participant and check-in, as a file ``restore`` takes back (here or in another Meshgram)."""
+        participants = await asyncio.to_thread(self._require_store().export_backup)
+        return {
+            "format": BACKUP_FORMAT,
+            "version": BACKUP_VERSION,
+            "exported_at": iso_time(self.clock()),
+            "title": self.config.title,
+            "timezone": self.config.timezone,
+            "participants": participants,
+        }
+
+    async def restore(self, backup: Any, *, replace: bool, dry_run: bool) -> dict[str, Any]:
+        """A backup's participants and check-ins; see ``CheckInStore.restore_backup``."""
+        participants, errors = parse_backup(backup)
+        store = self._require_store()
+        result = await asyncio.to_thread(
+            lambda: store.restore_backup(participants, replace=replace, dry_run=dry_run or bool(errors), now=self.clock())
+        )
+        result["errors"] = errors
+        if result["saved"]:
+            LOGGER.info(
+                "Check-ins: restored a backup (%d new participants, %d updated, %d check-ins)",
+                result["created"],
+                result["updated"],
+                result["check_ins"],
+            )
+            self._last_reply.clear()
+            self._announce()
+        return result
+
     async def export_rows(self) -> list[dict[str, Any]]:
         """Everyone as import records (plus the best streak), so data moves between databases."""
         moment, table = await self._standings()
@@ -888,6 +935,102 @@ def summary_record(row: int, raw: Any, default_week: date) -> SummaryRecord:
         except ValueError:
             raise ValueError(f"last check-in {last!r} isn't a date (YYYY-MM-DD)") from None
     return SummaryRecord(row=row, node_id=node_id, name=name or None, streak=streak, total=total, last_week=last_week)
+
+
+def parse_backup(data: Any) -> tuple[list[BackupParticipant], list[dict[str, Any]]]:
+    """A backup file's participants, and what's wrong with any of them (``{"row", "message"}``).
+
+    Raises ``CheckInError`` for a file that isn't a backup at all.
+    """
+    if not isinstance(data, dict) or data.get("format") != BACKUP_FORMAT:
+        raise CheckInError("That isn't a check-in backup (made with Export… → Download backup)")
+    version = data.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise CheckInError("The backup doesn't say which version of the format it's in")
+    if version > BACKUP_VERSION:
+        raise CheckInError("The backup was made by a newer Meshgram: update this one to restore it")
+    items = data.get("participants")
+    if not isinstance(items, list):
+        raise CheckInError("The backup has no list of participants")
+    if len(items) > MAX_IMPORT_RECORDS:
+        raise CheckInError(f"Restore at most {MAX_IMPORT_RECORDS} participants at a time")
+    check_ins = sum(len(item["check_ins"]) for item in items if isinstance(item, dict) and isinstance(item.get("check_ins"), list))
+    if check_ins > MAX_BACKUP_CHECK_INS:
+        raise CheckInError(f"Restore at most {MAX_BACKUP_CHECK_INS} check-ins at a time")
+    participants: list[BackupParticipant] = []
+    errors: list[dict[str, Any]] = []
+    for row, item in enumerate(items, start=1):
+        try:
+            participants.append(backup_participant(row, item))
+        except ValueError as exc:
+            errors.append({"row": row, "message": str(exc)})
+    return participants, errors
+
+
+def backup_participant(row: int, raw: Any) -> BackupParticipant:
+    """One participant of a backup -> ``BackupParticipant``; ``ValueError`` says what's wrong."""
+    if not isinstance(raw, dict):
+        raise ValueError("must be an object")
+    node_id = raw.get("node_id")
+    if node_id is not None and node_id != "":
+        node_id = _clean_key(node_id) if isinstance(node_id, str) else None
+        if node_id is None:
+            raise ValueError("node_id must be a public key (64 hex characters) or null")
+    else:
+        node_id = None
+    name = raw.get("name")
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= MAX_NAME_LENGTH:
+        raise ValueError(f"name must be 1 to {MAX_NAME_LENGTH} characters")
+    extra = raw.get("extra_check_ins") or 0
+    if isinstance(extra, bool) or not isinstance(extra, int) or not 0 <= extra <= 100_000:
+        raise ValueError("extra_check_ins must be a whole number from 0 to 100000")
+    items = raw.get("check_ins") or []
+    if not isinstance(items, list):
+        raise ValueError("check_ins must be a list")
+    check_ins = []
+    for index, item in enumerate(items, start=1):
+        try:
+            check_ins.append(_backup_check_in(item))
+        except ValueError as exc:
+            raise ValueError(f"check-in {index}: {exc}") from None
+    return BackupParticipant(row, node_id, name.strip(), extra, tuple(check_ins))
+
+
+def _backup_check_in(raw: Any) -> BackupCheckIn:
+    if not isinstance(raw, dict):
+        raise ValueError("must be an object")
+    try:
+        week = parse_week(str(raw.get("week") or ""))
+    except ValueError:
+        raise ValueError("week must be a date (YYYY-MM-DD)") from None
+    received_at = raw.get("received_at")
+    if isinstance(received_at, bool) or not isinstance(received_at, (int, float)) or not 0 < received_at < 1e11:
+        raise ValueError("received_at must be a Unix time in seconds")
+    source = raw.get("source")
+    if source not in SOURCES:
+        raise ValueError(f"source must be one of {', '.join(SOURCES)}")
+    observer_id = raw.get("observer_id")
+    if observer_id is not None:
+        observer_id = _clean_key(observer_id) if isinstance(observer_id, str) else None
+        if observer_id is None:
+            raise ValueError("observer_id must be a public key or null")
+    return BackupCheckIn(
+        week=week,
+        received_at=float(received_at),
+        source=source,
+        sender_name=_optional_text(raw.get("sender_name"), "sender_name", MAX_NAME_LENGTH),
+        text=_optional_text(raw.get("text"), "text", MAX_TEXT_LENGTH),
+        observer_id=observer_id,
+        message_key=_optional_text(raw.get("message_key"), "message_key", 128),
+    )
+
+
+def _optional_text(value: Any, label: str, maximum: int) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ValueError(f"{label} must be text of at most {maximum} characters, or null")
+    return value
 
 
 def _whole_number(value: Any, label: str, maximum: int) -> Optional[int]:

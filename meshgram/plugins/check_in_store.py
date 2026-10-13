@@ -38,6 +38,7 @@ SOURCE_RADIO = "radio"
 SOURCE_OBSERVER = "observer"
 SOURCE_MANUAL = "manual"
 SOURCE_IMPORT = "import"
+SOURCES = (SOURCE_RADIO, SOURCE_OBSERVER, SOURCE_MANUAL, SOURCE_IMPORT)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS participants (
@@ -119,6 +120,30 @@ class SummaryRecord:
     total: Optional[int] = None
     last_week: Optional[date] = None
 
+
+@dataclass(frozen=True, slots=True)
+class BackupCheckIn:
+    week: date
+    received_at: float
+    source: str
+    sender_name: Optional[str] = None
+    text: Optional[str] = None
+    observer_id: Optional[str] = None
+    message_key: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class BackupParticipant:
+    """One participant of a backup (``export_backup``), with every check-in it had."""
+
+    row: int
+    node_id: Optional[str]
+    name: str
+    extra_check_ins: int = 0
+    check_ins: tuple[BackupCheckIn, ...] = ()
+
+
+_CHECK_IN_FIELDS = ("week", "received_at", "sender_name", "text", "source", "observer_id", "message_key")
 
 _UNSET: Any = object()
 
@@ -393,8 +418,7 @@ class CheckInStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 if replace:
-                    conn.execute("DELETE FROM check_ins")
-                    conn.execute("DELETE FROM participants")
+                    self._clear(conn)
                 for record in records:
                     try:
                         participant_id, outcome = self._import_target(conn, record, now)
@@ -423,7 +447,128 @@ class CheckInStore:
                 result["saved"] = True
         return result
 
+    def clear(self) -> dict[str, int]:
+        """Delete every participant and check-in (the node directory stays); how many there were."""
+        with self._transaction() as conn:
+            counts = {
+                "participants": conn.execute("SELECT COUNT(*) FROM participants").fetchone()[0],
+                "check_ins": conn.execute("SELECT COUNT(*) FROM check_ins").fetchone()[0],
+            }
+            self._clear(conn)
+        return counts
+
+    # --- Backups -------------------------------------------------------------------------
+
+    def export_backup(self) -> list[dict[str, Any]]:
+        """Every participant with every check-in, oldest first: what ``restore_backup`` takes back."""
+        with self._lock:
+            conn = self._connection()
+            participants = {
+                participant_id: {"node_id": node_id, "name": name, "extra_check_ins": extra, "check_ins": []}
+                for participant_id, node_id, name, extra in conn.execute(
+                    "SELECT id, node_id, name, extra_check_ins FROM participants ORDER BY id"
+                )
+            }
+            rows = conn.execute(
+                f"SELECT participant_id, {', '.join(_CHECK_IN_FIELDS)} FROM check_ins ORDER BY received_at, id"
+            )
+            for participant_id, *values in rows:
+                participants[participant_id]["check_ins"].append(dict(zip(_CHECK_IN_FIELDS, values)))
+            return list(participants.values())
+
+    def restore_backup(
+        self, participants: list[BackupParticipant], *, replace: bool, dry_run: bool, now: float
+    ) -> dict[str, Any]:
+        """Bring back a backup's participants and check-ins, all or nothing.
+
+        ``replace`` first removes every participant, so the database ends up as the
+        backup was. Otherwise each participant is added to the one here with the same
+        key (a name-only one: the same name), and check-ins already here (the same
+        message, or the same moment) are skipped, so restoring twice changes nothing.
+        """
+        result: dict[str, Any] = {"created": 0, "updated": 0, "check_ins": 0, "duplicates": 0, "saved": False}
+        with self._lock:
+            conn = self._connection()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if replace:
+                    self._clear(conn)
+                for participant in participants:
+                    participant_id, outcome = self._restore_target(conn, participant, merge=not replace, now=now)
+                    result[outcome] += 1
+                    for check_in in participant.check_ins:
+                        if self._restore_check_in(conn, participant_id, check_in):
+                            result["check_ins"] += 1
+                        else:
+                            result["duplicates"] += 1
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            if dry_run:
+                conn.execute("ROLLBACK")
+            else:
+                conn.execute("COMMIT")
+                result["saved"] = True
+        return result
+
+    def _restore_target(
+        self, conn: sqlite3.Connection, participant: BackupParticipant, *, merge: bool, now: float
+    ) -> tuple[int, str]:
+        if participant.node_id is not None:
+            existing = self._participant_with_key(conn, participant.node_id)
+        elif merge:
+            row = conn.execute(
+                "SELECT id FROM participants WHERE node_id IS NULL AND name = ? ORDER BY id LIMIT 1", (participant.name,)
+            ).fetchone()
+            existing = row[0] if row else None
+        else:
+            existing = None  # Name-only participants stay apart, as they were.
+        if existing is not None:
+            conn.execute(
+                "UPDATE participants SET extra_check_ins = MAX(extra_check_ins, ?), updated_at = ? WHERE id = ?",
+                (participant.extra_check_ins, now, existing),
+            )
+            return existing, "updated"
+        # A node goes by its latest advertised name.
+        name = (self._directory_name(conn, participant.node_id) if participant.node_id else None) or participant.name
+        return self._insert_participant(conn, participant.node_id, name, now, participant.extra_check_ins), "created"
+
+    @staticmethod
+    def _restore_check_in(conn: sqlite3.Connection, participant_id: int, check_in: BackupCheckIn) -> bool:
+        """Add one check-in unless it's here already; whether it was added."""
+        week = check_in.week.isoformat()
+        if check_in.message_key is not None and conn.execute(
+            "SELECT 1 FROM check_ins WHERE message_key = ?", (check_in.message_key,)
+        ).fetchone():
+            return False
+        if conn.execute(
+            "SELECT 1 FROM check_ins WHERE participant_id = ? AND week = ? AND received_at = ? AND source = ?",
+            (participant_id, week, check_in.received_at, check_in.source),
+        ).fetchone():
+            return False
+        conn.execute(
+            "INSERT INTO check_ins (participant_id, week, received_at, sender_name, text, source, observer_id, message_key)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                participant_id,
+                week,
+                check_in.received_at,
+                check_in.sender_name,
+                check_in.text,
+                check_in.source,
+                check_in.observer_id,
+                check_in.message_key,
+            ),
+        )
+        return True
+
     # --- Internals ----------------------------------------------------------------------
+
+    @staticmethod
+    def _clear(conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM check_ins")
+        conn.execute("DELETE FROM participants")
+
 
     def _resolve(self, conn: sqlite3.Connection, name: str, now: float) -> tuple[int, bool]:
         """The participant a sender's name stands for, created if need be; (id, created)."""
@@ -533,9 +678,12 @@ class CheckInStore:
         )
 
     @staticmethod
-    def _insert_participant(conn: sqlite3.Connection, node_id: Optional[str], name: str, now: float) -> int:
+    def _insert_participant(
+        conn: sqlite3.Connection, node_id: Optional[str], name: str, now: float, extra_check_ins: int = 0
+    ) -> int:
         cursor = conn.execute(
-            "INSERT INTO participants (node_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)", (node_id, name, now, now)
+            "INSERT INTO participants (node_id, name, extra_check_ins, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (node_id, name, extra_check_ins, now, now),
         )
         return int(cursor.lastrowid)
 

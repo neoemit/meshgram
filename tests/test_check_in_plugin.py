@@ -147,11 +147,11 @@ class CheckInTests(CheckInTestCase):
         self.assertEqual(actions[0].channel_index, 0)
         self.assertEqual(
             actions[0].text,
-            "📟 MeshCore Monday\n🏅 LMB-T is #1 to check in this week!\n🔥 Streak: 1 week\n👥 1 participant so far.",
+            "📟 MeshCore Monday\n🏅 LMB-T is #1 to check in this week!\n🔥 Streak: 1 week\n👥 1 participant so far",
         )
         actions = await self.check_in("Zed", 1001, "#MESHCOREMONDAY")
         self.assertIn("🏅 Zed is #2 to check in this week!", actions[0].text)
-        self.assertIn("👥 2 participants so far.", actions[0].text)
+        self.assertIn("👥 2 participants so far", actions[0].text)
         # Asking again later: the same rank, the current count.
         self.now += 60
         actions = await self.check_in("LMB-T", 1002)
@@ -389,6 +389,50 @@ class ManagementApiTests(CheckInTestCase):
 
         self.assertEqual((await self.call("POST", "/import", {"records": "x"}))[0], 400)
         self.assertEqual((await self.call("POST", "/import", {"records": [], "mode": "wipe"}))[0], 400)
+
+    async def test_backup_clear_and_restore(self):
+        await self.check_in("LMB-T", 1000)
+        await self.check_in("Zed", 1001)
+        status, created = await self.call("POST", "/participants", {"name": "Manual"})
+        await self.call("PUT", f"/participants/{created['id']}/streak", {"streak": 3, "week": "2026-10-12"})
+        before = (await self.plugin.leaderboard())["leaderboard"]
+
+        status, backup = await self.call("GET", "/backup")
+        self.assertEqual((status, backup["format"], backup["version"]), (200, "meshgram-check-ins", 1))
+        self.assertEqual(sum(len(p["check_ins"]) for p in backup["participants"]), 5)
+
+        events = self.web.events.subscribe()
+        status, cleared = await self.call("DELETE", "/participants")
+        self.assertEqual((status, cleared), (200, {"participants": 3, "check_ins": 5}))
+        self.assertEqual(events.get_nowait(), {"type": "control", "what": "check_in"})
+        self.assertEqual((await self.plugin.leaderboard())["leaderboard"], [])
+
+        status, preview = await self.call("POST", "/restore", {"backup": backup, "dry_run": True})
+        self.assertEqual((status, preview["created"], preview["check_ins"], preview["saved"]), (200, 3, 5, False))
+        status, result = await self.call("POST", "/restore", {"backup": backup, "mode": "replace"})
+        self.assertEqual((result["saved"], result["errors"]), (True, []))
+        self.assertEqual((await self.plugin.leaderboard())["leaderboard"], before)
+        # The same check-in heard again isn't counted twice.
+        self.now += 60
+        await self.check_in("LMB-T", 1000)
+        self.assertEqual((await self.plugin.leaderboard())["leaderboard"], before)
+
+        broken = {**backup, "participants": [*backup["participants"], {"name": "", "check_ins": []}]}
+        status, result = await self.call("POST", "/restore", {"backup": broken})
+        self.assertEqual((result["saved"], result["errors"]), (False, [{"row": 4, "message": "name must be 1 to 64 characters"}]))
+        status, result = await self.call("POST", "/restore", {"backup": {"records": []}})
+        self.assertEqual(status, 400)
+        self.assertEqual((await self.call("POST", "/restore", {"backup": {**backup, "version": 2}}))[0], 400)
+        self.assertEqual((await self.call("POST", "/restore", {"backup": backup, "mode": "wipe"}))[0], 400)
+
+    async def test_restore_takes_a_large_backup(self):
+        check_ins = [
+            {"week": "2026-10-12", "received_at": MONDAY_9AM + n, "source": "radio", "sender_name": "Big", "text": "#MeshCoreMonday " + "x" * 200, "message_key": f"k{n}"}
+            for n in range(2000)
+        ]
+        backup = {"format": "meshgram-check-ins", "version": 1, "participants": [{"node_id": None, "name": "Big", "check_ins": check_ins}]}
+        status, result = await self.call("POST", "/restore", {"backup": backup})
+        self.assertEqual((status, result["check_ins"]), (200, 2000))
 
     async def test_node_search(self):
         await self.plugin._flush_nodes()

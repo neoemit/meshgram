@@ -7,8 +7,11 @@ from pathlib import Path
 from meshgram.plugins.check_in_store import (
     SCHEMA_VERSION,
     SOURCE_IMPORT,
+    SOURCE_MANUAL,
     SOURCE_OBSERVER,
     SOURCE_RADIO,
+    BackupCheckIn,
+    BackupParticipant,
     CheckInError,
     CheckInRecord,
     CheckInStore,
@@ -156,6 +159,79 @@ class ImportTests(StoreTestCase):
         records = [SummaryRecord(1, KEY_A, "Alpha", 1, last_week=MON)]
         self.store.import_summary(records, replace=True, dry_run=False, place=place, now=NOW)
         self.assertEqual([h.name for h in self.store.histories()], ["Alpha"])
+
+
+def as_backup(exported):
+    """``export_backup`` rows -> what ``restore_backup`` takes (the plugin parses the file into these)."""
+    return [
+        BackupParticipant(
+            row,
+            item["node_id"],
+            item["name"],
+            item["extra_check_ins"],
+            tuple(BackupCheckIn(**{**check_in, "week": date.fromisoformat(check_in["week"])}) for check_in in item["check_ins"]),
+        )
+        for row, item in enumerate(exported, start=1)
+    ]
+
+
+class BackupTests(StoreTestCase):
+    def fill(self):
+        self.store.upsert_nodes([NodeSighting(KEY_A, "Alpha", 100)], NOW)
+        self.store.record_check_in(record("Alpha", "k1", week=MON - timedelta(weeks=1), at=NOW - 7 * 86400))
+        self.store.record_check_in(record("Alpha", "k2"))
+        self.store.record_check_in(record("Charlie", "k3", at=NOW + 60))  # name only
+        manual = self.store.create_participant("Delta", None, NOW)
+        self.store.set_streak(manual, 2, MON, place)
+        self.store.import_summary([SummaryRecord(1, None, "Echo", 0, total=4)], replace=False, dry_run=False, place=place, now=NOW)
+
+    def snapshot(self):
+        return sorted(
+            (h.name, h.node_id, h.extra_check_ins, tuple(sorted(h.weeks.items())), h.last_check_in) for h in self.store.histories()
+        )
+
+    def test_replace_brings_back_exactly_what_was_exported(self):
+        self.fill()
+        before, exported = self.snapshot(), self.store.export_backup()
+        self.assertEqual(exported[0]["check_ins"][0]["message_key"], "k1")
+        self.assertEqual(self.store.clear(), {"participants": 4, "check_ins": 5})
+        self.assertEqual(self.store.histories(), [])
+        self.store.record_check_in(record("Stranger", "k9"))
+        result = self.store.restore_backup(as_backup(exported), replace=True, dry_run=False, now=NOW)
+        self.assertEqual(result, {"created": 4, "updated": 0, "check_ins": 5, "duplicates": 0, "saved": True})
+        self.assertEqual(self.snapshot(), before)
+        # Every check-in comes back as it was, sources and texts included.
+        self.assertEqual(self.store.export_backup(), exported)
+
+    def test_merge_adds_what_isnt_here_yet(self):
+        self.fill()
+        exported = self.store.export_backup()
+        before = self.snapshot()
+        # Restoring into the same data changes nothing.
+        result = self.store.restore_backup(as_backup(exported), replace=False, dry_run=False, now=NOW)
+        self.assertEqual((result["created"], result["updated"], result["check_ins"], result["duplicates"]), (0, 4, 0, 5))
+        self.assertEqual(self.snapshot(), before)
+        # Into a fresh database with a check-in of its own: both are kept.
+        self.store.clear()
+        alpha = self.store.record_check_in(record("Alpha", "k5", week=MON + timedelta(weeks=1), at=NOW + 7 * 86400))
+        result = self.store.restore_backup(as_backup(exported), replace=False, dry_run=False, now=NOW)
+        self.assertEqual((result["created"], result["updated"], result["check_ins"]), (3, 1, 5))
+        self.assertEqual(len(self.people()["Alpha"].weeks), 3)
+        self.assertEqual(self.people()["Alpha"].participant_id, alpha)
+
+    def test_dry_run_changes_nothing(self):
+        self.fill()
+        exported = self.store.export_backup()
+        self.store.clear()
+        result = self.store.restore_backup(as_backup(exported), replace=False, dry_run=True, now=NOW)
+        self.assertEqual((result["created"], result["check_ins"], result["saved"]), (4, 5, False))
+        self.assertEqual(self.store.histories(), [])
+
+    def test_restored_node_goes_by_its_advertised_name(self):
+        self.store.upsert_nodes([NodeSighting(KEY_B, "Renamed", 100)], NOW)
+        backup = [BackupParticipant(1, KEY_B, "Old name", 0, (BackupCheckIn(MON, NOW, SOURCE_MANUAL),))]
+        self.store.restore_backup(backup, replace=False, dry_run=False, now=NOW)
+        self.assertEqual(self.people()["Renamed"].node_id, KEY_B)
 
 
 class FileTests(unittest.TestCase):

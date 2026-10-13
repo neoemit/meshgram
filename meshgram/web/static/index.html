@@ -609,7 +609,15 @@
   .ci-source.observer { color: var(--observer); }
   .ci-source.manual, .ci-source.import { color: var(--ok); }
   .ci-danger-row { justify-content: flex-start; }
-  .ci-import-result:empty { display: none; }
+  .ci-import-result:empty, .ci-detected:empty { display: none; }
+  .ci-import-result .notice, .ci-detected .notice { margin: 0; }
+  .ci-formats { display: grid; gap: 6px; margin: 0; padding-left: 18px; }
+  .ci-formats strong { color: var(--text-2); }
+  .ci-choice { display: grid; justify-items: start; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; }
+  .ci-choice > div { display: grid; gap: 4px; }
+  .ci-choice h3 { margin: 0; font-size: 14px; font-weight: 700; }
+  .ci-clear-actions { flex-wrap: wrap; }
+  .ci-clear-actions .spacer { flex: 1; }
   @media (max-width: 640px) {
     .ci-weeks { grid-template-columns: repeat(13, minmax(0, 1fr)); row-gap: 22px; }
   }
@@ -998,6 +1006,7 @@ const ICONS = {
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  upload: '<path d="M12 15V4M7 9l5-5 5 5M5 20h14"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 3v5h5M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 21v-5h-5"/>',
   power: '<path d="M12 3v8"/><path d="M6.3 7.3a8 8 0 1 0 11.4 0"/>',

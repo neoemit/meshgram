@@ -177,7 +177,7 @@ plugins:
       # Placeholders: {title} {name} {rank} {streak} {streak_weeks} {participants}
       # {participants_label} {total} {keyword}. Split between lines if longer
       # than one radio message.
-      reply_template: "📟 {title}\n🏅 {name} is #{rank} to check in this week!\n🔥 Streak: {streak_weeks}\n👥 {participants_label} so far."
+      reply_template: "📟 {title}\n🏅 {name} is #{rank} to check in this week!\n🔥 Streak: {streak_weeks}\n👥 {participants_label} so far"
       reply_cooldown_seconds: 30
       # Lets another site (the leaderboard in leaderboard/) read
       # /api/plugins/check_in/leaderboard with "Authorization: Bearer <token>".

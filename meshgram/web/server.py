@@ -132,6 +132,7 @@ class _Route:
     handler: Handler
     # Served without the web password; the handler checks access itself.
     public: bool = False
+    max_body: int = MAX_BODY_BYTES
 
     def matches(self, method: str, path: str) -> Optional[re.Match[str]]:
         if self.method != method and not (self.method == "GET" and method == "HEAD"):
@@ -218,13 +219,16 @@ class WebServer:
             return None
         return self._server.sockets[0].getsockname()[1]
 
-    def route(self, method: str, path: str, handler: Handler, *, public: bool = False) -> _Route:
+    def route(
+        self, method: str, path: str, handler: Handler, *, public: bool = False, max_body: int = MAX_BODY_BYTES
+    ) -> _Route:
         """Serve ``handler`` for ``method path``; returns the route, for ``remove_route``.
 
         ``public`` routes skip the web password (``web.password``): the handler decides
         who may use them (with ``is_authorized`` and its own credentials, say).
+        ``max_body`` is the largest request body it takes (a file upload, say).
         """
-        route = _Route(method.upper(), _compile(path), handler, public)
+        route = _Route(method.upper(), _compile(path), handler, public, max_body)
         self._routes.append(route)
         return route
 
@@ -292,6 +296,11 @@ class WebServer:
     def _is_public(self, method: str, target: str) -> bool:
         path = unquote(urlsplit(target).path)
         return any(route.public and route.matches(method.upper(), path) for route in self._routes)
+
+    def _body_limit(self, method: str, target: str) -> int:
+        path = unquote(urlsplit(target).path)
+        limits = [route.max_body for route in self._routes if route.matches(method.upper(), path)]
+        return max(limits, default=MAX_BODY_BYTES)
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if not self.config.password:
@@ -365,10 +374,12 @@ class WebServer:
             length = int(headers.get("content-length") or 0)
         except ValueError:
             length = -1
-        if length < 0 or length > MAX_BODY_BYTES:
+        if length < 0 or length > self._body_limit(method, target):
             await self._send(writer, _error(413 if length > 0 else 400, "Request body too large" if length > 0 else "Bad Content-Length"))
             return
-        body = await asyncio.wait_for(reader.readexactly(length), timeout=10.0) if length else b""
+        # A large upload (a route's max_body) may take longer: a second more per 256 KiB.
+        timeout = 10.0 + length / MAX_BODY_BYTES
+        body = await asyncio.wait_for(reader.readexactly(length), timeout=timeout) if length else b""
 
         split = urlsplit(target)
         request = Request(
