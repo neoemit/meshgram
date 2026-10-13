@@ -77,9 +77,9 @@
     if (!iso) return "";
     const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
     if (seconds < 60) return "just now";
-    if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
-    if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
-    const days = Math.round(seconds / 86400);
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`;
+    const days = Math.floor(seconds / 86400);
     return days < 14 ? `${days} d ago` : new Date(iso).toLocaleDateString([], { day: "numeric", month: "short" });
   }
 
@@ -182,13 +182,13 @@
     const first = entries.find((entry) => entry.week_rank === 1);
 
     countUp($("stat-week"), data.participants_this_week);
-    $("stat-week-sub").textContent = first ? `First on air: ${first.name}` : "Be the first this week";
+    $("stat-week-sub").replaceChildren(...(first ? ["First on air", h("strong", {}, first.name)] : ["Be the first this week"]));
     countUp($("stat-active"), active.length);
     $("stat-active-sub").textContent = entries.length ? `of ${plural(entries.length, "node")}` : "No nodes yet";
     countUp($("stat-longest"), longest);
-    $("stat-longest-sub").textContent = leaders.length
-      ? `${leaders[0].name}${leaders.length > 1 ? ` +${leaders.length - 1}` : ""} · ${plural(longest, "week")}`
-      : "No streaks yet";
+    $("stat-longest-sub").replaceChildren(...(leaders.length
+      ? [h("strong", {}, leaders[0].name, leaders.length > 1 ? ` +${leaders.length - 1}` : ""), plural(longest, "week")]
+      : ["No streaks yet"]));
     countUp($("stat-total"), total);
     $("stat-total-sub").textContent = entries.length ? `by ${plural(entries.length, "node")}` : " ";
   }
@@ -204,7 +204,7 @@
       badge(entry),
       h("span", { class: "podium-name", title: entry.name }, entry.name),
       h("span", { class: "podium-streak" }, "🔥", h("strong", {}, entry.streak), entry.streak === 1 ? "week" : "weeks"),
-      h("span", { class: "podium-meta" }, `best ${entry.best_streak} · ${plural(entry.total_check_ins, "check-in")}`),
+      h("span", { class: "podium-meta" }, h("span", {}, `best ${entry.best_streak}`), " · ", h("span", {}, plural(entry.total_check_ins, "check-in"))),
       h("div", { class: "podium-block", "aria-label": `Rank ${entry.rank}` }, entry.rank))));
   }
 
@@ -234,22 +234,29 @@
 
     $("board").replaceChildren(...rows.map((entry) => {
       const shortKey = entry.id ? `${entry.id.slice(0, 8)}…` : "name only";
+      const last = relative(entry.last_check_in);
       const weekStatus = entry.checked_in_this_week
-        ? h("span", { class: "week-status", "data-in": true, title: "Checked in this week" }, svg(ICON_SIGNAL), h("span", {}, `#${entry.week_rank}`, h("small", {}, relative(entry.last_check_in))))
-        : h("span", { class: "week-status", title: "Not checked in this week" }, svg(ICON_QUIET), h("span", {}, "—", h("small", {}, relative(entry.last_check_in))));
+        ? h("span", { class: "week-status", "data-in": true, title: "Checked in this week" }, svg(ICON_SIGNAL),
+          h("span", {}, h("span", { class: "sr-only" }, "Checked in this week: "), `#${entry.week_rank}`, h("small", {}, last)))
+        : h("span", { class: "week-status", title: "Not checked in this week" }, svg(ICON_QUIET),
+          h("span", {}, h("span", { class: "sr-only" }, "Not checked in this week. "), h("span", { "aria-hidden": "true" }, "—"),
+            last ? h("small", {}, h("span", { class: "sr-only" }, "Last check-in "), last) : null));
       return h("li", { class: [entry.rank <= 3 && entry.streak > 0 ? "top" : "", fresh.has(keyOf(entry)) ? "fresh" : ""].join(" ").trim() || null },
-        h("span", { class: "board-rank" }, entry.rank),
+        h("span", { class: "board-rank" }, h("span", { class: "sr-only" }, "Rank "), entry.rank),
         h("div", { class: "board-node" },
           badge(entry),
           h("div", { class: "board-name" },
-            h("strong", { title: entry.name }, entry.name, entry.resolved ? null : h("span", { class: "tag-unverified", title: "Known by name only until its advert is heard" }, "unverified")),
+            h("strong", {}, entry.name, entry.resolved ? null : h("span", { class: "tag-unverified", title: "Known by name only until its advert is heard" }, "unverified")),
             h("small", { title: entry.id || "" }, shortKey))),
         h("div", { class: "board-streak" },
           h("span", { class: "board-streak-value" },
+            h("span", { class: "sr-only" }, "Streak: "),
             entry.streak ? [h("span", { class: "flame", "aria-hidden": "true" }, "🔥"), plural(entry.streak, "week")] : h("span", { class: "zero" }, "No streak")),
           h("div", { class: "meter", "aria-hidden": "true" }, h("span", { "--fill": `${(entry.streak / maxStreak) * 100}%` }))),
-        h("span", { class: "board-num hide-sm", title: "Best streak" }, entry.best_streak),
-        h("span", { class: "board-num hide-sm", title: "Total check-ins" }, entry.total_check_ins),
+        h("div", { class: "board-meta" },
+          h("span", { class: "board-num", title: "Best streak" }, h("span", { class: "board-label" }, "Best "), entry.best_streak),
+          h("span", { class: "board-num board-total", title: "Total check-ins" }, entry.total_check_ins,
+            h("span", { class: "board-label" }, entry.total_check_ins === 1 ? " check-in" : " check-ins"))),
         weekStatus);
     }));
 

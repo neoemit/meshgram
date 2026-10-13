@@ -182,7 +182,7 @@ button, input { font: inherit; color: inherit; }
 /* --- Layout ---------------------------------------------------------------------------------- */
 
 .page {
-  display: grid; gap: var(--section-gap);
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--section-gap);
   max-width: var(--content-max); margin: 0 auto;
   padding-block: var(--space-2) var(--space-8);
   padding-inline: max(var(--gutter), env(safe-area-inset-left)) max(var(--gutter), env(safe-area-inset-right));
@@ -280,7 +280,9 @@ button, input { font: inherit; color: inherit; }
 .stat-cyan { --accent: var(--cyan); }
 .stat-label { color: var(--text-3); font-size: var(--text-xs); line-height: 1.4; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .stat-value { font: 900 clamp(34px, 4.6vw, 48px) / 1.1 var(--font); letter-spacing: -.03em; color: var(--accent); font-variant-numeric: tabular-nums; }
-.stat-sub { min-height: 1.5em; color: var(--text-2); font-size: var(--text-sm); line-height: 1.5; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat-sub { min-height: 1.5em; color: var(--text-2); font-size: var(--text-sm); line-height: 1.5; font-weight: 600; overflow-wrap: anywhere; }
+/* A node's name gets a line of its own. */
+.stat-sub strong { display: block; color: var(--text); font-weight: 750; }
 
 /* --- Podium ------------------------------------------------------------------------------------ */
 
@@ -294,13 +296,14 @@ button, input { font: inherit; color: inherit; }
 .podium li.place-3 { order: 3; --medal: var(--bronze); }
 .podium .badge { width: 64px; height: 64px; margin-bottom: var(--space-2); font-size: var(--text-lg); }
 .podium .place-1 .badge { width: 84px; height: 84px; font-size: 22px; }
-.podium-name { max-width: 100%; font-size: var(--text-lg); line-height: 1.3; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.podium-name { max-width: 100%; font-size: var(--text-lg); line-height: 1.3; font-weight: 800; overflow-wrap: anywhere; text-wrap: balance; }
 .podium-streak { display: inline-flex; align-items: baseline; gap: var(--space-2); font-weight: 800; line-height: 1.2; }
 .podium-streak strong {
   padding-bottom: .06em; font-size: 30px; line-height: 1.1;
   background: var(--flame-grad); -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .podium-meta { color: var(--text-3); font-size: var(--text-sm); line-height: 1.4; font-weight: 600; }
+.podium-meta > span { white-space: nowrap; }
 .podium-block {
   position: relative; display: grid; place-items: center; width: 100%; margin-top: var(--space-3); border-radius: var(--radius-md) var(--radius-md) 6px 6px;
   border: 1px solid color-mix(in srgb, var(--medal) 45%, transparent);
@@ -330,15 +333,15 @@ button, input { font: inherit; color: inherit; }
 .rollcall li {
   display: inline-flex; align-items: center; gap: var(--space-3); max-width: 100%; min-height: var(--tap);
   padding: 5px var(--space-5) 5px 6px;
-  border: 1px solid var(--panel-border); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--panel-solid) 70%, transparent);
+  border: 1px solid var(--panel-border); border-radius: calc(var(--tap) / 2); background: color-mix(in srgb, var(--panel-solid) 70%, transparent);
 }
 /* Lists rise into place when the page first shows, not again on every refresh. */
 .intro .rollcall li { animation: rise .5s both; animation-delay: var(--delay, 0ms); }
 .intro .board li { animation: rise .4s both; }
 .rollcall li.rollcall-empty { padding-inline: var(--space-5); color: var(--text-2); }
-.rollcall .badge { width: 32px; height: 32px; font-size: 11px; }
-.rollcall-rank { color: var(--green); font: 800 var(--text-sm) / 1 var(--mono); }
-.rollcall-name { font-weight: 700; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rollcall .badge { width: 32px; height: 32px; flex: none; font-size: 11px; }
+.rollcall-rank { flex: none; color: var(--green); font: 800 var(--text-sm) / 1 var(--mono); }
+.rollcall-name { min-width: 0; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
 .rollcall li.fresh, .board li.fresh { animation: fresh 2.4s ease-out both; }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes fresh {
@@ -380,10 +383,10 @@ button, input { font: inherit; color: inherit; }
 .board li.top .board-rank { color: var(--gold); }
 .board-node { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .board-name { display: grid; gap: 2px; min-width: 0; }
-.board-name strong { font-size: var(--text-base); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-name strong { font-size: var(--text-base); line-height: 1.3; overflow-wrap: anywhere; }
 .board-name small { color: var(--text-3); font: 600 var(--text-xs) / 1.4 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-unverified {
-  margin-left: var(--space-2); padding: 2px 7px; border-radius: 6px; vertical-align: 2px;
+  display: inline-block; margin-left: var(--space-2); padding: 2px 7px; border-radius: 6px; vertical-align: 2px; white-space: nowrap;
   background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--amber);
   font: 700 11px/1.4 var(--font); letter-spacing: .04em; text-transform: uppercase;
 }
@@ -397,7 +400,13 @@ button, input { font: inherit; color: inherit; }
   box-shadow: 0 0 12px color-mix(in srgb, var(--flame) calc(60% * var(--glow-strength)), transparent);
   transition: width .8s cubic-bezier(.2, .8, .2, 1);
 }
+/* Best and total are columns of their own on wide screens, one line under the streak on narrow ones. */
+.board-meta { display: contents; }
 .board-num { color: var(--text-2); font-size: var(--text-md); font-weight: 700; font-variant-numeric: tabular-nums; }
+/* Wide screens have the column headings; narrow ones show these labels instead. */
+.board-label {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 .week-status { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 800; font-size: var(--text-sm); line-height: 1.3; color: var(--text-3); }
 .week-status svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .week-status[data-in] { color: var(--green); }
@@ -428,7 +437,32 @@ button, input { font: inherit; color: inherit; }
 
 @media (max-width: 960px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
-  .board-header, .board li { column-gap: var(--space-4); grid-template-columns: 40px minmax(0, 2fr) minmax(120px, 1.6fr) 52px 52px 100px; }
+  .board-header, .board li { column-gap: var(--space-4); grid-template-columns: 40px minmax(0, 1fr) 120px 48px 64px 96px; }
+}
+
+/* The board as stacked rows: name and this week, then the streak, then best and total. */
+@media (max-width: 760px) {
+  .board-header { display: none; }
+  .board li {
+    --indent: calc(40px + var(--space-3)); /* under the name, past the badge */
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "rank node   week"
+      "rank streak streak"
+      "rank meta   meta";
+    column-gap: var(--space-4); row-gap: var(--space-2);
+    padding: var(--space-4) var(--space-2);
+  }
+  .board-rank { grid-area: rank; align-self: start; padding-top: 12px; }
+  .board-node { grid-area: node; }
+  .week-status { grid-area: week; align-self: start; padding-top: 4px; text-align: right; }
+  .week-status svg { display: none; }
+  .board-streak { grid-area: streak; display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-1); padding-left: var(--indent); }
+  .board-streak .meter { flex: 1; }
+  .board-meta { grid-area: meta; display: flex; flex-wrap: wrap; gap: 0 var(--space-2); padding-left: var(--indent); }
+  .board-num { color: var(--text-2); font-size: var(--text-sm); }
+  .board-total::before { content: "·"; content: "·" / ""; margin-right: var(--space-2); color: var(--text-3); }
+  .board-label { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; color: var(--text-3); font-weight: 600; }
 }
 
 @media (max-width: 640px) {
@@ -438,6 +472,8 @@ button, input { font: inherit; color: inherit; }
   .hero-actions { gap: var(--space-3); margin-top: var(--space-6); }
   .hero-actions > * { flex: 1 1 100%; }
   .stat { padding: var(--space-5) var(--space-4) var(--space-4); }
+  /* Two lines for every label, so the numbers side by side line up. */
+  .stat-label { min-height: calc(2em * 1.4); }
   .panel-head { margin-bottom: var(--space-5); }
   .podium { gap: var(--space-2); }
   .podium .badge { width: 48px; height: 48px; font-size: 13px; }
@@ -453,13 +489,9 @@ button, input { font: inherit; color: inherit; }
   .rollcall { gap: var(--space-2); }
   .board-tools { justify-content: flex-start; }
   .board-tools, .search { width: 100%; }
-  .board-header, .board li { column-gap: var(--space-3); grid-template-columns: 28px minmax(0, 1fr) 96px 72px; }
-  .board-header { padding-inline: var(--space-2); }
-  .board li { padding: var(--space-3) var(--space-2); }
+  .board li { --indent: calc(34px + var(--space-3)); column-gap: var(--space-3); }
   .board .badge { width: 34px; height: 34px; font-size: 11px; }
-  .board-streak-value { font-size: var(--text-sm); }
-  .week-status svg { display: none; }
-  .hide-sm { display: none; }
+  .board-rank { padding-top: 9px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
