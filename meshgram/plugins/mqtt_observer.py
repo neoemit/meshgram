@@ -25,8 +25,9 @@ with a subscriber account from the broker operator, subscribed to the region's
 stamped with the network they came from (``network``), and the transport passes
 the channel messages in them on to every plugin.
 
-This module has the shared parts; ``meshmapper``, ``letsmesh`` and ``meshrank`` are
-the plugins built on it (``MqttObserverPlugin``).
+This module has the shared parts; ``meshmapper``, ``letsmesh``, ``meshrank`` and
+``custom_mqtt`` (brokers of the user's choice) are the plugins built on it
+(``MqttObserverPlugin``).
 """
 from __future__ import annotations
 
@@ -146,6 +147,8 @@ class ObserverConfig:
     subscribe_port: int = 443
     subscribe_transport: str = "websockets"
     subscribe_tls: bool = True
+    # The broker lets anyone read: subscribe without an account (an open, self-hosted broker).
+    subscribe_anonymous: bool = False
     # What the server's operator offers for reading other observers' packets, said when
     # there's no subscriber account.
     subscriber_hint: str = ""
@@ -229,6 +232,8 @@ class ObserverConfig:
             return "settings.server must not be empty"
         if self.auth == AUTH_PASSWORD and not self.username:
             return "a username is needed to log in with a password"
+        if self.auth == AUTH_PASSWORD and not self.password:
+            return f"set the password for {self.username}"
         if self.private_key and (len(self.private_key) != 128 or not HEX_RE.match(self.private_key)):
             return "private_key must be 128 hex characters (64-byte MeshCore private key)"
         if self.owner_public_key and (len(self.owner_public_key) != 64 or not HEX_RE.match(self.owner_public_key)):
@@ -256,6 +261,8 @@ class ObserverConfig:
         """Why other observers' packets won't be received over MQTT, or ``None`` if the subscriber should run."""
         if not self.subscribe:
             return "Turned off (subscribe: false)"
+        if self.subscribe_anonymous and not self.subscribe_username:
+            return None
         if not self.subscribe_username or not self.subscribe_password:
             hint = self.subscriber_hint or "observers can only publish."
             return (
@@ -832,7 +839,8 @@ class ObserverSubscriber:
         client_id = _sanitize_client_id(f"{cfg.client_id_prefix}sub_", own_public_key)
         try:
             client = self._client_factory(client_id, cfg.subscribe_transport)
-            client.username_pw_set(cfg.subscribe_username, cfg.subscribe_password)
+            if cfg.subscribe_username:
+                client.username_pw_set(cfg.subscribe_username, cfg.subscribe_password)
             _configure_client(client, cfg.subscribe_transport, cfg.subscribe_tls, cfg.tls_verify, cfg.websocket_path, self._label)
             client.on_connect = self._on_connect
             client.on_disconnect = self._on_disconnect
@@ -853,7 +861,7 @@ class ObserverSubscriber:
             self._label,
             cfg.subscribe_server,
             cfg.subscribe_port,
-            cfg.subscribe_username,
+            cfg.subscribe_username or "anonymous",
             self._topic,
         )
 
@@ -989,8 +997,10 @@ class ObserverSubscriber:
 class MqttObserverPlugin(BasePlugin):
     """An observer on one network's MQTT servers: uploads, plus other observers' packets with an account.
 
-    Subclasses build the servers' configs from their settings (``build_configs``); the
-    first one's subscriber settings are used to read other observers' packets.
+    Subclasses build the servers' configs from their settings (``build_configs``) and
+    say which of them other observers' packets are read from (``subscriber_configs``:
+    the first one, by default). A server whose settings are wrong is left out on its
+    own; the others still run.
     """
 
     name = "mqtt_observer"
@@ -999,83 +1009,102 @@ class MqttObserverPlugin(BasePlugin):
         super().__init__(settings)
         self.configs = self.build_configs(self.settings)
         self.uploaders = [ObserverUploader(config) for config in self.configs]
-        self.subscriber: Optional[ObserverSubscriber] = ObserverSubscriber(self.configs[0]) if self.configs else None
-        self._disabled_reason: Optional[str] = None
+        self.subscribers = [ObserverSubscriber(config) for config in self.subscriber_configs()]
+        self._disabled: dict[str, str] = {}
         self._transport: Any = None
         self._status: Optional[StatusRegistry] = None
 
     def build_configs(self, settings: dict[str, Any]) -> list[ObserverConfig]:
         raise NotImplementedError
 
+    def subscriber_configs(self) -> list[ObserverConfig]:
+        """The servers other observers' packets are read from (each with its own subscriber session)."""
+        return self.configs[:1]
+
     def no_server_reason(self) -> str:
         return "no server selected"
 
     def _status_entries(self) -> list[tuple[str, str]]:
         entries = [(config.status_publish, config.publish_label) for config in self.configs]
-        if self.configs:
-            entries.append((self.configs[0].status_subscribe, self.configs[0].subscribe_label))
+        entries.extend((subscriber.config.status_subscribe, subscriber.config.subscribe_label) for subscriber in self.subscribers)
         return entries
 
     def _bind_status(self, context: PluginContext) -> None:
         self._status = context.status
         for uploader in self.uploaders:
             uploader.status = context.status
-        if self.subscriber is not None:
-            self.subscriber.status = context.status
+        for subscriber in self.subscribers:
+            subscriber.status = context.status
 
     def _validation_error(self) -> Optional[str]:
+        """The first problem with the settings, if any: no server, or one whose settings are wrong."""
         if not self.configs:
             return self.no_server_reason()
+        return next((error for error in (config.validation_error() for config in self.configs) if error is not None), None)
+
+    def _check(self, context: PluginContext) -> list[ObserverConfig]:
+        """The servers that can run; the others are marked off (and logged, once)."""
+        if not self.configs:
+            if "" not in self._disabled:
+                LOGGER.error("%s uploads disabled: %s", self.title or self.name, self.no_server_reason())
+                self._disabled[""] = self.no_server_reason()
+            return []
+        subscribing = {id(subscriber.config) for subscriber in self.subscribers}
+        valid = []
         for config in self.configs:
             error = config.validation_error()
-            if error is not None:
-                return error
-        return None
-
-    def _disable(self, reason: str, context: PluginContext) -> None:
-        if self._disabled_reason is None:
-            LOGGER.error("%s uploads disabled: %s", self.title or self.name, reason)
-            self._disabled_reason = reason
-        for key, label in self._status_entries():
-            set_status(context.status, key, DISABLED, reason, label)
+            if error is None:
+                valid.append(config)
+                continue
+            if self._disabled.get(config.status_publish) != error:
+                LOGGER.error("%s uploads disabled: %s", config.label, error)
+                self._disabled[config.status_publish] = error
+            set_status(context.status, config.status_publish, DISABLED, error, config.publish_label)
+            if id(config) in subscribing:
+                set_status(context.status, config.status_subscribe, DISABLED, error, config.subscribe_label)
+        return valid
 
     async def on_startup(self, context: PluginContext) -> list[PluginAction]:
         self._bind_status(context)
-        error = self._validation_error()
-        if error is not None:
-            self._disable(error, context)
-            return []
+        valid = {id(config) for config in self._check(context)}
         for config in self.configs:
-            set_status(context.status, config.status_publish, CONNECTING, "Waiting for the radio", config.publish_label)
-        first = self.configs[0]
-        off = first.subscriber_disabled_reason()
-        if off is None:
-            set_status(context.status, first.status_subscribe, CONNECTING, "Waiting for the radio", first.subscribe_label)
-        else:
-            set_status(context.status, first.status_subscribe, DISABLED, off, first.subscribe_label)
+            if id(config) in valid:
+                set_status(context.status, config.status_publish, CONNECTING, "Waiting for the radio", config.publish_label)
+        for subscriber in self.subscribers:
+            config = subscriber.config
+            if id(config) not in valid:
+                continue
+            off = config.subscriber_disabled_reason()
+            if off is None:
+                set_status(context.status, config.status_subscribe, CONNECTING, "Waiting for the radio", config.subscribe_label)
+            else:
+                set_status(context.status, config.status_subscribe, DISABLED, off, config.subscribe_label)
         return []
 
     async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
         self._bind_status(context)
-        error = self._validation_error()
-        if error is not None:
-            self._disable(error, context)
+        valid = {id(config) for config in self._check(context)}
+        if not valid:
             return
         self._transport = transport
-        for uploader in self.uploaders:
+        uploaders = [uploader for uploader in self.uploaders if id(uploader.config) in valid]
+        for uploader in uploaders:
             transport.add_rx_log_listener(uploader.handle_rx_log)
             await uploader.on_device_connected(transport)
-        public_key = next((uploader.public_key for uploader in self.uploaders if uploader.public_key), "")
-        if public_key and self.subscriber is not None and self.configs[0].subscriber_disabled_reason() is None:
-            self.subscriber.start(transport, public_key)
+        public_key = next((uploader.public_key for uploader in uploaders if uploader.public_key), "")
+        if not public_key:
+            return
+        for subscriber in self.subscribers:
+            if id(subscriber.config) in valid and subscriber.config.subscriber_disabled_reason() is None:
+                subscriber.start(transport, public_key)
 
     async def on_shutdown(self) -> None:
         if self._transport is not None:
             for uploader in self.uploaders:
                 self._transport.remove_rx_log_listener(uploader.handle_rx_log)
             self._transport = None
-        if self.subscriber is not None:
-            await self.subscriber.stop()
+        for subscriber in self.subscribers:
+            await subscriber.stop()
         for uploader in self.uploaders:
             await uploader.stop()
         # Turned off: its connections no longer apply.

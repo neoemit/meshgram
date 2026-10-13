@@ -4,6 +4,7 @@ import json
 import unittest
 
 from meshgram.plugin import load_plugin_class
+from meshgram.plugins.custom_mqtt import CustomMqttPlugin
 from meshgram.plugins.letsmesh import LetsMeshPlugin
 from meshgram.plugins.meshmapper import MeshMapperConfig, MeshMapperPlugin
 from meshgram.plugins.meshrank import MeshRankPlugin, registration_key
@@ -42,7 +43,7 @@ class ObserverPluginTestCase(unittest.TestCase):
 
         plugin = self.plugin_class(settings)
         plugin.uploaders = [ObserverUploader(config, client_factory=factory) for config in plugin.configs]
-        plugin.subscriber = ObserverSubscriber(plugin.configs[0], client_factory=factory) if plugin.configs else None
+        plugin.subscribers = [ObserverSubscriber(config, client_factory=factory) for config in plugin.subscriber_configs()]
         self.transport = _FakeTransport()
         self.status = StatusRegistry()
         self.context = _make_context()
@@ -264,7 +265,7 @@ class MeshRankTests(ObserverPluginTestCase):
 
     def test_silent_subscription_says_so(self):
         plugin = self.make({"iata": "yow", "subscribe_username": "viewer", "subscribe_password": "pw"})
-        plugin.subscriber.quiet_seconds = 0.01
+        plugin.subscribers[0].quiet_seconds = 0.01
 
         async def scenario():
             await self.connect(plugin, 2)
@@ -282,6 +283,107 @@ class MeshRankTests(ObserverPluginTestCase):
             await plugin.on_shutdown()
 
         asyncio.run(scenario())
+
+
+class CustomMqttTests(ObserverPluginTestCase):
+    plugin_class = CustomMqttPlugin
+    ZR1RF = {"server": "mqtt.zr1rf.za.net", "username": "meshcoreuser", "password": "pw"}
+
+    @staticmethod
+    def split(clients):
+        """The uploader's and the subscriber's client (created in no set order)."""
+        (uploader,) = [c for c in clients if "sub_" not in c.client_id]
+        (subscriber,) = [c for c in clients if "sub_" in c.client_id]
+        return uploader, subscriber
+
+    def test_registered(self):
+        self.assertIs(load_plugin_class("custom_mqtt"), CustomMqttPlugin)
+        self.assertIs(load_plugin_class("custom-mqtt"), CustomMqttPlugin)
+
+    def test_settings(self):
+        validate({"iata": "CPT", "servers": {"ZR1RF": self.ZR1RF}}, CustomMqttPlugin.settings_schema)
+        for bad in ({"server": ""}, {"port": 1883}, {"server": "x", "transport": "udp"}, {"server": "x", "auth": "basic"}):
+            with self.assertRaises(SettingsError):
+                validate({"iata": "CPT", "servers": {"A": bad}}, CustomMqttPlugin.settings_schema)
+        self.assertEqual(CustomMqttPlugin({"iata": "CPT"}).configs, [])
+        self.assertIn("add a server", CustomMqttPlugin({"iata": "CPT"})._validation_error())
+
+    def test_ports_and_logins_default_from_the_rest(self):
+        def config(**server):
+            (only,) = CustomMqttPlugin({"iata": "CPT", "servers": {"A": {"server": "x", **server}}}).configs
+            return only
+
+        self.assertEqual((config().port, config().transport, config().tls, config().auth), (1883, "tcp", False, "none"))
+        self.assertEqual(config(tls=True).port, 8883)
+        self.assertEqual(config(transport="websockets", tls=True).port, 443)
+        self.assertEqual(config(transport="websockets").port, 80)
+        self.assertEqual(config(port=2883, tls=True).port, 2883)
+        self.assertEqual(config(username="u", password="p").auth, "password")
+        # A token login reads only with a subscriber account; an anonymous one reads anonymously.
+        self.assertIn("subscriber account", config(auth="token").subscriber_disabled_reason())
+        self.assertIsNone(config().subscriber_disabled_reason())
+        self.assertIsNone(config(subscribe_username="viewer", subscribe_password="v").subscriber_disabled_reason())
+
+    def test_uploads_and_reads_with_the_same_login(self):
+        plugin = self.make({"iata": "cpt", "servers": {"ZR1RF": self.ZR1RF}})
+
+        async def scenario():
+            uploader, subscriber = self.split(await self.connect(plugin, 2))
+            self.assertEqual((uploader.connect_args, uploader.transport), (("mqtt.zr1rf.za.net", 1883, 60), "tcp"))
+            self.assertEqual(uploader.tls, {})  # plain MQTT
+            self.assertEqual(uploader.credentials, [("meshcoreuser", "pw")])
+            self.assertEqual(self.transport.signed, [])
+            self.assertEqual(uploader.published[0][0], f"meshcore/CPT/{PUBKEY_HEX}/status")
+            await self.transport.listeners[0]({"payload": "1500AABB"})
+            self.assertEqual(uploader.published[-1][0], f"meshcore/CPT/{PUBKEY_HEX}/packets")
+            self.assertEqual(self.status.get("mqtt_custom_zr1rf_publish")["label"], "ZR1RF MQTT (publish)")
+            self.assertEqual(self.status.get("mqtt_custom_zr1rf_publish")["state"], "connected")
+
+            self.assertEqual((subscriber.connect_args, subscriber.credentials), (("mqtt.zr1rf.za.net", 1883, 60), [("meshcoreuser", "pw")]))
+            self.assertEqual(subscriber.subscriptions, [("meshcore/CPT/+/packets", 0)])
+            subscriber.on_subscribe(subscriber, None, 1, [_ReasonCode(0)], None)
+            self.assertEqual(self.status.get("mqtt_custom_zr1rf_subscribe")["state"], "connected")
+            other = "AB" * 32
+            subscriber.on_message(subscriber, None, _FakeMessage(f"meshcore/CPT/{other}/packets", {"raw": "1500AABB"}))
+            # Our own uploads, read back, are skipped.
+            subscriber.on_message(subscriber, None, _FakeMessage(f"meshcore/CPT/{PUBKEY_HEX}/packets", {"raw": "1500AABB"}))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertEqual([(packet["network"], packet["observer_id"]) for packet in self.transport.remote], [("ZR1RF", other)])
+
+            await plugin.on_shutdown()
+            self.assertEqual(self.transport.listeners, [])
+            self.assertTrue(uploader.disconnected and subscriber.disconnected)
+            self.assertEqual(self.status.snapshot(), [])
+
+        asyncio.run(scenario())
+
+    def test_a_server_without_its_password_is_left_out_alone(self):
+        plugin = self.make({
+            "iata": "cpt",
+            "servers": {"ZR1RF": {"server": "mqtt.zr1rf.za.net", "username": "meshcoreuser"}, "Home": {"server": "10.0.0.2"}},
+        })
+
+        async def scenario():
+            with self.assertLogs("meshgram.plugins.mqtt_observer", level="ERROR") as logs:
+                uploader, subscriber = self.split(await self.connect(plugin, 2))
+            self.assertEqual(sum("ZR1RF uploads disabled" in line for line in logs.output), 1)
+            for key in ("mqtt_custom_zr1rf_publish", "mqtt_custom_zr1rf_subscribe"):
+                self.assertEqual(self.status.get(key)["state"], "disabled")
+                self.assertEqual(self.status.get(key)["detail"], "set the password for meshcoreuser")
+            # The anonymous one runs, and reads anonymously.
+            self.assertEqual([c.connect_args[0] for c in (uploader, subscriber)], ["10.0.0.2", "10.0.0.2"])
+            self.assertEqual((uploader.credentials, subscriber.credentials), ([], []))
+            self.assertEqual(len(self.transport.listeners), 1)
+            self.assertEqual(self.status.get("mqtt_custom_home_publish")["state"], "connected")
+            await plugin.on_shutdown()
+
+        asyncio.run(scenario())
+
+    def test_names_that_clash_get_their_own_status(self):
+        plugin = CustomMqttPlugin({"iata": "CPT", "servers": {"A b": {"server": "x"}, "a-b": {"server": "y"}}})
+        self.assertEqual([c.status_publish for c in plugin.configs], ["mqtt_custom_a_b_publish", "mqtt_custom_a_b_2_publish"])
+        self.assertEqual([c.network for c in plugin.configs], ["A b", "a-b"])
 
 
 if __name__ == "__main__":

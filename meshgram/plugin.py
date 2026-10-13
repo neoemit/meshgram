@@ -22,6 +22,7 @@ BUILTIN_PLUGINS: dict[str, str] = {
     "meshmapper": "meshgram.plugins.meshmapper:MeshMapperPlugin",
     "letsmesh": "meshgram.plugins.letsmesh:LetsMeshPlugin",
     "meshrank": "meshgram.plugins.meshrank:MeshRankPlugin",
+    "custom_mqtt": "meshgram.plugins.custom_mqtt:CustomMqttPlugin",
     "packet_map": "meshgram.plugins.packet_map:PacketMapPlugin",
     "check_in": "meshgram.plugins.check_in:CheckInPlugin",
 }

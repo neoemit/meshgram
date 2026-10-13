@@ -184,6 +184,39 @@ plugins:
       # subscribe_username: ""
       # subscribe_password: ""
 
+  - name: custom_mqtt
+    enabled: true
+    settings:
+      # Uploads every packet the radio hears to MQTT brokers of your choice
+      # (a club's or a region's, a self-hosted one) as an observer, in the
+      # same format as the analyzers above, and receives the packets other
+      # observers send there. Required: your region code.
+      iata: "XXX"
+      # status_interval_seconds: 300
+      servers:
+        # Each server's name tags the packets received from it. Add as many
+        # as you like.
+        ZR1RF:
+          server: mqtt.zr1rf.za.net
+          # port: 1883        # default: 1883, 8883 with TLS (WebSockets: 80 / 443)
+          # transport: tcp    # or websockets (websocket_path: /)
+          # tls: false
+          # tls_verify: true
+          # Login: password (default with a username), none (anonymous) or
+          # token (signed by the radio, as on meshcore-mqtt-broker).
+          username: meshcoreuser
+          password: ""        # set it here or in the control panel
+          # The same login also reads the region's packets
+          # (meshcore/<IATA>/+/packets). Turn it off, or give another account:
+          # subscribe: true
+          # subscribe_username: ""
+          # subscribe_password: ""
+          # Topics ({IATA}, {PUBLIC_KEY}), if the broker uses another layout:
+          # topic_packets: meshcore/{IATA}/{PUBLIC_KEY}/packets
+          # topic_status: meshcore/{IATA}/{PUBLIC_KEY}/status
+          # topic_subscribe: meshcore/{IATA}/+/packets
+          # retain_status: true
+
   - name: packet_map
     enabled: false
     settings:
