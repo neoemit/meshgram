@@ -71,12 +71,19 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_KEYWORD = "#MeshCoreMonday"
 DEFAULT_TITLE = "MeshCore Monday"
+# 59 bytes without the numbers, name and title: with a title of up to MAX_TITLE_LENGTH characters,
+# any node name (MeshCore's are at most 31 bytes) and three-digit numbers, it fits in one radio
+# message (120 bytes).
 DEFAULT_TEMPLATE = (
     "📟 {title}\n"
-    "🏅 {name} is #{rank} to check in this week!\n"
-    "🔥 Streak: {streak_weeks}\n"
-    "👥 {participants_label} so far"
+    "🏅 {name} is #{rank} this week\n"
+    "🔥 Streak: {streak}\n"
+    "👥 {participants_label}"
 )
+MAX_TITLE_LENGTH = 20
+# What a reply shortens to fit in one radio message, longest first, and how far (characters, "…" included).
+SHORTENED_VALUES = ("name", "title")
+MIN_SHORTENED_LENGTH = 6
 DEFAULT_DB_FILE = "check_in.sqlite3"
 DEFAULT_TIMEZONE = "UTC"
 DEFAULT_COOLDOWN_SECONDS = 30.0
@@ -224,6 +231,37 @@ def pack_lines(text: str, max_bytes: int) -> list[str]:
     return parts
 
 
+def shorten(text: str, length: int) -> str:
+    """``text`` cut to ``length`` characters, "…" included."""
+    if len(text) <= length:
+        return text
+    return text[: max(0, length - 1)].rstrip(" ‍️") + "…"
+
+
+def fill_template(template: str, values: dict[str, Any], max_bytes: Optional[int] = None) -> str:
+    """The template filled in; with ``max_bytes``, the name and title shortened as far as it takes to fit.
+
+    The longer of the two (in bytes) loses a character at a time, neither below ``MIN_SHORTENED_LENGTH``.
+    A reply that doesn't fit even so comes back whole, to be split between lines.
+    """
+    text = template.format_map(values).strip()
+    if max_bytes is None or utf8_len(text) <= max_bytes:
+        return text
+    full = {key: str(values[key]) for key in SHORTENED_VALUES}
+    lengths = {key: len(value) for key, value in full.items()}
+    shortened = dict(values)
+    while True:
+        longer = [key for key in SHORTENED_VALUES if lengths[key] > MIN_SHORTENED_LENGTH]
+        if not longer:
+            return text
+        key = max(longer, key=lambda key: utf8_len(shortened[key]))
+        lengths[key] -= 1
+        shortened[key] = shorten(full[key], lengths[key])
+        candidate = template.format_map(shortened).strip()
+        if utf8_len(candidate) <= max_bytes:
+            return candidate
+
+
 def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
@@ -279,9 +317,12 @@ class CheckInPlugin(BasePlugin):
             "title": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 64,
+                "maxLength": MAX_TITLE_LENGTH,
                 "title": "Title",
-                "description": "Heads the reply ({title}) and the leaderboard.",
+                "description": (
+                    f"Heads the reply ({{title}}) and the leaderboard; at most {MAX_TITLE_LENGTH} characters, "
+                    "so the reply fits in one radio message."
+                ),
                 "default": DEFAULT_TITLE,
             },
             "days": {
@@ -315,7 +356,8 @@ class CheckInPlugin(BasePlugin):
                 "description": (
                     "Placeholders: {title}, {name}, {rank} (this week), {streak}, {streak_weeks} (\"3 weeks\"), "
                     "{participants}, {participants_label} (\"13 participants\"), {total}, {keyword}. "
-                    "A reply longer than one radio message is split between lines."
+                    "A reply longer than one radio message gets the name and title shortened (…) to fit; "
+                    "one that still doesn't fit is split between lines."
                 ),
                 "default": DEFAULT_TEMPLATE,
                 "x-multiline": True,
@@ -536,9 +578,10 @@ class CheckInPlugin(BasePlugin):
             LOGGER.info("Check-ins: not replying to %s again so soon", sender)
             return []
         self._last_reply[participant_id] = now
-        return self._reply_actions(self.render_reply(sender, mine, participants))
+        return self._reply_actions(sender, mine, participants)
 
-    def render_reply(self, name: str, standing: Standing, participants: int) -> str:
+    def render_reply(self, name: str, standing: Standing, participants: int, max_bytes: Optional[int] = None) -> str:
+        """The reply to a check-in; with ``max_bytes``, shortened to fit if it can be (``fill_template``)."""
         values = {
             "title": self.config.title,
             "name": name,
@@ -551,13 +594,12 @@ class CheckInPlugin(BasePlugin):
             "keyword": self.config.keyword,
         }
         try:
-            text = self.config.reply_template.format_map(values)
+            return fill_template(self.config.reply_template, values, max_bytes)
         except (KeyError, ValueError, IndexError, AttributeError) as exc:
             LOGGER.warning("Check-ins: the reply template doesn't work (%s); using the default one", exc)
-            text = DEFAULT_TEMPLATE.format_map(values)
-        return text.strip()
+            return fill_template(DEFAULT_TEMPLATE, values, max_bytes)
 
-    def _reply_actions(self, text: str) -> list[PluginAction]:
+    def _reply_actions(self, name: str, standing: Standing, participants: int) -> list[PluginAction]:
         context = self._context
         chunking = getattr(getattr(context, "settings", None), "chunking", None)
         payload_limit = getattr(context, "mesh_payload_limit", None)
@@ -571,6 +613,7 @@ class CheckInPlugin(BasePlugin):
             }
         else:
             max_bytes, delay_ms, retry = FALLBACK_MESSAGE_BYTES, FALLBACK_CHUNK_DELAY_MS, {}
+        text = self.render_reply(name, standing, participants, max_bytes)
         return [
             SendMeshAction(text=part, channel_index=self.config.channel, delay_ms=delay_ms if index else 0, **retry)
             for index, part in enumerate(pack_lines(text, max_bytes))

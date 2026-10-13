@@ -555,9 +555,9 @@ Gamifies a weekly ritual: every Monday, nodes post `#MeshCoreMonday` on the Publ
 
 ```text
 📟 MeshCore Monday
-🏅 LMB-T is #13 to check in this week!
-🔥 Streak: 15 weeks
-👥 13 participants so far
+🏅 LMB-T is #13 this week
+🔥 Streak: 15
+👥 13 participants
 ```
 
 - **Rank** is the order of this week's first check-ins; the **streak** counts consecutive weeks with a check-in; **participants** is how many nodes have checked in this week. Checking in again gives the same rank with the current count. Weeks run Monday to Sunday in the configured `timezone`; on other days than `days` the keyword is ignored. A streak survives until a check-in day passes without a check-in.
@@ -582,12 +582,12 @@ plugins:
 |---|---|---|
 | `channel` | `0` | Channel slot where check-ins are posted and answered |
 | `keyword` | `#MeshCoreMonday` | Word or phrase a message must contain (any case) |
-| `title` | `MeshCore Monday` | Heads the reply and the leaderboard |
+| `title` | `MeshCore Monday` | Heads the reply and the leaderboard; at most 20 characters |
 | `days` | `[0]` | Weekdays check-ins count on, `0` = Monday … `6` = Sunday; `[]` = any day |
 | `timezone` | `UTC` | IANA time zone where days and weeks begin |
 | `reply` | `true` | Answer check-ins on the channel |
 | `reply_to_observed` | `true` | Also answer check-ins only other observers heard |
-| `reply_template` | the message above | Placeholders `{title}`, `{name}`, `{rank}`, `{streak}`, `{streak_weeks}` ("15 weeks"), `{participants}`, `{participants_label}` ("13 participants"), `{total}`, `{keyword}`. A reply longer than one radio message (120 bytes with the default chunking settings) is split between lines. |
+| `reply_template` | the message above | Placeholders `{title}`, `{name}`, `{rank}`, `{streak}`, `{streak_weeks}` ("15 weeks"), `{participants}`, `{participants_label}` ("13 participants"), `{total}`, `{keyword}`. A reply longer than one radio message (120 bytes with the default chunking settings) gets the name and title shortened (…) to fit; one that still doesn't fit is split between lines. The default reply always goes out as one message. |
 | `reply_cooldown_seconds` | `30` | Check-ins from the same node sooner than this after a reply still count, unanswered |
 | `api_token` | none | Bearer token for the leaderboard API (secret) |
 | `db_path` | `check_in.sqlite3` | Database file; a relative path is inside `MESHGRAM_DATA_DIR` |

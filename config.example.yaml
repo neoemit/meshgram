@@ -169,15 +169,16 @@ plugins:
       # streak (consecutive weeks) and the number of participants so far.
       channel: 0              # radio channel slot (0 is usually Public)
       keyword: "#MeshCoreMonday"
-      title: "MeshCore Monday"
+      title: "MeshCore Monday"  # heads the reply and the leaderboard; at most 20 characters
       days: [0]               # weekdays that count, 0 = Monday ... 6 = Sunday; [] = any day
       timezone: UTC           # IANA name, e.g. Europe/Rome; where days and weeks begin
       reply: true
       reply_to_observed: true # also reply to check-ins only observers heard
+      # Leave it out for the default (below), which always fits in one radio message.
       # Placeholders: {title} {name} {rank} {streak} {streak_weeks} {participants}
-      # {participants_label} {total} {keyword}. Split between lines if longer
-      # than one radio message.
-      reply_template: "📟 {title}\n🏅 {name} is #{rank} to check in this week!\n🔥 Streak: {streak_weeks}\n👥 {participants_label} so far"
+      # {participants_label} {total} {keyword}. If longer than one radio message,
+      # the name and title are shortened to fit; failing that, it's split between lines.
+      # reply_template: "📟 {title}\n🏅 {name} is #{rank} this week\n🔥 Streak: {streak}\n👥 {participants_label}"
       reply_cooldown_seconds: 30
       # Lets another site (the leaderboard in leaderboard/) read
       # /api/plugins/check_in/leaderboard with "Authorization: Bearer <token>".

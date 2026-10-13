@@ -12,7 +12,16 @@ from unittest import mock
 
 from meshgram.config import MeshgramSettings, WebConfig
 from meshgram.plugin import load_plugin_class
-from meshgram.plugins.check_in import DEFAULT_TEMPLATE, CheckInPlugin, pack_lines, split_sender, summary_record
+from meshgram.plugins.check_in import (
+    DEFAULT_TEMPLATE,
+    MAX_TITLE_LENGTH,
+    CheckInPlugin,
+    fill_template,
+    pack_lines,
+    shorten,
+    split_sender,
+    summary_record,
+)
 from meshgram.status import StatusRegistry
 from meshgram.text_utils import utf8_len
 from meshgram.types import MeshTextEvent, PluginContext
@@ -147,11 +156,11 @@ class CheckInTests(CheckInTestCase):
         self.assertEqual(actions[0].channel_index, 0)
         self.assertEqual(
             actions[0].text,
-            "📟 MeshCore Monday\n🏅 LMB-T is #1 to check in this week!\n🔥 Streak: 1 week\n👥 1 participant so far",
+            "📟 MeshCore Monday\n🏅 LMB-T is #1 this week\n🔥 Streak: 1\n👥 1 participant",
         )
         actions = await self.check_in("Zed", 1001, "#MESHCOREMONDAY")
-        self.assertIn("🏅 Zed is #2 to check in this week!", actions[0].text)
-        self.assertIn("👥 2 participants so far", actions[0].text)
+        self.assertIn("🏅 Zed is #2 this week", actions[0].text)
+        self.assertIn("👥 2 participants", actions[0].text)
         # Asking again later: the same rank, the current count.
         self.now += 60
         actions = await self.check_in("LMB-T", 1002)
@@ -182,7 +191,7 @@ class CheckInTests(CheckInTestCase):
         await self.check_in("LMB-T", 900)
         self.now = MONDAY_9AM
         actions = await self.check_in("LMB-T", 1000)
-        self.assertIn("🔥 Streak: 2 weeks", actions[0].text)
+        self.assertIn("🔥 Streak: 2\n", actions[0].text)
         # Tuesday: the streak holds until next Monday passes without a check-in.
         self.now = MONDAY_9AM + 86400
         board = await self.plugin.leaderboard()
@@ -233,16 +242,37 @@ class CheckInTests(CheckInTestCase):
         entry = (await self.plugin.leaderboard())["leaderboard"][0]
         self.assertEqual((entry["id"], entry["resolved"]), (KEY_B, True))
 
-    async def test_long_reply_is_split_between_lines(self):
-        name = "A very long node name, 32 chars"
+    async def test_longest_name_and_title_fit_in_one_message(self):
+        # MeshCore node names are at most 31 bytes.
+        name = "A very long node name, 31 bytes"
+        await self.plugin.apply_settings({"title": "T" * MAX_TITLE_LENGTH})
         actions = await self.check_in(name, 1000)
+        self.assertEqual(len(actions), 1)
+        self.assertLessEqual(utf8_len(actions[0].text), 120)
+        self.assertEqual(
+            actions[0].text,
+            DEFAULT_TEMPLATE.format(title="T" * MAX_TITLE_LENGTH, name=name, rank=1, streak=1, participants_label="1 participant"),
+        )
+
+    async def test_reply_too_long_shortens_the_name_and_title(self):
+        await self.plugin.apply_settings({"title": "🌍" * MAX_TITLE_LENGTH})
+        actions = await self.check_in("📡📡📡📡📡📡📡 Hilltop", 1000)
+        self.assertEqual(len(actions), 1)
+        self.assertLessEqual(utf8_len(actions[0].text), 120)
+        lines = actions[0].text.splitlines()
+        self.assertTrue(lines[0].startswith("📟 🌍") and lines[0].endswith("…"), lines[0])
+        self.assertTrue(lines[1].startswith("🏅 📡📡") and lines[1].endswith("… is #1 this week"), lines[1])
+
+    async def test_reply_that_cant_fit_is_split_between_lines(self):
+        template = "{title} {keyword}\n" + "x" * 100 + "\n{name} is #{rank}"
+        await self.plugin.apply_settings({"reply_template": template})
+        actions = await self.check_in("LMB-T", 1000)
         self.assertEqual(len(actions), 2)
         self.assertTrue(all(utf8_len(action.text) <= 120 for action in actions))
         self.assertEqual((actions[0].delay_ms, actions[1].delay_ms), (0, 2500))
-        self.assertEqual(
-            "\n".join(action.text for action in actions),
-            DEFAULT_TEMPLATE.format(title="MeshCore Monday", name=name, rank=1, streak_weeks="1 week", participants_label="1 participant"),
-        )
+        self.assertEqual("\n".join(action.text for action in actions), template.format(
+            title="MeshCore Monday", keyword="#MeshCoreMonday", name="LMB-T", rank=1
+        ))
 
     async def test_bad_template_falls_back_to_the_default(self):
         await self.plugin.apply_settings({"reply_template": "{nope} {name}"})
@@ -268,6 +298,30 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(split_sender("LMB-T: hi: there"), ("LMB-T", "hi: there"))
         self.assertEqual(split_sender("no sender"), (None, "no sender"))
         self.assertEqual(split_sender("x" * 40 + ": hi")[0], None)
+
+    def test_default_reply_fits_with_three_digit_numbers(self):
+        values = {
+            "title": "T" * MAX_TITLE_LENGTH,
+            "name": "N" * 31,
+            "rank": 999,
+            "streak": 999,
+            "participants_label": "999 participants",
+        }
+        text = fill_template(DEFAULT_TEMPLATE, values, 120)
+        self.assertEqual((text, utf8_len(text)), (DEFAULT_TEMPLATE.format_map(values), 119))
+        # A thousand participants: the longer of the name and title loses characters (the name, here).
+        values.update(rank=1000, participants_label="1000 participants")
+        text = fill_template(DEFAULT_TEMPLATE, values, 120)
+        self.assertEqual(utf8_len(text), 120)
+        self.assertIn("🏅 " + "N" * 27 + "… is #1000", text)
+        self.assertIn("📟 " + "T" * MAX_TITLE_LENGTH + "\n", text)
+        self.assertEqual(fill_template(DEFAULT_TEMPLATE, values), DEFAULT_TEMPLATE.format_map(values))
+
+    def test_shorten(self):
+        self.assertEqual(shorten("Hilltop", 7), "Hilltop")
+        self.assertEqual(shorten("Hilltop", 6), "Hillt…")
+        self.assertEqual(shorten("Hill top", 6), "Hill…")
+        self.assertEqual(shorten("ab‍cd", 4), "ab…")
 
     def test_pack_lines(self):
         self.assertEqual(pack_lines("aaa\nbbb\nccc", 7), ["aaa\nbbb", "ccc"])
@@ -383,7 +437,7 @@ class ManagementApiTests(CheckInTestCase):
 
         # Checking in on Monday continues the imported streak.
         actions = await self.check_in("LMB-T", 1000)
-        self.assertIn("🔥 Streak: 16 weeks", actions[0].text)
+        self.assertIn("🔥 Streak: 16\n", actions[0].text)
 
         status, payload = await self.call("GET", "/export?format=csv")
         rows = list(csv.DictReader(io.StringIO(payload.decode())))
