@@ -10,8 +10,12 @@ They differ only in the broker (server, port, WebSockets or TCP) and the login:
 - ``token``: a MeshCore auth token, an Ed25519-signed JWT whose ``publicKey`` claim
   is the radio's public key and ``aud`` the broker, with the username
   ``v1_<PUBLIC_KEY>``. The radio signs it itself (the private key never leaves the
-  device); a private key can be configured instead. MeshMapper, LetsMesh.
-- ``none``: anonymous, the observer known by the public key in its topics. MeshRank.
+  device); a private key can be configured instead. MeshMapper, LetsMesh. The token
+  can also name the observer's owner (``owner`` claim: the public key of the owner's
+  own companion, and ``email``: their account's address), which is how LetsMesh and
+  MeshMapper attach an observer to an account, as meshcore-packet-capture does.
+- ``none``: anonymous, the observer known by the public key in its topics. MeshRank,
+  whose registration key goes in the topics instead (``{TOKEN}``).
 - ``password``: a username and password the broker operator issued.
 
 Device-signed and anonymous observers can only publish. The packets *other*
@@ -62,6 +66,8 @@ TRANSPORTS = ("websockets", "tcp")
 MQTT_AUTH_FAILURE_CODES = {4, 5, 134, 135}
 
 HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
+EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+TOPIC_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 # --- Settings ----------------------------------------------------------------
@@ -121,6 +127,11 @@ class ObserverConfig:
     password: str = ""
     token_audience: str = ""
     token_ttl_seconds: int = 3600
+    # Owner claims in the auth token: link the observer to an account (LetsMesh, MeshMapper).
+    owner_public_key: str = ""
+    owner_email: str = ""
+    # Fills ``{TOKEN}`` in the topics (MeshRank's registration key).
+    topic_token: str = ""
     status_interval_seconds: int = 300
     client_id_prefix: str = "meshgram_"
     topic_status: str = DEFAULT_TOPIC_STATUS
@@ -135,6 +146,9 @@ class ObserverConfig:
     subscribe_port: int = 443
     subscribe_transport: str = "websockets"
     subscribe_tls: bool = True
+    # What the server's operator offers for reading other observers' packets, said when
+    # there's no subscriber account.
+    subscriber_hint: str = ""
     private_key: str = ""
     # Keys in the StatusRegistry (the web app's connection dots).
     status_publish: str = "mqtt_publish"
@@ -175,6 +189,9 @@ class ObserverConfig:
             password=password,
             token_audience=str(audience if audience is not None else server).strip(),
             token_ttl_seconds=max(600, _as_int(pick("token_ttl_seconds"), 3600)),
+            owner_public_key=_clean_hex(pick("owner_public_key")),
+            owner_email=str(pick("owner_email") or "").strip().lower(),
+            topic_token=str(pick("topic_token") or "").strip(),
             status_interval_seconds=max(30, _as_int(pick("status_interval_seconds"), 300)),
             client_id_prefix=str(pick("client_id_prefix") or "meshgram_"),
             topic_status=str(pick("topic_status") or DEFAULT_TOPIC_STATUS),
@@ -214,15 +231,35 @@ class ObserverConfig:
             return "a username is needed to log in with a password"
         if self.private_key and (len(self.private_key) != 128 or not HEX_RE.match(self.private_key)):
             return "private_key must be 128 hex characters (64-byte MeshCore private key)"
+        if self.owner_public_key and (len(self.owner_public_key) != 64 or not HEX_RE.match(self.owner_public_key)):
+            return "owner_public_key must be 64 hex characters (a MeshCore public key)"
+        if self.owner_email and not EMAIL_RE.match(self.owner_email):
+            return "owner_email must be an email address"
+        if self.topic_token and not TOPIC_TOKEN_RE.match(self.topic_token):
+            return "the registration key (topic token) may only have letters, digits, '-' and '_'"
+        if not self.topic_token and any("{TOKEN}" in topic for topic in (self.topic_status, self.topic_packets)):
+            return "the topics need a token ({TOKEN}) and none is set"
         return None
+
+    def owner_claims(self) -> dict[str, str]:
+        """The auth token's owner claims; only over verified TLS, as meshcoretomqtt sends them."""
+        if not self.tls or not self.tls_verify:
+            return {}
+        claims = {}
+        if self.owner_public_key:
+            claims["owner"] = self.owner_public_key
+        if self.owner_email:
+            claims["email"] = self.owner_email
+        return claims
 
     def subscriber_disabled_reason(self) -> Optional[str]:
         """Why other observers' packets won't be received over MQTT, or ``None`` if the subscriber should run."""
         if not self.subscribe:
             return "Turned off (subscribe: false)"
         if not self.subscribe_username or not self.subscribe_password:
+            hint = self.subscriber_hint or "observers can only publish."
             return (
-                "Needs a subscriber account: observers can only publish. "
+                f"Needs a subscriber account: {hint} "
                 f"Set subscribe_username and subscribe_password in the {self.plugin} plugin settings"
             )
         return None
@@ -431,8 +468,11 @@ class ObserverUploader:
     def _set_status(self, state: str, detail: str) -> None:
         set_status(self.status, self.config.status_publish, state, detail, self.config.publish_label)
 
-    def _topic(self, template: str) -> str:
-        return template.replace("{IATA}", self.config.iata).replace("{PUBLIC_KEY}", self._public_key)
+    def _topic(self, template: str, shown: bool = False) -> str:
+        """``template`` filled in; ``shown``: for logs and the web app, the token left out."""
+        token = "<token>" if shown and self.config.topic_token else self.config.topic_token
+        topic = template.replace("{IATA}", self.config.iata).replace("{PUBLIC_KEY}", self._public_key)
+        return topic.replace("{TOKEN}", token)
 
     async def on_device_connected(self, transport: Any) -> None:
         self._transport = transport
@@ -508,6 +548,7 @@ class ObserverUploader:
         claims: dict[str, Any] = {}
         if self.config.token_audience:
             claims["aud"] = self.config.token_audience
+        claims.update(self.config.owner_claims())
         claims["client"] = CLIENT_VERSION
         signing_input = build_token_signing_input(
             self._public_key, claims, int(time.time()), self.config.token_ttl_seconds
@@ -588,6 +629,7 @@ class ObserverUploader:
         client.loop_start()
         self._client = client
         self._set_status(CONNECTING, f"Connecting to {cfg.server}:{cfg.port}")
+        self._log_owner()
         LOGGER.info(
             "%s: connecting to %s:%s (transport=%s, tls=%s, auth=%s, iata=%s, observer=%s)",
             self._label,
@@ -600,6 +642,23 @@ class ObserverUploader:
             self._public_key,
         )
 
+    def _log_owner(self) -> None:
+        cfg = self.config
+        if cfg.auth != AUTH_TOKEN or not (cfg.owner_public_key or cfg.owner_email):
+            return
+        if not cfg.owner_claims():
+            LOGGER.warning("%s: owner_public_key/owner_email are only sent over verified TLS; not sending them", self._label)
+            return
+        owner = ", ".join(
+            part
+            for part in (
+                f"email {cfg.owner_email}" if cfg.owner_email else "",
+                f"owner key {cfg.owner_public_key[:12]}…" if cfg.owner_public_key else "",
+            )
+            if part
+        )
+        LOGGER.info("%s: the login names the observer's owner (%s)", self._label, owner)
+
     # paho callbacks run on paho's network thread.
     def _on_connect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any = None) -> None:
         if _is_failure(reason_code):
@@ -610,7 +669,7 @@ class ObserverUploader:
                 self._request_token_refresh()
             return
         self._connected = True
-        topic = self._topic(self.config.topic_packets)
+        topic = self._topic(self.config.topic_packets, shown=True)
         LOGGER.info("%s: connected; publishing packets to %s", self._label, topic)
         self._set_status(CONNECTED, f"{self.config.server} → {topic}")
         self._publish_status("online")
@@ -721,8 +780,12 @@ class ObserverSubscriber:
     """Read-only MQTT session that relays other observers' packets to the transport.
 
     It logs in with a subscriber account (username/password) because the brokers
-    only let those subscribe; observer accounts are publish-only.
+    only let those subscribe; observer accounts are publish-only. Some brokers grant
+    any subscription and then deliver nothing the account may not read (MeshRank),
+    so a subscription that stays silent for ``quiet_seconds`` says so in its status.
     """
+
+    quiet_seconds = 600.0
 
     def __init__(
         self,
@@ -742,6 +805,8 @@ class ObserverSubscriber:
         self._subscribed = False
         self._denied = False
         self._remote_seen = False
+        self._quiet_timer: Optional[asyncio.TimerHandle] = None
+        self._quiet_reported = False
         self.received = 0
 
     @property
@@ -852,6 +917,32 @@ class ObserverSubscriber:
         self._subscribed = True
         LOGGER.info("%s: subscribed to %s for other observers' packets", self._label, self._topic)
         self._set_status(CONNECTED, f"{self.config.subscribe_server} ← {self._topic}")
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._watch_quiet)
+
+    def _watch_quiet(self) -> None:
+        if self._quiet_timer is not None:
+            self._quiet_timer.cancel()
+        self._quiet_timer = asyncio.get_running_loop().call_later(self.quiet_seconds, self._check_quiet, self.received)
+
+    def _check_quiet(self, received_before: int) -> None:
+        self._quiet_timer = None
+        if self._client is None or not self._subscribed or self.received != received_before:
+            return
+        minutes = max(1, round(self.quiet_seconds / 60))
+        self._quiet_reported = True
+        LOGGER.warning(
+            "%s: subscribed to %s but no packets from other observers in %d minutes: the account may not be "
+            "allowed to read them, the region code may not match, or the region is quiet",
+            self._label,
+            self._topic,
+            minutes,
+        )
+        self._set_status(
+            CONNECTED,
+            f"{self.config.subscribe_server} ← {self._topic}; no packets in {minutes} min "
+            "(the account may not be allowed to read them)",
+        )
 
     def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
         observation = parse_observer_packet(str(message.topic), message.payload, self._own_public_key)
@@ -862,6 +953,9 @@ class ObserverSubscriber:
         if self._loop is None or self._loop.is_closed() or not callable(dispatch):
             return
         self.received += 1
+        if self._quiet_reported:
+            self._quiet_reported = False
+            self._set_status(CONNECTED, f"{self.config.subscribe_server} ← {self._topic}")
         if not self._remote_seen:
             self._remote_seen = True
             LOGGER.info(
@@ -872,6 +966,9 @@ class ObserverSubscriber:
         asyncio.run_coroutine_threadsafe(dispatch(observation), self._loop)
 
     async def stop(self) -> None:
+        if self._quiet_timer is not None:
+            self._quiet_timer.cancel()
+            self._quiet_timer = None
         client = self._client
         if client is None:
             return
@@ -999,7 +1096,7 @@ SUBSCRIBER_SETTINGS = {
     "subscribe": {
         "type": "boolean",
         "title": "Receive other observers' packets",
-        "description": "Needs a subscriber account from the server's operator.",
+        "description": "Needs a subscriber account from the server's operator (see the README).",
         "default": True,
     },
     "subscribe_username": {
@@ -1010,6 +1107,22 @@ SUBSCRIBER_SETTINGS = {
     "subscribe_password": {"type": "string", "writeOnly": True, "title": "Subscriber password"},
     "subscribe_server": {"type": "string", "title": "Subscriber MQTT server", "description": "Empty: the MQTT server."},
     "subscribe_port": {"type": "integer", "minimum": 1, "maximum": 65535, "title": "Subscriber MQTT port"},
+}
+OWNER_SETTINGS = {
+    "owner_email": {
+        "type": "string",
+        "title": "Owner email",
+        "description": "The email you log in to the website with: the observer shows up in your account.",
+        "pattern": EMAIL_RE.pattern,
+        "x-pattern-message": "must be an email address",
+    },
+    "owner_public_key": {
+        "type": "string",
+        "title": "Owner public key",
+        "description": "Optional: your own companion's public key (64 hex characters), shown as the observer's owner.",
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "x-pattern-message": "must be 64 hex characters",
+    },
 }
 PRIVATE_KEY_SETTING = {
     "type": "string",

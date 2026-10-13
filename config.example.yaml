@@ -137,6 +137,10 @@ plugins:
       # subscribe_password: ""
       # subscribe_server: mqtt.meshmapper.net
       # subscribe_port: 443
+      # Optional owner claims in the login token (your account's email, your
+      # companion's public key), as meshcore-packet-capture sends them:
+      # owner_email: ""
+      # owner_public_key: ""
       # Auth tokens are signed by the radio itself. Only if your firmware can't
       # sign on-device, set the radio's private key (128 hex characters):
       # private_key: ""
@@ -151,8 +155,14 @@ plugins:
       # Required: your region code.
       iata: "XXX"
       servers: [us, eu]
+      # Attaches the observer to your LetsMesh account: the email you log in to
+      # LetsMesh with, sent in the login token (only over verified TLS).
+      # owner_email: ""
+      # Optional: your companion's public key (64 hex), shown as the owner.
+      # owner_public_key: ""
       # status_interval_seconds: 300
-      # Other observers' packets need a subscriber account from the operator:
+      # Other observers' packets need a subscriber account the LetsMesh team
+      # creates (observer logins can only publish; see the README):
       # subscribe_username: ""
       # subscribe_password: ""
       # private_key: ""  # only if the firmware can't sign on the radio itself
@@ -164,11 +174,13 @@ plugins:
       # MQTT over TLS) as an observer. No account needed: the radio is known by
       # its public key. Required: your region code.
       iata: "XXX"
-      # The login from MeshRank's observer registration (Account -> Observer
-      # Setup) attaches the observer to your account:
-      # username: ""
-      # password: ""
-      # Other observers' packets need a subscriber account from the operator:
+      # A registration key (meshrank.net: Account -> Observer Setup -> MQTT
+      # observer registration) attaches the observer to your account; it then
+      # uploads to meshrank/uplink/<KEY>/<PUBLIC_KEY>/... The key itself, or
+      # the packets topic MeshRank shows with it:
+      # registration_key: ""
+      # Other observers' packets need an account with read access from
+      # MeshRank's operator (uplinks can only publish; see the README):
       # subscribe_username: ""
       # subscribe_password: ""
 

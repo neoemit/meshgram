@@ -4,14 +4,20 @@ LetsMesh runs two MQTT brokers, US and EU, both on WebSockets + TLS (port 443) w
 MeshCore's device-signed login (``v1_<PUBLIC_KEY>`` and an Ed25519 JWT whose ``aud``
 is the broker), as in meshcoretomqtt's LetsMesh preset. The plugin uploads to the
 ones picked in ``servers`` (both by default); see ``mqtt_observer`` for the protocol.
-Observer logins can only publish: other observers' packets need a subscriber account
-from the operator (``subscribe_username`` / ``subscribe_password``).
+
+The observer is attached to a LetsMesh account the way meshcore-packet-capture and
+meshcoretomqtt do it: the token carries the account's email (``owner_email``, the
+address used to log in to LetsMesh) and optionally the owner's companion public key
+(``owner_public_key``). LetsMesh's brokers (meshcore-mqtt-broker) only let
+operator-issued subscriber accounts read: other observers' packets need one
+(``subscribe_username`` / ``subscribe_password``).
 """
 from __future__ import annotations
 
 from typing import Any
 
 from .mqtt_observer import (
+    OWNER_SETTINGS,
     PRIVATE_KEY_SETTING,
     REGION_SETTING,
     STATUS_INTERVAL_SETTING,
@@ -26,6 +32,10 @@ SERVERS: dict[str, dict[str, Any]] = {
     "eu": {"label": "LetsMesh EU", "server": "mqtt-eu-v1.letsmesh.net", "status_publish": "letsmesh_eu_publish"},
 }
 STATUS_SUBSCRIBE = "letsmesh_subscribe"
+SUBSCRIBER_HINT = (
+    "LetsMesh observer logins can only publish; reading other observers' packets takes a subscriber "
+    "account the LetsMesh team creates."
+)
 
 
 def preset(region: str) -> dict[str, Any]:
@@ -38,6 +48,7 @@ def preset(region: str) -> dict[str, Any]:
         "tls": True,
         "auth": "token",
         "status_subscribe": STATUS_SUBSCRIBE,
+        "subscriber_hint": SUBSCRIBER_HINT,
         **server,
     }
 
@@ -55,7 +66,7 @@ class LetsMeshPlugin(MqttObserverPlugin):
     title = "LetsMesh observer"
     description = (
         "Uploads every packet the radio hears to LetsMesh's packet analyzer (letsmesh.net) as an observer, "
-        "on its US and/or EU MQTT servers."
+        "on its US and/or EU MQTT servers. Your LetsMesh email attaches it to your account."
     )
     settings_schema = {
         "type": "object",
@@ -75,6 +86,7 @@ class LetsMeshPlugin(MqttObserverPlugin):
                 "minItems": 1,
                 "default": list(SERVERS),
             },
+            **OWNER_SETTINGS,
             **SUBSCRIBER_SETTINGS,
             "status_interval_seconds": STATUS_INTERVAL_SETTING,
             "private_key": PRIVATE_KEY_SETTING,

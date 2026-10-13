@@ -471,10 +471,11 @@ The defaults already point at MeshMapper's broker. Everything else is optional:
 | `subscribe` | `true` | Also receive the packets other observers in your region upload, for the `packet_map` plugin (live feed, plus MQTT with a subscriber account). See **Other observers' packets** below. `false` turns both off. |
 | `live_feed` | `true` | Receive them from MeshMapper's public live feed. Needs no account. |
 | `live_feed_url` | `wss://analyzer.meshmapper.net/ws` | Live feed WebSocket |
-| `subscribe_username` / `subscribe_password` | — | Optional MQTT subscriber account (see **Other observers' packets**) |
+| `subscribe_username` / `subscribe_password` | — | Optional MQTT subscriber account (see **Other observers' packets**, and [Receiving other observers' packets over MQTT](#receiving-other-observers-packets-over-mqtt)) |
 | `subscribe_server` / `subscribe_port` | same as `server` / `port` | Broker to subscribe on, if it's not the one you upload to (e.g. a regional broker) |
 | `subscribe_transport` / `subscribe_tls` | same as `transport` / `tls` | Transport and TLS for the subscriber connection (`websocket_path` and `tls_verify` are shared) |
 | `topic_subscribe` | `meshcore/{IATA}/+/packets` | Topic filter used for that |
+| `owner_email` / `owner_public_key` | — | Optional owner claims in the login token (your account's email; your companion's public key), as meshcore-packet-capture sends them. See [Attaching the observer to your account](#letsmesh-and-meshrank--more-mqtt-observers). |
 | `private_key` | — | Optional. See **Authentication** below. |
 
 **Authentication.** MeshMapper uses MeshCore's "device signing": the MQTT username is `v1_<PUBLIC_KEY>` and the password is a short-lived Ed25519-signed JWT (`publicKey`, `iat`, `exp`, `aud=mqtt.meshmapper.net`, `client`). By default Meshgram asks the **radio to sign** the token over the companion protocol, so the private key never leaves the device. If your companion firmware is too old to sign on the device, the log shows `could not create auth token`. You can then either update the firmware or set `private_key` to the radio's 64-byte private key, written as 128 hex characters. Meshgram checks that the key matches the connected radio before using it. Anyone with the key can impersonate the radio, so keep `config.yaml` private (`chmod 600`).
@@ -504,10 +505,15 @@ Notes:
 
 ### `letsmesh` and `meshrank` — more MQTT observers
 
-Two more packet analyzers that take the same observer uploads (topics `meshcore/<IATA>/<PUBLIC_KEY>/packets` and `/status`, the same JSON as above), as their presets in [meshcoretomqtt](https://github.com/Cisien/meshcoretomqtt/tree/main/presets) set them up. Turn on any mix of `meshmapper`, `letsmesh` and `meshrank` (in `config.yaml` or the control panel's **Plugins** tab): each uploads independently, and a problem with one doesn't affect the others.
+Two more packet analyzers that take the same observer uploads (the same JSON as above), as their presets in [meshcoretomqtt](https://github.com/Cisien/meshcoretomqtt/tree/main/presets) and [meshcore-packet-capture](https://github.com/agessaman/meshcore-packet-capture/tree/main/presets) set them up. Turn on any mix of `meshmapper`, `letsmesh` and `meshrank` (in `config.yaml` or the control panel's **Plugins** tab). Each one uploads on its own, so a problem with one doesn't affect the others.
 
 - **`letsmesh`** — [LetsMesh](https://letsmesh.net)'s packet analyzer. It has two brokers, `mqtt-us-v1.letsmesh.net` and `mqtt-eu-v1.letsmesh.net` (port 443, WebSockets + TLS), and the plugin uploads to the ones ticked under **Servers** (`servers: [us, eu]`, both by default). The login is the same device-signed token as MeshMapper's, with the broker as its audience, so the radio signs one per broker (or `private_key` is used, as above).
-- **`meshrank`** — [MeshRank](https://meshrank.net). Its broker (`meshrank.net`, port 8883, MQTT over TLS) takes **anonymous** observers: data flows right away, the observer known by the public key in its topics, and status documents aren't retained. To attach the observer to your MeshRank account, create a registration under **Account → Observer Setup** on meshrank.net and set its login as `username` / `password`; the observer keeps its identity.
+- **`meshrank`** — [MeshRank](https://meshrank.net). Its broker (`meshrank.net`, port 8883, MQTT over TLS) takes **anonymous** observers: data flows right away, the observer is known by the public key in its topics (`meshcore/<IATA>/<PUBLIC_KEY>/…`), and status documents aren't retained.
+
+**Attaching the observer to your account.** Both networks do it the way meshcore-packet-capture does:
+
+- **LetsMesh:** set `owner_email` to the email you log in to LetsMesh with (the forum account at [forum.letsmesh.net](https://forum.letsmesh.net)). The login token then carries it as its `email` claim, and the observer shows up in your LetsMesh dashboard. Optionally, set `owner_public_key` to your own companion's public key (64 hex characters). It goes in the token's `owner` claim, and LetsMesh shows that companion as the observer's owner. Both are sent only over verified TLS (the default), like meshcoretomqtt does. The log says `the login names the observer's owner (email …)`. MeshMapper takes the same two settings.
+- **MeshRank:** log in at meshrank.net, open **Account → Observer Setup → MQTT observer registration** and click **Create registration key**. Set `registration_key` to that key. You can also paste the whole `packets = "meshrank/uplink/<KEY>/{PUBLIC_KEY}/packets"` line from the config MeshRank generates, and Meshgram picks the key out of it. The observer then uploads to `meshrank/uplink/<KEY>/<PUBLIC_KEY>/status` and `/packets`. It is still anonymous (the key is in the topic) and keeps its public-key identity. MeshRank marks it registered after ten minutes or 100 valid packets. The key works like a password, so it's masked in the control panel and kept out of the logs. *Earlier Meshgram versions asked for a MeshRank `username` / `password`. MeshRank doesn't use those: they're now ignored, with a warning in the log.*
 
 ```yaml
 plugins:
@@ -516,27 +522,74 @@ plugins:
     settings:
       iata: "YOW"
       servers: [us, eu]
+      owner_email: "you@example.com"     # your LetsMesh login: the observer shows up in your account
+      # owner_public_key: ""             # optional: your companion's public key
   - name: meshrank
     enabled: true
     settings:
       iata: "YOW"
-      # username: ""  # MeshRank observer registration (optional)
-      # password: ""
+      # registration_key: ""             # from Account → Observer Setup (optional)
 ```
 
 | Setting | Default | Plugins | Description |
 |---|---|---|---|
 | `iata` | — (**required**) | both | Region code |
 | `servers` | `[us, eu]` | `letsmesh` | Which LetsMesh brokers to upload to |
-| `username` / `password` | — | `meshrank` | Registration login (otherwise anonymous) |
+| `owner_email` | — | `letsmesh` (and `meshmapper`) | Your account's email, sent in the login token: attaches the observer to your account |
+| `owner_public_key` | — | `letsmesh` (and `meshmapper`) | Your companion's public key (64 hex), sent as the token's `owner` |
+| `registration_key` | — | `meshrank` | MeshRank registration key (otherwise anonymous, unregistered) |
 | `server` / `port` / `transport` | `meshrank.net` / `8883` / `tcp` | `meshrank` | Broker override |
 | `status_interval_seconds` | `300` | both | How often the online status is republished |
 | `subscribe` | `true` | both | Receive other observers' packets, when there's a subscriber account |
-| `subscribe_username` / `subscribe_password` | — | both | MQTT subscriber account from the broker's operator (observer logins can only publish, as on MeshMapper) |
+| `subscribe_username` / `subscribe_password` | — | both | MQTT subscriber account from the broker's operator. See [Receiving other observers' packets over MQTT](#receiving-other-observers-packets-over-mqtt) |
 | `subscribe_server` / `subscribe_port` | the upload broker | both | Where the subscriber account logs in (`letsmesh`: the first server picked) |
 | `private_key` | — | `letsmesh` | As for `meshmapper` |
 
 Their connections appear in the web app's header and panel like MeshMapper's (`LetsMesh US MQTT (publish)`, `MeshRank MQTT (publish)`, …), and the log lines start with `LetsMesh US:`, `LetsMesh EU:` or `MeshRank:`.
+
+### Receiving other observers' packets over MQTT
+
+Uploading needs no account, but *reading* the packets other observers upload does, on every one of these networks. This guide covers the subscriber side of `meshmapper`, `letsmesh` and `meshrank`.
+
+**Why an observer login can't read.** An observer logs in as a *publisher*: with a device-signed token (MeshMapper, LetsMesh) or anonymously (MeshRank). Publishers may only write to their own topics. To read `meshcore/<IATA>/+/packets`, you need a *subscriber account*: a username and password that the broker's operator creates for you. Your website login is **not** a broker account. Neither is the LetsMesh email or MeshRank registration key above: those only attach your uploads to your account. How each broker treats a publisher that tries to read:
+
+| Network | Broker | What an observer login gets when it subscribes | How to get read access |
+|---|---|---|---|
+| MeshMapper | meshcore-mqtt-broker | Connection closed ("Subscribe denied (publisher)") | Ask MeshMapper's admins for a subscriber account. Or use the free **live feed** (on by default, no packet bytes; see `meshmapper` above) |
+| LetsMesh | meshcore-mqtt-broker | Connection closed, as on MeshMapper | Ask the LetsMesh team (e.g. on [forum.letsmesh.net](https://forum.letsmesh.net)) for a subscriber account. LetsMesh has no public feed to fall back on |
+| MeshRank | its own | The subscription is *granted*, but no packets are ever delivered | Ask MeshRank's operator (meshrank.net) for an account with read access. Neither the anonymous preset nor a registration key can read |
+
+None of the three hands out subscriber accounts by itself. They're created by hand by the broker's operator, if they agree to. Meshgram can't sign up for one for you, and doesn't try to subscribe with the observer login (on MeshMapper and LetsMesh, that would also drop the upload connection).
+
+**Setting it up**, once the operator gives you a username and password:
+
+1. In the control panel's **Plugins** tab, open the plugin (or edit `config.yaml`) and set:
+
+   ```yaml
+   - name: letsmesh            # or meshmapper / meshrank
+     enabled: true
+     settings:
+       iata: "YOW"
+       subscribe: true         # the default
+       subscribe_username: "the-account-name"
+       subscribe_password: "the-password"
+       # Only if the operator says the account is on another broker / port:
+       # subscribe_server: mqtt-eu-v1.letsmesh.net
+       # subscribe_port: 443
+       # subscribe_transport: websockets   # or tcp
+       # subscribe_tls: true
+   ```
+
+   `letsmesh` reads from the first server ticked under **Servers** unless `subscribe_server` says otherwise. The account only needs to read `meshcore/<IATA>/+/packets` for your region (`topic_subscribe` changes the filter, if the operator uses another layout).
+2. Save. The control panel applies it right away (restart Meshgram if you edited `config.yaml`). The plugin opens a second, read-only MQTT connection next to the upload one.
+3. Check the **MQTT** dot in the web app's header. The panel lists `<Network> MQTT (subscribe)` for each plugin, and the log tells you where it stands:
+   - `subscribed to meshcore/YOW/+/packets for other observers' packets`, then `receiving other observers' packets (first from …)`: it works.
+   - `subscriber login refused …; check subscribe_username/subscribe_password`: wrong credentials, or the account is already connected as many times as it's allowed.
+   - `the broker refused the subscription to …`: the account may not read that topic. Meshgram doesn't ask again until it restarts.
+   - `subscribed to … but no packets from other observers in 10 minutes`: the broker took the subscription but sends nothing. That's what MeshRank does without read access. It also happens with an `iata` the network doesn't use, or in a very quiet region. The status says the same, and it clears with the first packet.
+   - `Needs a subscriber account: …` (hollow dot): no account is set. Uploads are unaffected.
+
+**What you get.** Packets from other observers carry their bytes, so the map shows them with their routes and adverts. Channel messages in them are decrypted with your radio's channel keys and reach every plugin (see the next section). Each packet counts once, however many observers or servers report it. Set `subscribe: false` to turn it all off. Uploads never depend on it.
 
 ### Messages other observers heard
 
@@ -739,7 +792,8 @@ Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji 
 - `could not create auth token` means the radio couldn't sign the token. Update the companion firmware or set `private_key`.
 - The `iata` value must exactly match the server's region code.
 - The observer only appears after the radio has heard at least one packet. Set `runtime.log_level: DEBUG` to see each `MeshMapper: published packet …` line.
-- No packets from other observers: check **MeshMapper live feed** in the web app's connections panel (it says why it's down) and that `subscribe` / `live_feed` aren't `false`. Quiet regions can go minutes without a packet. The **MQTT (subscribe)** connections stay off without a subscriber account, which is fine. Device-signed observer logins can only publish (see **Other observers' packets**).
+- No packets from other observers: check **MeshMapper live feed** in the web app's connections panel (it says why it's down) and that `subscribe` / `live_feed` aren't `false`. Quiet regions can go minutes without a packet. The **MQTT (subscribe)** connections stay off without a subscriber account, which is fine: observer logins can only publish. See [Receiving other observers' packets over MQTT](#receiving-other-observers-packets-over-mqtt).
+- The observer doesn't show up in your LetsMesh or MeshRank account: for LetsMesh, set `owner_email` to your LetsMesh login email. For MeshRank, set `registration_key` (see [`letsmesh` and `meshrank`](#letsmesh-and-meshrank--more-mqtt-observers)).
 
 ### Logs appear duplicated
 - Check there's only one container (`docker ps -a`) and one Python process (`docker exec meshgram sh -c 'ls /proc | grep "^[0-9]*$"'`). If output is duplicated only in your terminal but the raw container log (`docker inspect <name> --format '{{.LogPath}}'`) shows one copy per line, it's a transient compose/terminal artifact — restart with `docker compose up -d` and re-attach with `docker compose logs -f`.
@@ -787,7 +841,7 @@ meshgram/
 │       ├── mqtt_observer.py      # MQTT observer uploads/subscriptions shared by the three below
 │       ├── meshmapper.py         # MeshMapper observer (+ its live feed)
 │       ├── letsmesh.py           # LetsMesh observer (US/EU brokers)
-│       ├── meshrank.py           # MeshRank observer (anonymous)
+│       ├── meshrank.py           # MeshRank observer (anonymous, registration key)
 │       ├── packet_map.py         # map/messages data for the web app
 │       ├── packet_map_store.py   # packet map SQLite persistence
 │       ├── check_in.py           # weekly check-ins: detection, replies, management

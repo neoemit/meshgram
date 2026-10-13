@@ -44,6 +44,7 @@ from meshgram.types import PluginAction, PluginContext
 from .mqtt_observer import (
     CLIENT_VERSION,
     HEX_RE,
+    OWNER_SETTINGS,
     ObserverConfig,
     ObserverSubscriber,
     ObserverUploader,
@@ -430,6 +431,7 @@ class MeshMapperPlugin(BasePlugin):
                 "pattern": "^[A-Za-z0-9]{2,8}$",
                 "x-pattern-message": "must be a region code like YUL",
             },
+            **OWNER_SETTINGS,
             "subscribe": {
                 "type": "boolean",
                 "title": "Receive other observers' packets",
