@@ -7,8 +7,8 @@ this radio heard it or another observer did (the transport decrypts the channel
 messages in the packets the MQTT observer plugins receive and hands them to
 ``on_mesh_message`` with ``source`` "mqtt"; MeshMapper's free live feed has no
 packet bytes, so no text). The radio answers on the channel with the sender's rank
-today or this week, streak and the number of participants so far; asking again
-gives the same rank with the current count.
+today or this week, streak and the number of participants (every node that has
+ever checked in); asking again gives the same rank with the current count.
 
 Channel messages carry the sender's name, not its key, so a name is matched to
 the one node that advertises it (adverts the radio and observers hear, and the
@@ -184,6 +184,14 @@ def schedule_from_settings(settings: dict[str, Any]) -> Schedule:
         )
         return Schedule(frequency, chosen)
     return Schedule(frequency, days[0] if days else 0)
+
+
+@dataclass(frozen=True, slots=True)
+class Participants:
+    """The reply's participant counts: every node that has ever checked in, and today's or this week's."""
+
+    total: int
+    this_period: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,7 +415,9 @@ class CheckInPlugin(BasePlugin):
                 "description": (
                     "Placeholders: {title}, {name}, {rank} (today or this week), {this_period} (\"today\" or "
                     "\"this week\"), {streak}, {streak_label} (\"3 days\" or \"3 weeks\"), {participants}, "
-                    "{participants_label} (\"13 participants\"), {total}, {keyword}. "
+                    "{participants_label} (\"13 participants\": every node that has ever checked in), "
+                    "{participants_this_period}, {participants_this_period_label} (today or this week), "
+                    "{total}, {keyword}. "
                     "A reply longer than one radio message gets the name and title shortened (…) to fit; "
                     "one that still doesn't fit is split between lines."
                 ),
@@ -610,15 +620,20 @@ class CheckInPlugin(BasePlugin):
             histories = await asyncio.to_thread(self.store.histories, schedule)
         table = standings(histories, moment, schedule)
         mine = next(standing for standing in table if standing.participant_id == participant_id)
-        participants = sum(1 for standing in table if standing.checked_in_this_period)
+        participants = Participants(
+            total=sum(1 for standing in table if standing.total_check_ins > 0),
+            this_period=sum(1 for standing in table if standing.checked_in_this_period),
+        )
         LOGGER.info(
-            "Check-ins: %s checked in (%s): #%s %s, streak %s, %s participants",
+            "Check-ins: %s checked in (%s): #%s %s, streak %s, %s participants (%s %s)",
             sender,
             source,
             mine.period_rank,
             _this_period(schedule),
             mine.streak,
-            participants,
+            participants.total,
+            participants.this_period,
+            _this_period(schedule),
         )
         self._announce()
         if not (reply and config.reply):
@@ -630,7 +645,7 @@ class CheckInPlugin(BasePlugin):
         self._last_reply[participant_id] = now
         return self._reply_actions(sender, mine, participants)
 
-    def render_reply(self, name: str, standing: Standing, participants: int, max_bytes: Optional[int] = None) -> str:
+    def render_reply(self, name: str, standing: Standing, participants: Participants, max_bytes: Optional[int] = None) -> str:
         """The reply to a check-in; with ``max_bytes``, shortened to fit if it can be (``fill_template``)."""
         schedule = self.config.schedule
         streak_label = _count(standing.streak, schedule.unit)
@@ -643,8 +658,11 @@ class CheckInPlugin(BasePlugin):
             "streak_label": streak_label,
             # The older name of {streak_label}.
             "streak_weeks": streak_label,
-            "participants": participants,
-            "participants_label": _count(participants, "participant"),
+            # Every node that has ever checked in; {participants_this_period}: today or this week.
+            "participants": participants.total,
+            "participants_label": _count(participants.total, "participant"),
+            "participants_this_period": participants.this_period,
+            "participants_this_period_label": _count(participants.this_period, "participant"),
             "total": standing.total_check_ins,
             "keyword": self.config.keyword,
         }
@@ -654,7 +672,7 @@ class CheckInPlugin(BasePlugin):
             LOGGER.warning("Check-ins: the reply template doesn't work (%s); using the default one", exc)
             return fill_template(DEFAULT_TEMPLATE, values, max_bytes)
 
-    def _reply_actions(self, name: str, standing: Standing, participants: int) -> list[PluginAction]:
+    def _reply_actions(self, name: str, standing: Standing, participants: Participants) -> list[PluginAction]:
         context = self._context
         chunking = getattr(getattr(context, "settings", None), "chunking", None)
         payload_limit = getattr(context, "mesh_payload_limit", None)

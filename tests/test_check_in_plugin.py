@@ -163,6 +163,22 @@ class CheckInTests(CheckInTestCase):
         self.assertIs(load_plugin_class("check-in"), CheckInPlugin)
         self.assertIs(load_plugin_class("check_in"), CheckInPlugin)
 
+    async def test_participants_counts_everyone_who_ever_checked_in(self):
+        await self.check_in("LMB-T", 1000)
+        await self.check_in("Zed", 1001)
+        # A participant added by hand, without check-ins, doesn't count.
+        await self.plugin.create_participant("Nobody", None)
+        # The week after, only one of them so far: the count is still everyone's.
+        self.now = MONDAY_9AM + 7 * 86400
+        actions = await self.check_in("LMB-T", 2000)
+        self.assertIn("🏅 LMB-T is #1 this week", actions[0].text)
+        self.assertIn("👥 2 participants", actions[0].text)
+        await self.plugin.apply_settings(
+            {"reply_template": "{participants} {participants_label}, {participants_this_period} {participants_this_period_label}"}
+        )
+        actions = await self.check_in("New", 2001)
+        self.assertEqual(actions[0].text, "3 3 participants, 2 2 participants")
+
     async def test_replies_with_rank_streak_and_participants(self):
         actions = await self.check_in("LMB-T", 1000)
         self.assertEqual(len(actions), 1)
