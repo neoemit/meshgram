@@ -452,6 +452,7 @@
   .notice svg { flex: none; margin-top: 1px; color: var(--c, var(--accent)); }
   .notice.warn { --c: var(--ok); }
   .notice.bad { --c: var(--bad); }
+  .notice.good { --c: var(--good); }
   .notice p { margin: 0; }
   .cpanel { display: grid; gap: 16px; }
   .cpanel > * { min-width: 0; }
@@ -557,6 +558,27 @@
   .plugin-disclosures { display: flex; flex-wrap: wrap; }
   .plugin-disclosures .disclosure + .disclosure { margin-left: 0; }
   .plugin-panel { padding: 0 16px 16px; display: grid; gap: 12px; min-width: 0; }
+  /* control.js: firmware updates */
+  .fw-file { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 10px; }
+  .fw-file a { color: var(--accent-text); font-weight: 600; }
+  .fw-job { display: grid; gap: 10px; margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+  .fw-job .notice { margin: 0; }
+  .fw-job-head { display: flex; align-items: center; gap: 8px; }
+  .fw-job-head .spacer { flex: 1; }
+  .fw-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; counter-reset: fw; }
+  .fw-steps li { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12.5px; font-weight: 650;
+    background: var(--surface-3); color: var(--text-3); counter-increment: fw; }
+  .fw-steps li::before { content: counter(fw); font-variant-numeric: tabular-nums; opacity: .7; }
+  .fw-steps li[data-status="done"] { color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); }
+  .fw-steps li[data-status="done"]::before { content: "✓"; }
+  .fw-steps li[data-status="active"] { color: var(--accent-text); background: var(--accent-soft); }
+  .fw-steps li[data-status="failed"] { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+  .fw-text { margin: 0; font-weight: 600; }
+  .fw-progress { width: 100%; height: 8px; accent-color: var(--accent); }
+  .fw-log summary { cursor: pointer; font-size: 13px; font-weight: 650; color: var(--text-2); }
+  .fw-log pre { max-height: 220px; margin: 8px 0 0; padding: 10px; overflow: auto; border-radius: 8px; background: var(--surface-3);
+    font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  #confirm-text { white-space: pre-line; }
   /* check_in.js: the check-in plugin's participants */
   .ci-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
   .ci-pill { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 10px; border-radius: 999px;
@@ -2516,11 +2538,16 @@ function handleEvent(event) {
     connections.stale = false;
     renderConnections();
     controlState = event.control || controlState;
-    if (window.MeshgramControl) window.MeshgramControl.onSnapshot();
+    if (window.MeshgramControl) {
+      window.MeshgramControl.onSnapshot();
+      window.MeshgramControl.onFirmware(event.firmware || null);
+    }
   } else if (event.type === "connection") {
     updateConnection(event.connection);
   } else if (event.type === "control") {
     if (window.MeshgramControl) window.MeshgramControl.onChange(event.what);
+  } else if (event.type === "firmware") {
+    if (window.MeshgramControl) window.MeshgramControl.onFirmware(event.job);
   } else if (event.type === "map_settings") {
     applyHiddenPacketTypes(event.hidden_types);
   } else if (event.type === "nodes" || event.type === "self") {

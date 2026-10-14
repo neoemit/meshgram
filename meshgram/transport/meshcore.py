@@ -27,6 +27,7 @@ DEFAULT_MAX_CHANNELS = 8
 # An observer's packet that arrives again within this long (through another MQTT
 # server it uploads to, say) is the same reception: dropped.
 REMOTE_DEDUPE_TTL_SECONDS = 60.0
+DISCONNECT_TIMEOUT_SECONDS = 5.0
 
 # Friendlier text for the companion protocol's error codes.
 _ERROR_TEXT = {
@@ -175,28 +176,46 @@ class MeshCoreTransport:
 
     def invalidate_connection(self) -> None:
         """Tear down any active connection. Idempotent."""
+        mc = self._detach()
+        if mc is not None and self._loop is not None and not self._loop.is_closed():
+            for coro in self._closers(mc):
+                self._loop.create_task(coro)
+
+    async def disconnect(self) -> None:
+        """Tear down the connection and wait until it's closed (the serial port is free again)."""
+        mc = self._detach()
+        if mc is None:
+            return
+        for coro in self._closers(mc):
+            try:
+                await asyncio.wait_for(coro, DISCONNECT_TIMEOUT_SECONDS)
+            except Exception as exc:  # already gone, or the library's own quirks
+                LOGGER.debug("MeshCore disconnect step failed: %s", exc)
+
+    def _detach(self) -> Any:
+        mc = self._mc
         for sub in self._subscriptions:
             with contextlib.suppress(Exception):
-                self._mc.unsubscribe(sub)
+                mc.unsubscribe(sub)
         self._subscriptions = []
-        if self._mc is not None and self._loop is not None and not self._loop.is_closed():
-            stopper = getattr(self._mc, "stop_auto_message_fetching", None)
-            if callable(stopper):
-                with contextlib.suppress(Exception):
-                    coro = stopper()
-                    if asyncio.iscoroutine(coro):
-                        self._loop.create_task(coro)
-            disconnect = getattr(self._mc, "disconnect", None)
-            if callable(disconnect):
-                with contextlib.suppress(Exception):
-                    coro = disconnect()
-                    if asyncio.iscoroutine(coro):
-                        self._loop.create_task(coro)
         self._mc = None
         self.local_node_id = None
         self.local_short_name = None
         self._device_info = {}
         self._recent_outbound_texts.clear()
+        return mc
+
+    @staticmethod
+    def _closers(mc: Any) -> list[Any]:
+        coros = []
+        for name in ("stop_auto_message_fetching", "disconnect"):
+            method = getattr(mc, name, None)
+            if callable(method):
+                with contextlib.suppress(Exception):
+                    coro = method()
+                    if asyncio.iscoroutine(coro):
+                        coros.append(coro)
+        return coros
 
     def close(self) -> None:
         self.invalidate_connection()
@@ -368,6 +387,15 @@ class MeshCoreTransport:
     def device_info(self) -> dict[str, Any]:
         """DEVICE_INFO read at connect (model, firmware ``ver``, ``max_channels``, ...); may be empty."""
         return dict(self._device_info)
+
+    @property
+    def serial_port(self) -> Optional[str]:
+        """The serial device the radio is connected on (None over TCP/BLE, or when not connected)."""
+        if self.settings.meshcore.connection.mode != "serial":
+            return None
+        connection = getattr(getattr(self._mc, "connection_manager", None), "connection", None)
+        port = getattr(connection, "port", None)
+        return str(port) if port else self.settings.meshcore.connection.serial_device
 
     @property
     def max_channels(self) -> int:
