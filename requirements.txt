@@ -6,3 +6,5 @@ PyYAML==6.0.2
 paho-mqtt==2.1.0
 websockets==15.0.1
 tzdata==2026.4
+esptool==5.5.0
+adafruit-nrfutil==0.5.3.post16

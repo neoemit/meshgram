@@ -13,6 +13,10 @@
     GET    /api/radio/contacts[?refresh=1]
     DELETE /api/radio/contacts/{public_key}
     POST   /api/radio/contacts/{public_key}/reset-path
+    GET    /api/radio/firmware[?board=…&refresh=1]    installed firmware, releases for the radio's board (or
+                                                      the one given), whether it can be updated, the update job
+    POST   /api/radio/firmware/update                 {"version", "board", "allow_downgrade"?} -> 202 job;
+                                                      progress follows as {"type": "firmware", "job"} events
     GET    /api/plugins                               every plugin with its schema and (masked) settings
     PATCH  /api/plugins/{name}                        {"enabled"?, "settings"?}
     DELETE /api/plugins/{name}/overrides              back to config.yaml
@@ -41,6 +45,7 @@ from typing import Any, Awaitable, Callable, Optional
 from ..config import MeshgramSettings
 from ..config_export import ConfigExport, ConfigExportError, export_config
 from ..core_settings import LEAVES, SCHEMA, CoreSettings, UnknownSectionError
+from ..firmware import FirmwareUpdater
 from ..plugin import CHANNEL_FORMAT
 from ..plugin_manager import PluginManager, UnknownPluginError
 from ..radio_admin import RadioAdmin, RadioAdminError
@@ -146,9 +151,23 @@ def register_control_api(
     send_mesh: SendMesh,
     core: Optional[CoreSettings] = None,
     restart: Optional[Callable[[], None]] = None,
+    firmware: Optional[FirmwareUpdater] = None,
 ) -> None:
     def announce(what: str) -> None:
         web.events.publish({"type": "control", "what": what})
+
+    if firmware is not None:
+        finished: set[str] = set()
+
+        def firmware_changed(job: dict[str, Any]) -> None:
+            web.events.publish({"type": "firmware", "job": job})
+            # A finished update changed what the radio reports.
+            if job.get("state") != "running" and job.get("id") not in finished:
+                finished.add(job.get("id"))
+                announce("radio")
+
+        firmware.on_change = firmware_changed
+        web.events.add_snapshot_provider("firmware", firmware.snapshot)
 
     def route(method: str, path: str):
         def decorator(handler: Callable[[Request], Awaitable[Response]]):
@@ -261,6 +280,28 @@ def register_control_api(
         announce("contacts")
         return no_content()
 
+    # --- Firmware ----------------------------------------------------------------------------
+
+    if firmware is not None:
+
+        @route("GET", "/api/radio/firmware")
+        async def get_firmware(request: Request) -> Response:
+            board = request.query.get("board") or None
+            return json_response(await firmware.describe(board=board, refresh=_flag(request, "refresh")))
+
+        @route("POST", "/api/radio/firmware/update")
+        async def post_firmware_update(request: Request) -> Response:
+            body = _body(request)
+            unknown = set(body) - {"version", "board", "allow_downgrade"}
+            if unknown:
+                raise HttpError(400, f"Unknown fields: {', '.join(sorted(unknown))}")
+            job = await firmware.start(
+                version=body.get("version"),
+                board=body.get("board"),
+                allow_downgrade=body.get("allow_downgrade", False),
+            )
+            return json_response(job, 202)
+
     # --- Plugins ------------------------------------------------------------------------------
 
     @route("GET", "/api/plugins")
@@ -325,6 +366,8 @@ def register_control_api(
 
         @route("POST", "/api/restart")
         async def post_restart(request: Request) -> Response:
+            if firmware is not None and firmware.busy:
+                raise HttpError(409, "The radio's firmware is being updated; restart when it's done")
             restart()
             return json_response({"restarting": True}, 202)
 

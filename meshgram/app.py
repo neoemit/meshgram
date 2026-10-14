@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 import time
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from telegram import Message, Update
 from telegram.error import NetworkError
@@ -29,6 +29,7 @@ from .config import (
     read_config,
 )
 from .core_settings import SETTINGS_FILE, CoreSettings, SettingsOverrideStore, check_telegram
+from .firmware import FIRMWARE_FILE, FirmwareCatalog, FirmwareUpdater
 from .plugin_manager import OVERRIDES_FILE, PluginManager, PluginOverrideStore
 from .radio_admin import RadioAdmin
 from .status import CONNECTED, CONNECTING, DISCONNECTED, StatusRegistry
@@ -70,6 +71,13 @@ class MeshgramApp:
             store=PluginOverrideStore(data_dir() / OVERRIDES_FILE),
         )
         self.radio_admin = RadioAdmin(self.mesh)
+        self.firmware = FirmwareUpdater(
+            settings,
+            self.mesh,
+            self,
+            catalog=FirmwareCatalog(data_dir() / "firmware"),
+            store_path=data_dir() / FIRMWARE_FILE,
+        )
         if self.web is not None:
             register_control_api(
                 self.web,
@@ -79,8 +87,14 @@ class MeshgramApp:
                 send_mesh=self._send_mesh_from_web,
                 core=core,
                 restart=self.request_restart,
+                firmware=self.firmware,
             )
         self._mesh_connect_task: Optional[asyncio.Task[None]] = None
+        # Held while connecting, and while the radio is kept offline (firmware updates).
+        self._radio_lock = asyncio.Lock()
+        # Completed connections (plugins told included); the firmware updater waits for the next.
+        self._radio_generation = 0
+        self._radio_connected = asyncio.Condition()
         self._telegram_health_task: Optional[asyncio.Task[None]] = None
         self._seen_mesh_packet_ids: dict[MeshPacketRef, float] = {}
         self._mesh_send_lock = asyncio.Lock()
@@ -117,25 +131,68 @@ class MeshgramApp:
                 await asyncio.sleep(healthy_poll_seconds)
                 continue
 
-            if self.status.get("radio")["state"] == CONNECTED:
-                self.status.set_state("radio", DISCONNECTED, f"Connection lost; reconnecting ({self._mesh_description()})")
-            try:
-                loop = asyncio.get_running_loop()
-                await self.mesh.connect(loop, self._on_mesh_text)
-                LOGGER.info("Radio connection established")
-                self.status.set_state("radio", CONNECTED, self._mesh_description())
-                await self.plugins.mesh_connected(self.mesh, self.plugin_context())
-            except Exception as exc:
-                self.mesh.invalidate_connection()
-                self.status.set_state("radio", DISCONNECTED, f"{exc}; retrying in {retry_delay_seconds}s")
-                LOGGER.warning(
-                    "Radio connection failed (%s). Retrying in %ss.",
-                    exc,
-                    retry_delay_seconds,
-                )
+            async with self._radio_lock:
+                if self.mesh.is_connected:
+                    continue
+                failed = await self._connect_mesh(retry_delay_seconds)
+            if failed:
                 await asyncio.sleep(retry_delay_seconds)
 
+    async def _connect_mesh(self, retry_delay_seconds: int) -> bool:
+        """One connection attempt; True if it failed."""
+        if self.status.get("radio")["state"] == CONNECTED:
+            self.status.set_state("radio", DISCONNECTED, f"Connection lost; reconnecting ({self._mesh_description()})")
+        try:
+            loop = asyncio.get_running_loop()
+            await self.mesh.connect(loop, self._on_mesh_text)
+            LOGGER.info("Radio connection established")
+            self.status.set_state("radio", CONNECTED, self._mesh_description())
+            await self.plugins.mesh_connected(self.mesh, self.plugin_context())
+        except Exception as exc:
+            self.mesh.invalidate_connection()
+            self.status.set_state("radio", DISCONNECTED, f"{exc}; retrying in {retry_delay_seconds}s")
+            LOGGER.warning(
+                "Radio connection failed (%s). Retrying in %ss.",
+                exc,
+                retry_delay_seconds,
+            )
+            return True
+        async with self._radio_connected:
+            self._radio_generation += 1
+            self._radio_connected.notify_all()
+        return False
+
+    # --- Radio maintenance (see meshgram.firmware.updater.RadioHost) ------------
+
+    @property
+    def radio_generation(self) -> int:
+        return self._radio_generation
+
+    @contextlib.asynccontextmanager
+    async def radio_maintenance(self, reason: str) -> AsyncIterator[None]:
+        """Disconnect the radio and keep it offline for the block; the connect loop takes over after."""
+        async with self._radio_lock:
+            LOGGER.info("Radio offline: %s", reason)
+            self.status.set_state("radio", CONNECTING, reason)
+            await self.mesh.disconnect()
+            try:
+                yield
+            finally:
+                self.status.set_state("radio", DISCONNECTED, f"Reconnecting ({self._mesh_description()})")
+
+    async def wait_for_radio(self, after_generation: int, timeout: float) -> bool:
+        try:
+            async with self._radio_connected:
+                await asyncio.wait_for(
+                    self._radio_connected.wait_for(lambda: self._radio_generation > after_generation),
+                    timeout,
+                )
+        except asyncio.TimeoutError:
+            return False
+        return self.mesh.is_connected
+
     async def _post_shutdown(self, app: Application) -> None:
+        await self.firmware.stop()
         if self._telegram_health_task is not None:
             self._telegram_health_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -419,6 +476,8 @@ class MeshgramApp:
         """Stop, then start again from the top (``main``), reading the settings anew."""
         if self.bot_app is None:
             raise RuntimeError("Meshgram isn't running")
+        if self.firmware.busy:
+            raise RuntimeError("The radio's firmware is being updated; restart when it's done")
         LOGGER.info("Restarting Meshgram, as asked from the web app")
         self.restart_requested = True
         asyncio.get_running_loop().call_later(RESTART_DELAY_SECONDS, self.bot_app.stop_running)

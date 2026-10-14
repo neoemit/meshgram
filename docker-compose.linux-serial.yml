@@ -8,3 +8,11 @@ services:
       - "${MESH_DEVICE:-/dev/ttyUSB0}:${MESH_DEVICE:-/dev/ttyUSB0}"
     group_add:
       - dialout
+    # Firmware updates of nRF52 boards from the control panel: the radio comes back
+    # as its bootloader, usually on the same /dev/ttyACM* device. If it can come
+    # back on another one, let the container see every USB serial device instead:
+    # device_cgroup_rules:
+    #   - "c 166:* rmw"   # ttyACM*
+    #   - "c 188:* rmw"   # ttyUSB*
+    # volumes:
+    #   - /dev:/dev

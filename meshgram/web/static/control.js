@@ -38,6 +38,11 @@
     openPanels: new Set(),     // plugins whose own panel (registerPluginPanel) is open
     panelViews: new Map(),     // plugin name -> { container, handle } of its open panel
     configView: null,          // "diff" or "file": what the config file section shows
+    firmwareBoard: null,       // board picked for firmware updates (null: the server's pick)
+    firmwareVersion: null,     // version picked to install
+    firmwareJob: null,         // the latest firmware update job (from the server's events)
+    firmwareDismissed: null,   // id of the finished job the user dismissed
+    firmwareError: null,
   };
   let uid = 0;
   const nextId = (prefix) => `c-${prefix}-${++uid}`;
@@ -339,6 +344,7 @@
     try {
       if (section === "radio") {
         ui.data.radio = await api("GET", "api/radio");
+        loadFirmware();
       } else if (section === "channels") {
         ui.data.channels = await api("GET", `api/radio/channels${refresh ? "?refresh=1" : ""}`);
       } else if (section === "contacts") {
@@ -393,11 +399,14 @@
 
   function renderRadio(panel) {
     const data = ui.data.radio;
+    // The firmware card stays while the radio is away (it's being updated, or needs to be).
+    const slot = firmwareSlot();
+    if (!slot.childElementCount) renderFirmware();
     if (!data.connected) {
-      panel.replaceChildren(radioOffline());
+      panel.replaceChildren(radioOffline(), slot);
       return;
     }
-    panel.replaceChildren(statusCard(data), identityCard(data), radioParamsCard(data), behaviourCard(data),
+    panel.replaceChildren(statusCard(data), slot, identityCard(data), radioParamsCard(data), behaviourCard(data),
       data.tuning ? tuningCard(data) : null);
   }
 
@@ -577,6 +586,223 @@
         return patchRadio({ tuning: next });
       },
     });
+  }
+
+  // --- Firmware ------------------------------------------------------------------------------
+  // GET api/radio/firmware says what's installed and published for the radio's board;
+  // an update runs on the server and reports progress as {"type":"firmware"} events.
+
+  const FW_STAGES = ["download", "verify", "disconnect", "flash", "reconnect", "check"];
+  const FW_STAGE_LABELS = { download: "Download", verify: "Check file", disconnect: "Disconnect", flash: "Install", reconnect: "Reconnect", check: "Verify" };
+  const fwRunning = () => Boolean(ui.firmwareJob && ui.firmwareJob.state === "running");
+  const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) : null);
+  const fmtBytes = (n) => (Number.isFinite(n) ? `${fmtNumber(n / 1024, 0)} KB` : dash);
+
+  async function loadFirmware({ refresh = false } = {}) {
+    const query = new URLSearchParams();
+    if (ui.firmwareBoard) query.set("board", ui.firmwareBoard);
+    if (refresh) query.set("refresh", "1");
+    try {
+      const data = await api("GET", `api/radio/firmware${query.toString() ? `?${query}` : ""}`);
+      ui.data.firmware = data;
+      ui.firmwareError = null;
+      if (data.job) ui.firmwareJob = data.job;
+    } catch (err) {
+      // A board the releases no longer have: back to the detected one.
+      if (err.status === 404 && ui.firmwareBoard) {
+        ui.firmwareBoard = null;
+        return loadFirmware({ refresh });
+      }
+      ui.firmwareError = err.message;
+    }
+    renderFirmware();
+    return ui.data.firmware;
+  }
+
+  // The firmware card lives in its own slot so progress updates don't touch the forms around it.
+  function firmwareSlot() {
+    if (!ui.firmwareSlot) ui.firmwareSlot = el("div", { class: "fw-slot" });
+    return ui.firmwareSlot;
+  }
+
+  function renderFirmware() {
+    firmwareSlot().replaceChildren(firmwareCard());
+  }
+
+  function firmwareCard() {
+    const data = ui.data.firmware;
+    const check = button("Check for updates", { iconName: "refresh", title: "Ask GitHub for the latest MeshCore releases" });
+    check.onclick = () => act(check, () => loadFirmware({ refresh: true }));
+    if (!data) {
+      return card({
+        title: "Firmware",
+        actions: [check],
+        body: [ui.firmwareError ? notice("bad", ui.firmwareError) : el("p", { class: "hint", "aria-busy": "true" }, "Looking up MeshCore releases…")],
+      });
+    }
+    const { device } = data;
+    const releases = data.releases || [];
+    const latest = releases.find((release) => release.version === data.latest);
+    let state = ["off", "Unknown"];
+    if (device.connected && data.latest && device.version_number) {
+      state = data.update_available ? ["busy", "Update available"] : ["running", "Up to date"];
+    }
+    const fact = (label, value, sub) => el("div", {}, el("dt", {}, label), el("dd", {}, value, sub ? el("span", { class: "sub" }, sub) : null));
+    const facts = el("dl", { class: "facts" },
+      fact("Installed", device.version || dash, device.build ? `Built ${device.build}` : (device.connected ? null : "The radio isn't connected")),
+      fact("Latest", data.latest ? `v${data.latest}` : dash, latest ? `Released ${fmtDate(latest.published_at)}` : null),
+      fact("Board", data.board || "Not sure", device.model ? `The radio says: ${device.model}` : null),
+      fact("Status", el("span", { class: "badge-state", "data-state": state[0] }, state[1])));
+
+    const body = [facts];
+    if (data.catalog && data.catalog.error && releases.length) {
+      body.push(notice("warn", `Showing the releases fetched earlier: ${data.catalog.error}`));
+    }
+    for (const problem of data.problems || []) body.push(notice("warn", problem));
+    const job = ui.firmwareJob;
+    ui.firmwareJobBox = firmwareJobBox(job);
+    body.push(ui.firmwareJobBox);
+
+    // Board: the radio's model narrows it down; the user decides when it doesn't.
+    const detected = data.boards.filter((board) => board.detected);
+    const others = data.boards.filter((board) => !board.detected);
+    const option = (board) => el("option", { value: board.name, selected: board.name === data.board || null },
+      `${board.name} (${{ esp32: "ESP32", nrf52: "nRF52", rp2040: "RP2040", stm32: "STM32" }[board.platform] || board.platform})`);
+    const boardSelect = el("select", { "data-change": "" },
+      data.board ? null : el("option", { value: "", selected: true }, "Choose the radio's board…"),
+      detected.length ? el("optgroup", { label: "Matching the radio" }, ...detected.map(option)) : null,
+      el("optgroup", { label: detected.length ? "Other boards" : "Boards" }, ...others.map(option)));
+    boardSelect.onchange = () => {
+      ui.firmwareBoard = boardSelect.value || null;
+      ui.firmwareVersion = null;
+      loadFirmware();
+    };
+    const boardHint = data.board_source === "detected" ? "Picked from what the radio reports."
+      : data.board_source === "saved" ? "The board chosen last time."
+      : data.detected_boards.length > 1 ? "The radio's model comes in several variants; pick the one it is."
+      : data.board ? "Make sure it's the right board: firmware for another one may not start."
+      : "The radio's model doesn't tell which board it is; pick it.";
+
+    const installedVersion = device.version_number;
+    const versionLabel = (release) => {
+      const notes = [];
+      if (release.version === data.latest) notes.push("latest");
+      if (release.installed) notes.push("installed");
+      if (release.prerelease) notes.push("pre-release");
+      return `v${release.version}${notes.length ? ` (${notes.join(", ")})` : ""} · ${fmtDate(release.published_at)}`;
+    };
+    if (!releases.some((release) => release.version === ui.firmwareVersion)) {
+      ui.firmwareVersion = (latest || releases.find((release) => release.installed) || releases[0] || {}).version || null;
+    }
+    const versionSelect = el("select", { "data-change": "", disabled: releases.length ? null : true },
+      releases.length ? null : el("option", { value: "" }, data.board ? "No releases for this board" : "Pick the board first"),
+      ...releases.map((release) => el("option", { value: release.version, selected: release.version === ui.firmwareVersion || null }, versionLabel(release))));
+    const chosen = () => releases.find((release) => release.version === versionSelect.value);
+    const notesLink = el("a", { class: "hint", target: "_blank", rel: "noopener noreferrer" }, "Release notes");
+    const fileHint = el("p", { class: "hint" });
+    const install = button("Install", { iconName: "download", kind: "btn-primary" });
+    install.dataset.change = "";
+    ui.firmwareInstall = install;
+    const compare = (release) => {
+      if (!release || !installedVersion) return 0;
+      const a = release.version.split(".").map(Number);
+      const b = installedVersion.split(".").map(Number);
+      for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0);
+      return 0;
+    };
+    const update = () => {
+      const release = chosen();
+      ui.firmwareVersion = release ? release.version : null;
+      const order = compare(release);
+      install.querySelector("span").textContent = !release ? "Install"
+        : !device.connected || !installedVersion ? `Install v${release.version}`
+        : order > 0 ? `Update to v${release.version}` : order < 0 ? `Downgrade to v${release.version}` : `Reinstall v${release.version}`;
+      install.disabled = !release || !data.can_update || fwRunning() || !canChange();
+      notesLink.hidden = !(release && release.notes_url);
+      if (release) notesLink.href = release.notes_url || "";
+      fileHint.textContent = release ? `${release.file.name}, ${fmtBytes(release.file.size)}${release.file.verified ? ", checked against its published SHA-256" : ""}` : "";
+    };
+    versionSelect.onchange = update;
+    install.onclick = async () => {
+      const release = chosen();
+      if (!release) return;
+      const order = compare(release);
+      const lines = [
+        `Meshgram disconnects from the radio, puts it into its bootloader and installs MeshCore companion firmware v${release.version} for ${data.board}. It takes a minute or two; the radio reconnects by itself afterwards.`,
+        "Nothing is erased: the radio keeps its settings, identity, contacts and channels. Don't unplug it meanwhile.",
+      ];
+      if (order < 0) lines.push(`v${release.version} is older than the installed v${installedVersion}; older firmware may not understand settings saved by newer versions.`);
+      if (release.prerelease) lines.push("This is a pre-release.");
+      if (!device.connected) lines.push("The radio isn't connected, so its board and version can't be checked first.");
+      const ok = await confirmDialog({
+        title: order < 0 ? "Downgrade the radio's firmware?" : "Update the radio's firmware?",
+        text: lines.join("\n\n"),
+        ok: install.querySelector("span").textContent,
+        danger: order < 0 || release.prerelease || !device.connected,
+      });
+      if (!ok) return;
+      await act(install, async () => {
+        ui.firmwareJob = await api("POST", "api/radio/firmware/update", { version: release.version, board: data.board, allow_downgrade: order < 0 });
+        ui.firmwareDismissed = null;
+        renderFirmware();
+      });
+    };
+
+    const form = el("div", { class: "form-grid" },
+      field("Board", boardSelect, { hint: boardHint }),
+      field("Version", versionSelect, { hint: "The latest is picked; any published version can be installed." }));
+    body.push(form, el("div", { class: "fw-file" }, fileHint, notesLink));
+    const section = card({
+      title: "Firmware",
+      sub: data.platform_title ? `MeshCore companion (USB) · ${data.platform_title}` : "MeshCore companion (USB)",
+      actions: [check],
+      body,
+      foot: el("div", { class: "card-foot" },
+        el("p", { class: "hint" }, "Updates keep the radio's settings, identity, contacts and channels."),
+        el("span", { class: "spacer" }), install),
+    });
+    disableIfReadOnly(section);
+    if (fwRunning()) section.querySelectorAll("select").forEach((node) => { node.disabled = true; });
+    update();
+    return section;
+  }
+
+  function firmwareJobBox(job) {
+    if (!job || job.id === ui.firmwareDismissed) return el("div", { class: "fw-job", hidden: true });
+    const running = job.state === "running";
+    const title = running ? `Installing v${job.version} on ${job.board}`
+      : job.state === "succeeded" ? `v${job.version} is installed` : `The update to v${job.version} failed`;
+    const current = FW_STAGES.indexOf(job.stage);
+    const steps = el("ol", { class: "fw-steps" }, ...FW_STAGES.map((stage, index) => {
+      const status = job.state === "succeeded" || index < current ? "done"
+        : index === current ? (job.state === "failed" ? "failed" : "active") : "todo";
+      return el("li", { "data-status": status, "aria-current": status === "active" ? "step" : null }, FW_STAGE_LABELS[stage]);
+    }));
+    const progress = running ? el("progress", { class: "fw-progress", max: "100", "aria-label": job.text }) : null;
+    if (progress && Number.isFinite(job.percent)) progress.value = job.percent;
+    const log = el("details", { class: "fw-log" }, el("summary", {}, "Details"), el("pre", {}, (job.log || []).join("\n")));
+    const dismiss = running ? null : button("Dismiss", { onClick: () => { ui.firmwareDismissed = job.id; renderFirmware(); } });
+    const message = running ? el("p", { class: "fw-text", role: "status" }, job.text, Number.isFinite(job.percent) && job.stage === "flash" ? ` — ${job.percent}%` : "")
+      : notice(job.state === "succeeded" ? "good" : "bad", job.state === "succeeded" ? job.text : job.error || "The update failed",
+        (job.warnings || []).map((warning) => el("p", {}, warning)));
+    return el("div", { class: "fw-job", "data-state": job.state },
+      el("div", { class: "fw-job-head" }, el("strong", {}, title), el("span", { class: "spacer" }), dismiss),
+      steps, message, progress,
+      running ? el("p", { class: "hint" }, "Keep the radio plugged in. Meshgram's radio features are paused until it's back.") : null,
+      log);
+  }
+
+  // A job update from the server: refresh the progress box only.
+  function showFirmwareJob(job) {
+    const wasRunning = fwRunning();
+    ui.firmwareJob = job;
+    if (!ui.firmwareJobBox || !ui.firmwareJobBox.isConnected) return;
+    const open = ui.firmwareJobBox.querySelector(".fw-log[open]") !== null;
+    const box = firmwareJobBox(job);
+    if (open) box.querySelector(".fw-log").open = true;
+    ui.firmwareJobBox.replaceWith(box);
+    ui.firmwareJobBox = box;
+    if (wasRunning !== fwRunning()) renderFirmware();
   }
 
   // --- Channels -----------------------------------------------------------------------------
@@ -1824,6 +2050,10 @@
       invalidate(["radio", "channels", "contacts"]);
     },
     // A change made from this or another open page.
+    // A firmware update's progress (``job``: null when there's none).
+    onFirmware(job) {
+      if (job) showFirmwareJob(job);
+    },
     onChange(what) {
       const affected = { radio: ["radio"], channels: ["channels", "plugins", "settings"], contacts: ["contacts"], plugins: ["plugins", "channels", "config"], settings: ["settings", "config"] }[what];
       if (affected) invalidate(affected);

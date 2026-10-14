@@ -12,7 +12,7 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 
 - 🔁 Bidirectional message bridge — Telegram ↔ a radio channel
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
-- 🎛️ Web control panel: radio settings, channels (add them by name), contacts, every plugin — turned on/off and configured live — and every other `config.yaml` setting (Telegram bot token and group, radio connection, web app, chunking, logging), applied with a restart from the panel
+- 🎛️ Web control panel: radio settings, firmware updates (check, pick a version, install over USB), channels (add them by name), contacts, every plugin — turned on/off and configured live — and every other `config.yaml` setting (Telegram bot token and group, radio connection, web app, chunking, logging), applied with a restart from the panel
 - 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `letsmesh`, `meshrank`, `custom_mqtt`, `packet_map`, `check_in`)
 - 🏅 Daily or weekly check-ins ("#MeshCoreMonday") with streaks, a leaderboard API and a [public leaderboard site](leaderboard/)
 - 🗺️ Optional MQTT observer uploads to MeshMapper, LetsMesh and MeshRank; other observers' messages reach the plugins like the radio's
@@ -167,6 +167,8 @@ docker compose -f docker-compose.yml -f docker-compose.linux-serial.yml logs -f 
 `docker-compose.yml` mounts `./config.yaml` into the container read-only; it isn't copied into the image. The `linux-serial` overlay adds:
 - `devices: [${MESH_DEVICE:-/dev/ttyUSB0}:…]` — passes the USB serial device into the container. For another device, set `MESH_DEVICE` for Docker Compose, e.g. `export MESH_DEVICE=/dev/ttyACM0` or a one-line `.env` next to the compose files (Compose reads it to fill in `${…}`; Meshgram doesn't). It must match `serial_device` in `config.yaml`.
 - `group_add: [dialout]` — grants the container access
+
+**Firmware updates from the control panel** work in Docker too. ESP32 boards stay on the same device while flashing. nRF52 boards (RAK4631, T-Echo, T1000-E, T114, …) drop off USB and come back as their bootloader, normally on the same `/dev/ttyACM*` device; if another USB serial device grabs that number meanwhile, the bootloader isn't visible inside the container. The overlay's commented `device_cgroup_rules` / `/dev` lines let the container see whichever device it comes back as.
 
 **Tip — drop the `-f` flags:** copy the overlay to `docker-compose.override.yml` (auto-loaded by compose and gitignored), where you can also write the device path directly:
 ```bash
@@ -753,12 +755,35 @@ web:
 
 **Control panel** (`#control`), in six tabs:
 
-- **Radio** — status (name, public key, model and firmware, battery and storage, uptime, noise floor, last RSSI/SNR, airtime, packet counters, clock drift) and actions: send a zero-hop or flood advert, set the radio's clock from the computer, reboot. Forms for the name and position (and whether adverts share it), the LoRa parameters (frequency, bandwidth, spreading factor, coding rate) and TX power, contact auto-add, extra ACKs, telemetry sharing, the path hash size (on firmware that supports it), and the RX delay / airtime factor tuning.
+- **Radio** — status (name, public key, model and firmware, battery and storage, uptime, noise floor, last RSSI/SNR, airtime, packet counters, clock drift) and actions: send a zero-hop or flood advert, set the radio's clock from the computer, reboot. Forms for the name and position (and whether adverts share it), the LoRa parameters (frequency, bandwidth, spreading factor, coding rate) and TX power, contact auto-add, extra ACKs, telemetry sharing, the path hash size (on firmware that supports it), and the RX delay / airtime factor tuning. A **Firmware** card checks for and installs MeshCore updates (see [Firmware updates](#firmware-updates)).
 - **Channels** — the channel slots with each channel's type, hash and which plugins use it. **Add a channel by name**: a hashtag channel (`#local`: the key comes from the name, so everyone who adds the same hashtag shares it), a private channel (paste the key someone shared, or leave it empty for a new random one), or the well-known Public channel. Rename, change a private channel's key, copy a key to share it, remove a channel, and send a message to a channel from the radio.
 - **Contacts** — the radio's contacts with type, key, last advert and route; search and filter by type, reset a route (the next message floods to find a new one), or remove a contact.
 - **Plugins** — every plugin with its state. Turn one on or off, or edit its settings in a form built from the plugin's schema (a plugin may add a panel of its own, like the check-ins one). Saving applies them right away: a plugin that can take the change while running does (the Packet map's shown packet types, for example), the others restart with it. A link like `#control/plugins/packet_map` opens a plugin's settings directly. Secrets (passwords, tokens, API headers) are never sent to the browser: they show as "Saved", and are kept unless you type a new value.
 - **Settings** — everything else in `config.yaml`, one card per section: **Telegram** (bot token, group ID, captions, sender prefix), **Radio** (connection: serial device, baud rate, TCP host/port or Bluetooth address/PIN; bridge channel, contact names, echo fallback), **Web app** (address, port, password, title, map tiles), **Message chunking** and **Logging**. Serial devices found on the machine are suggested. A new bot token or group is checked with Telegram before it's saved. These settings are read when Meshgram starts, so a saved change shows *Restart to apply* until the **Restart now** button (or a restart of the service/container) brings Meshgram back with it; the page waits for it and reloads. Secrets (bot token, web password, Bluetooth PIN) are never sent to the browser.
 - **Config file** — your `config.yaml` with the settings and plugin changes made in the panel written into it, to make them the defaults. It lists which settings and plugins differ, shows the changes as a diff (or the whole file), and has **Copy** and **Download** buttons. Only what changed is rewritten: comments, quoting and layout stay as they are, and the result is checked by loading it back the way Meshgram does. Replace `config.yaml` with it and restart Meshgram.
+
+### Firmware updates
+
+The **Radio** tab's **Firmware** card shows the installed MeshCore version and the newest release for the radio's board, and installs any published version (the latest is picked; older ones and pre-releases can be chosen too). Releases are the official MeshCore companion firmware from [GitHub](https://github.com/meshcore-dev/MeshCore/releases), the same files the MeshCore web flasher uses; the list is fetched when the card is opened and kept for an hour (**Check for updates** fetches it again).
+
+Click **Update to v…**, confirm, and Meshgram:
+
+1. downloads the file and checks it against the checksum GitHub publishes for it, then checks it really is an update for this kind of board (an ESP32 application image for the radio's chip, or an nRF52 application-only DFU package);
+2. disconnects from the radio and stops reconnecting, so the USB serial port is free;
+3. puts the radio into its bootloader and installs the update **without erasing anything**: the radio keeps its settings, identity (keys), contacts and channels. ESP32 boards are reset into their ROM bootloader by esptool and get the new application written over the app partition named in their own partition table; nRF52 boards get the 1200-baud "touch" that starts their Adafruit bootloader, then a DFU transfer of the application (the bootloader and SoftDevice aren't touched). A transfer that fails is tried again;
+4. lets the radio restart, reconnects, and does what it does after any reconnect: channels and contacts are read again and every plugin is told the radio is back;
+5. checks the radio now reports the new version and still has the same identity.
+
+Progress shows on every open page, step by step with a log. It takes a minute or two; Meshgram's radio features (bridge, observers, map) pause meanwhile, and Meshgram can't be restarted from the panel until it's done.
+
+What it needs:
+
+- **The radio on USB** (`meshcore.connection.mode: serial`). Over TCP or Bluetooth, use the [MeshCore web flasher](https://flasher.meshcore.co.uk) instead. The update installs the USB companion firmware (`companion_radio_usb`), the one Meshgram talks to.
+- **The board.** The radio reports a model ("Heltec V3"); when that matches one board, it's picked. Some models come in variants (Heltec V3 or Wireless Stick Lite V3, T114 with or without display, …): pick yours once and it's remembered. An update for a board the radio's model doesn't match is refused.
+- **ESP32 or nRF52.** RP2040 boards update by copying the `.uf2` file to the drive they show in BOOTSEL mode, STM32 boards with an STM32 programmer.
+- **Internet access** to GitHub, and the flashing tools `esptool` and `adafruit-nrfutil` (in `requirements.txt`).
+
+Choosing an older version than the installed one asks for an extra confirmation: older firmware may not understand settings saved by newer versions. If the radio isn't connected (a previous update stopped half-way, say), the card can still install firmware on the board you pick, without the checks against what the radio reports.
 
 Changes to the radio are stored on the radio itself. Plugin changes are saved in `MESHGRAM_DATA_DIR/plugins.json`, other settings in `MESHGRAM_DATA_DIR/settings.json` (both mode `600`, as they may hold secrets), and they win over `config.yaml` until you click **Reset to config.yaml** on the plugin or settings section; what's changed this way is tagged *Changed here*. config.yaml is never rewritten (it holds secrets and Docker mounts it read-only); the **Config file** tab gives you the file to put in its place instead. Once `config.yaml` says the same as a saved change, Meshgram drops that change when it starts.
 
@@ -779,7 +804,7 @@ curl -fsS -u ":$PASSWORD" http://127.0.0.1:8080/api/config.yaml -o config.new.ya
 
 The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from OpenStreetMap, so the browser needs internet access. It has light and dark themes, works on phones, and remembers the map position, hidden node types, table sort order, theme and control panel tab across refreshes. The view is part of the URL (`#map`, `#messages`, `#control/channels`, …), so refresh and Back work.
 
-**API.** The panel uses a small JSON API under `/api` (radio, channels, contacts, plugins, settings, restart) plus a Server-Sent Events stream at `/api/events`; see the docstring of `meshgram/web/api.py` for the endpoints. Plugins can add routes of their own while they run (the check-in plugin's are listed in `meshgram/plugins/check_in_api.py`).
+**API.** The panel uses a small JSON API under `/api` (radio, firmware, channels, contacts, plugins, settings, restart) plus a Server-Sent Events stream at `/api/events`; see the docstring of `meshgram/web/api.py` for the endpoints. Plugins can add routes of their own while they run (the check-in plugin's are listed in `meshgram/plugins/check_in_api.py`).
 
 ---
 
@@ -789,7 +814,7 @@ The page loads [Leaflet](https://leafletjs.com) from unpkg and map tiles from Op
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and chunk sequencing, ping keyword behavior, trace-me responses, DM HTTP command, MeshCore transport send/dispatch with a stubbed library, MQTT observer packet formatting / auth tokens / MQTT sessions (MeshMapper, LetsMesh, MeshRank) with a fake broker client, observers' channel messages reaching the plugins, packet map decoding / path resolution / persistence, the web server (auth, CSRF and read-only rules, event stream), the control panel API, radio administration against a simulated radio, settings schemas and secret masking, runtime plugin management, and exporting config.yaml with the control panel's changes (comments kept, read back the way Meshgram loads it).
+Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji + long-token fallback), bridge filtering and chunk sequencing, ping keyword behavior, trace-me responses, DM HTTP command, MeshCore transport send/dispatch with a stubbed library, MQTT observer packet formatting / auth tokens / MQTT sessions (MeshMapper, LetsMesh, MeshRank) with a fake broker client, observers' channel messages reaching the plugins, packet map decoding / path resolution / persistence, the web server (auth, CSRF and read-only rules, event stream), the control panel API, radio administration against a simulated radio, firmware updates (release parsing, board matching, checksum/image/partition checks, the update flow and its API with a simulated radio and flashing tool), settings schemas and secret masking, runtime plugin management, and exporting config.yaml with the control panel's changes (comments kept, read back the way Meshgram loads it).
 
 ---
 
@@ -827,6 +852,13 @@ Coverage includes: config loading and `.env` migration, chunking (ASCII + emoji 
 ### Sender label shows the raw node ID
 - Expected when peer metadata is missing.
 - Set `meshcore.contact_name_overrides` for deterministic labels.
+
+### A firmware update fails
+- The card's **Details** log shows each step. Nothing is erased, so it's safe to try again.
+- *"Couldn't put the radio into its bootloader"* (ESP32): hold the radio's **BOOT** button, press and release **RESET**, let go of BOOT, and try again; the update then starts from the bootloader.
+- An nRF52 radio left in its bootloader (its LED pulses, it doesn't reconnect): try the update again, or double-press its reset button first.
+- *"The radio didn't come back on USB"* in Docker: see the firmware note under [Docker on Linux](#-docker-on-linux-usb-serial).
+- *"…hasn't reconnected yet"*: the update was written; unplug the radio and plug it in again. Meshgram keeps trying to reconnect.
 
 ### MeshCore "could not open port"
 - Verify the symlink/device path actually exists: `ls -l /dev/meshcore` (or whatever you set).
@@ -869,6 +901,8 @@ meshgram/
 │   ├── plugin_manager.py         # runs plugins; runtime on/off and settings (plugins.json)
 │   ├── settings_schema.py        # JSON Schema subset: validation, secret masking
 │   ├── radio_admin.py            # radio settings, channels and contacts
+│   ├── firmware/                 # firmware updates: releases (catalog.py), file checks (images.py),
+│   │                             # the update itself (updater.py), flashing process (worker.py)
 │   ├── status.py                 # connection status registry
 │   ├── text_utils.py
 │   ├── types.py
