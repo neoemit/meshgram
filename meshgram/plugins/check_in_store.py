@@ -11,13 +11,17 @@ guarded by a lock; every change is one transaction.
   (and merged into the participant that already has the key) once a node of that
   name is the only one in the directory, or as soon as a flood advert of that name
   is heard live (by the radio or an observer): the first one decides, even if other
-  nodes went by the name before.
+  nodes went by the name before, and later check-ins under the name go to it. A
+  first check-in under a name several nodes share goes to the node heard flooding
+  an advert of it last. Only companions post on channels: repeaters, rooms and
+  sensors of the same name aren't candidates.
 - ``check_ins``: every check-in message, repeats included. ``day`` is its date in
   the plugin's time zone; which period (day or week) it counts for follows from the
   plugin's ``Schedule`` when it's read, so changing the schedule keeps the history.
   ``message_key`` identifies one message however many radios heard it.
-- ``nodes``: names from adverts (the radio's contacts, packets it and observers
-  heard), the newest advert winning. Resolves senders' names to keys.
+- ``nodes``: names (and kinds: ``node_type``) from adverts (the radio's contacts,
+  packets it and observers heard), the newest advert winning, and when a flood
+  advert of the name was last heard (``flood_at``). Resolves senders' names to keys.
 """
 from __future__ import annotations
 
@@ -45,6 +49,13 @@ SOURCE_MANUAL = "manual"
 SOURCE_IMPORT = "import"
 SOURCES = (SOURCE_RADIO, SOURCE_OBSERVER, SOURCE_MANUAL, SOURCE_IMPORT)
 
+# Columns added to ``nodes`` after schema 2 came out: older Meshgrams don't mind them.
+_ADDED_NODE_COLUMNS = {"node_type": "TEXT", "flood_at": "REAL"}
+
+# Kinds of node (``meshcore_packets.NODE_TYPE_NAMES``) that don't post on channels,
+# so a check-in under their name was sent by another node.
+NON_SENDER_NODE_TYPES = frozenset({"repeater", "room", "sensor"})
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS participants (
     id INTEGER PRIMARY KEY,
@@ -62,7 +73,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     node_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     advert_at REAL,
-    seen_at REAL NOT NULL
+    seen_at REAL NOT NULL,
+    node_type TEXT,
+    flood_at REAL
 );
 CREATE INDEX IF NOT EXISTS nodes_by_name ON nodes (name);
 """
@@ -107,6 +120,8 @@ class NodeSighting:
     # A flood advert heard just now (not the radio's contact list): the node is around
     # under this name, so participants known only by it are linked to it.
     flood: bool = False
+    # "chat", "repeater", "room" or "sensor", when the advert or contact says.
+    node_type: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +236,10 @@ class CheckInStore:
         if version == 1:
             self._migrate_from_weeks(conn)
         conn.executescript(f"BEGIN; {_SCHEMA} PRAGMA user_version={SCHEMA_VERSION}; COMMIT;")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(nodes)")}
+        for column, kind in _ADDED_NODE_COLUMNS.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE nodes ADD COLUMN {column} {kind}")
         conn.execute("SELECT COUNT(*) FROM check_ins").fetchone()  # surfaces a corrupt file now
 
     def _migrate_from_weeks(self, conn: sqlite3.Connection) -> None:
@@ -346,27 +365,47 @@ class CheckInStore:
             for sighting in sightings:
                 if sighting.flood and not sighting.fill_only:
                     flooded.setdefault(sighting.name, sighting.node_id)
-                row = conn.execute("SELECT name, advert_at FROM nodes WHERE node_id = ?", (sighting.node_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT name, advert_at, node_type FROM nodes WHERE node_id = ?", (sighting.node_id,)
+                ).fetchone()
                 if row is not None:
-                    known_name, known_advert_at = row
+                    known_name, known_advert_at, known_type = row
                     stale = (
                         sighting.advert_at is not None
                         and known_advert_at is not None
                         and sighting.advert_at < known_advert_at
                     )
+                    node_type = None if stale else sighting.node_type
+                    flood_at = now if sighting.flood and not (sighting.fill_only or stale) else None
                     if sighting.fill_only or stale or known_name == sighting.name:
-                        conn.execute("UPDATE nodes SET seen_at = ? WHERE node_id = ?", (now, sighting.node_id))
+                        conn.execute(
+                            "UPDATE nodes SET seen_at = ?, node_type = COALESCE(?, node_type), flood_at = COALESCE(?, flood_at)"
+                            " WHERE node_id = ?",
+                            (now, node_type, flood_at, sighting.node_id),
+                        )
+                        if node_type and node_type != known_type:
+                            # Known as a companion or not now: the name's candidates changed.
+                            names.add(known_name)
                         continue
+                    # A flood advert of the old name says nothing about the new one.
                     conn.execute(
-                        "UPDATE nodes SET name = ?, advert_at = COALESCE(?, advert_at), seen_at = ? WHERE node_id = ?",
-                        (sighting.name, sighting.advert_at, now, sighting.node_id),
+                        "UPDATE nodes SET name = ?, advert_at = COALESCE(?, advert_at), seen_at = ?,"
+                        " node_type = COALESCE(?, node_type), flood_at = ? WHERE node_id = ?",
+                        (sighting.name, sighting.advert_at, now, node_type, flood_at, sighting.node_id),
                     )
                     # The old name may belong to just one node now.
                     names.add(known_name)
                 else:
                     conn.execute(
-                        "INSERT INTO nodes (node_id, name, advert_at, seen_at) VALUES (?, ?, ?, ?)",
-                        (sighting.node_id, sighting.name, sighting.advert_at, now),
+                        "INSERT INTO nodes (node_id, name, advert_at, seen_at, node_type, flood_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            sighting.node_id,
+                            sighting.name,
+                            sighting.advert_at,
+                            now,
+                            sighting.node_type,
+                            now if sighting.flood and not sighting.fill_only else None,
+                        ),
                     )
                 names.add(sighting.name)
                 # A participant goes by its node's latest name.
@@ -375,13 +414,13 @@ class CheckInStore:
                     (sighting.name, now, sighting.node_id, sighting.name),
                 ).rowcount
             for name in names:
-                node_ids = [node_id for (node_id,) in conn.execute("SELECT node_id FROM nodes WHERE name = ?", (name,))]
+                node_ids = self._senders(conn, name)
                 if len(node_ids) == 1 and self._has_unresolved(conn, name):
                     self._link(conn, node_ids[0], name, now)
                     changed += 1
             for name, node_id in flooded.items():
                 # Still unresolved: other nodes (old keys, contacts) go by the name too.
-                if self._has_unresolved(conn, name) and self._directory_name(conn, node_id) == name:
+                if self._has_unresolved(conn, name) and node_id in self._senders(conn, name):
                     self._link(conn, node_id, name, now)
                     changed += 1
         return changed
@@ -634,13 +673,36 @@ class CheckInStore:
 
     def _resolve(self, conn: sqlite3.Connection, name: str, now: float) -> tuple[int, bool]:
         """The participant a sender's name stands for, created if need be; (id, created)."""
-        node_ids = [node_id for (node_id,) in conn.execute("SELECT node_id FROM nodes WHERE name = ?", (name,))]
+        node_ids = self._senders(conn, name)
         if len(node_ids) == 1:
             participant_id = self._link(conn, node_ids[0], name, now)
             if participant_id is not None:
                 return participant_id, False
             return self._insert_participant(conn, node_ids[0], name, now), True
-        if not node_ids:
+        if node_ids:
+            # Several nodes go by the name, one of them a participant already (linked by its flood
+            # advert, or by hand): that's who it is. A name-only twin made meanwhile joins it.
+            linked = conn.execute(
+                f"SELECT id, node_id FROM participants WHERE node_id IN ({', '.join('?' * len(node_ids))}) LIMIT 2",
+                node_ids,
+            ).fetchall()
+            if len(linked) == 1:
+                participant_id, node_id = linked[0]
+                self._link(conn, node_id, name, now)
+                return participant_id, False
+            if not linked:
+                # None of them yet: the one heard flooding an advert of the name last is around under it.
+                flooded = conn.execute(
+                    f"SELECT node_id FROM nodes WHERE node_id IN ({', '.join('?' * len(node_ids))})"
+                    " AND flood_at IS NOT NULL ORDER BY flood_at DESC LIMIT 1",
+                    node_ids,
+                ).fetchone()
+                if flooded is not None:
+                    participant_id = self._link(conn, flooded[0], name, now)
+                    if participant_id is not None:
+                        return participant_id, False
+                    return self._insert_participant(conn, flooded[0], name, now), True
+        else:
             # A participant whose key was entered by hand, its advert not heard yet.
             linked = conn.execute(
                 "SELECT id FROM participants WHERE node_id IS NOT NULL AND name = ? LIMIT 2", (name,)
@@ -790,6 +852,12 @@ class CheckInStore:
     @staticmethod
     def _has_unresolved(conn: sqlite3.Connection, name: str) -> bool:
         return conn.execute("SELECT 1 FROM participants WHERE node_id IS NULL AND name = ?", (name,)).fetchone() is not None
+
+    @staticmethod
+    def _senders(conn: sqlite3.Connection, name: str) -> list[str]:
+        """The nodes that could have sent a channel message as ``name``: those of the name but repeaters and such."""
+        rows = conn.execute("SELECT node_id, node_type FROM nodes WHERE name = ? ORDER BY node_id", (name,))
+        return [node_id for node_id, node_type in rows if node_type not in NON_SENDER_NODE_TYPES]
 
     @staticmethod
     def _directory_name(conn: sqlite3.Connection, node_id: str) -> Optional[str]:

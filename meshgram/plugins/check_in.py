@@ -38,6 +38,7 @@ from typing import Any, Callable, Optional
 from meshgram.config import _as_bool, data_dir
 from meshgram.meshcore_packets import (
     DIRECT_ROUTE_TYPES,
+    NODE_TYPE_NAMES,
     PAYLOAD_TYPE_ADVERT,
     decode_advert,
     parse_packet,
@@ -109,6 +110,7 @@ BACKUP_VERSION = 2
 CHANGE_EVENT = {"type": "control", "what": "check_in"}
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 KEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+NODE_TYPES = frozenset(NODE_TYPE_NAMES.values())
 DAY_ALIASES = {name[:3].lower(): index for index, name in enumerate(WEEKDAY_NAMES)}
 
 
@@ -728,7 +730,8 @@ class CheckInPlugin(BasePlugin):
         for key, contact in contacts.items():
             if isinstance(contact, dict):
                 last_advert = _as_float(contact.get("last_advert"), 0.0) or None
-                self._sight(key, contact.get("adv_name"), advert_at=last_advert)
+                node_type = NODE_TYPE_NAMES.get(contact.get("type"))
+                self._sight(key, contact.get("adv_name"), advert_at=last_advert, node_type=node_type)
 
     async def _refresh_loop(self) -> None:
         while True:
@@ -739,16 +742,31 @@ class CheckInPlugin(BasePlugin):
 
     def _sight_advert(self, advert: Optional[dict[str, Any]], *, flood: bool = False) -> None:
         if advert:
-            self._sight(advert.get("public_key"), advert.get("name"), advert_at=float(advert["advert_timestamp"]), flood=flood)
+            self._sight(
+                advert.get("public_key"),
+                advert.get("name"),
+                advert_at=float(advert["advert_timestamp"]),
+                flood=flood,
+                node_type=advert.get("node_type"),
+            )
 
     def _sight(
-        self, key: Any, name: Any, *, advert_at: Optional[float] = None, fill_only: bool = False, flood: bool = False
+        self,
+        key: Any,
+        name: Any,
+        *,
+        advert_at: Optional[float] = None,
+        fill_only: bool = False,
+        flood: bool = False,
+        node_type: Optional[str] = None,
     ) -> None:
         node_id = _clean_key(key)
         name = str(name or "").strip()[:MAX_NAME_LENGTH]
         if node_id is None or not name:
             return
-        sighting = NodeSighting(node_id, name, advert_at, fill_only and not flood, flood)
+        if node_type not in NODE_TYPES:
+            node_type = None  # "unknown": says nothing
+        sighting = NodeSighting(node_id, name, advert_at, fill_only and not flood, flood, node_type)
         pending = self._pending_nodes.get(node_id)
         if pending is not None:
             keep = not pending.fill_only and (sighting.fill_only or (pending.advert_at or 0) > (advert_at or 0))
@@ -756,6 +774,8 @@ class CheckInPlugin(BasePlugin):
             # A flood advert heard meanwhile still counts as one until flushed.
             if other.flood and other.name == winner.name and not winner.flood:
                 winner = dataclasses.replace(winner, flood=True)
+            if winner.node_type is None and other.node_type is not None:
+                winner = dataclasses.replace(winner, node_type=other.node_type)
             sighting = winner
         self._pending_nodes[node_id] = sighting
 
