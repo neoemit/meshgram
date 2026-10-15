@@ -40,6 +40,8 @@ from meshgram.meshcore_packets import (
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_ANON_REQ,
     PAYLOAD_TYPE_GRP_TXT,
+    PAYLOAD_TYPE_REQ,
+    PAYLOAD_TYPE_TXT_MSG,
     decode_packet,
     decrypt_group_text,
     is_valid_position,
@@ -61,6 +63,8 @@ LOGGER = logging.getLogger(__name__)
 HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
 # Node types that relay packets and therefore appear in packet paths.
 RELAY_NODE_TYPES = {"repeater", "room"}
+# Payload types people send (from companions or rooms, never repeaters).
+SENDER_PAYLOAD_TYPES = {PAYLOAD_TYPE_TXT_MSG, PAYLOAD_TYPE_GRP_TXT, PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_ANON_REQ}
 CONTACT_REFRESH_SECONDS = 30.0
 PERSIST_INTERVAL_SECONDS = 5.0
 DEFAULT_DB_FILE = "packet_map.sqlite3"
@@ -354,7 +358,37 @@ class PacketMapState:
         resolved.reverse()
         return resolved
 
-    def _resolve_origin(self, packet: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _origin_anchor(self, path_nodes: list[dict[str, Any]], receiver_id: Optional[str]) -> Optional[dict[str, Any]]:
+        """The placed node nearest the sender along the route: the first placed relay, else who heard it."""
+        for ref in path_nodes:
+            node = self.nodes.get(ref.get("node_id") or "")
+            if _has_position(node):
+                return node
+        for node_id in (receiver_id, self.self_id):
+            node = self.nodes.get(node_id) if node_id else None
+            if _has_position(node):
+                return node
+        return None
+
+    def _pick_origin(
+        self, candidates: list[dict[str, Any]], anchor: Optional[dict[str, Any]], payload_type: Any
+    ) -> Optional[dict[str, Any]]:
+        if len(candidates) == 1:
+            return candidates[0]
+        if payload_type in SENDER_PAYLOAD_TYPES:
+            # Messages and requests come from companions (or rooms), not repeaters.
+            candidates = [node for node in candidates if node.get("type") != "repeater"] or candidates
+            if len(candidates) == 1:
+                return candidates[0]
+        placed = [node for node in candidates if _has_position(node)]
+        if _has_position(anchor) and placed:
+            # Radio range is limited: the sender is likeliest the one nearest the first relay.
+            return min(placed, key=lambda node: _distance_km(node, anchor))  # type: ignore[arg-type]
+        return placed[0] if len(placed) == 1 else None
+
+    def _resolve_origin(
+        self, packet: dict[str, Any], receiver_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
         key = (
             (packet.get("advert") or {}).get("public_key")
             or packet.get("src_public_key")
@@ -363,15 +397,17 @@ class PacketMapState:
         if key and key in self.nodes:
             node = self.nodes[key]
             return self._node_ref(node, key[:2], 1)
+        anchor = self._origin_anchor(packet.get("path_nodes") or [], receiver_id)
         if packet.get("src_hash"):
             candidates = self._candidates(packet["src_hash"])
-            node = candidates[0] if len(candidates) == 1 else None
+            node = self._pick_origin(candidates, anchor, packet.get("payload_type"))
             return self._node_ref(node, packet["src_hash"], len(candidates))
         sender = packet.get("sender_name")
         if sender:
             matches = [node for node in self.nodes.values() if node.get("name") == sender]
-            if len(matches) == 1:
-                return self._node_ref(matches[0], matches[0]["id"][:2], 1)
+            node = self._pick_origin(matches, anchor, packet.get("payload_type"))
+            if node is not None:
+                return self._node_ref(node, node["id"][:2], len(matches))
         return None
 
     # Packets ----------------------------------------------------------------
@@ -509,7 +545,7 @@ class PacketMapState:
             packet["source_public_key"] = source_key
 
         packet["path_nodes"] = self._resolve_path(packet["path"], observer_id)
-        packet["origin"] = self._resolve_origin(packet)
+        packet["origin"] = self._resolve_origin(packet, observer_id)
         if packet["route"] == "flood":
             # The last relay (or the originator, for zero-hop packets) is who was heard.
             packet["heard_from"] = packet["path_nodes"][-1] if packet["path_nodes"] else packet["origin"]

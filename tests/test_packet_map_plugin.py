@@ -177,6 +177,41 @@ class StateTests(unittest.TestCase):
         self.assertEqual(packet["heard_from"]["name"], "Near")
         self.assertEqual(packet["origin"]["node_id"], COMPANION_KEY)
 
+    def test_ambiguous_sender_hash_picks_companion_nearest_first_relay(self):
+        near_phone, far_phone = "C3" + "01" * 31, "C3" + "02" * 31
+        self.state.update_contacts(
+            {
+                REPEATER_KEY: {"type": 2, "adv_name": "Hilltop", "adv_lat": 46.0, "adv_lon": -74.0},
+                near_phone: {"type": 1, "adv_name": "Near", "adv_lat": 46.01, "adv_lon": -74.01},
+                far_phone: {"type": 1, "adv_name": "Far", "adv_lat": 45.0, "adv_lon": -73.0},
+                "C3" + "03" * 31: {"type": 2, "adv_name": "Repeater", "adv_lat": 46.0, "adv_lon": -74.0},
+            }
+        )
+        packet = self.state.ingest_rx_log({"payload": _flood(2, ["B1"], "AAC3" + "00112233")})
+        # Far is closer to us, but Near is next to the relay that first carried the message.
+        self.assertEqual(packet["origin"], {"hash": "C3", "node_id": near_phone, "name": "Near", "candidates": 3})
+
+    def test_ambiguous_sender_name_prefers_placed_node(self):
+        self.state.update_contacts(
+            {
+                REPEATER_KEY: {"type": 2, "adv_name": "Hilltop", "adv_lat": 46.0, "adv_lon": -74.0},
+                COMPANION_KEY: {"type": 1, "adv_name": "Phone", "adv_lat": 46.01, "adv_lon": -74.01},
+                "C4" * 32: {"type": 1, "adv_name": "Phone"},
+            }
+        )
+        packet = self.state.ingest_rx_log(
+            {"payload": _flood(5, ["B1"], "11" + "2233" + "44"), "chan_name": "Public", "message": "Phone: hi"}
+        )
+        self.assertEqual(packet["origin"]["node_id"], COMPANION_KEY)
+        self.assertEqual(packet["origin"]["candidates"], 2)
+
+    def test_unplaced_ambiguous_sender_stays_unresolved(self):
+        self.state.update_contacts({COMPANION_KEY: {"type": 1, "adv_name": "Phone"}, "C4" * 32: {"type": 1, "adv_name": "Phone"}})
+        packet = self.state.ingest_rx_log(
+            {"payload": _flood(5, [], "11" + "2233" + "44"), "chan_name": "Public", "message": "Phone: hi"}
+        )
+        self.assertIsNone(packet["origin"])
+
     def test_unknown_hop_stays_unresolved(self):
         packet = self.state.ingest_rx_log({"payload": _flood(5, ["EE"], "11" + "2233" + "445566")})
         self.assertEqual(packet["path_nodes"][0]["node_id"], None)
