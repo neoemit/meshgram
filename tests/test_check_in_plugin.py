@@ -309,6 +309,29 @@ class CheckInTests(CheckInTestCase):
         entry = (await self.plugin.leaderboard())["leaderboard"][0]
         self.assertEqual((entry["id"], entry["resolved"]), (KEY_A, True))
 
+    async def test_observed_check_ins_under_a_shared_name_stay_verified(self):
+        # An old key of the node is still among the radio's contacts under its name.
+        self.transport.contacts = {KEY_A.lower(): {"adv_name": "Twin", "last_advert": 100, "type": 1}}
+        self.plugin._refresh_from_radio()
+        await self.transport.remote_listeners[0]({"payload": advert_packet(KEY_B, "Twin", 2000), "observer_id": OBSERVER_KEY})
+        await self.plugin._flush_nodes()
+        await self.observed("Twin: #MeshCoreMonday", 2001)
+        # A week later, only an observer hears it again: still the node its flood advert named.
+        self.now += 7 * 86400
+        await self.observed("Twin: #MeshCoreMonday", 2002)
+        board = (await self.plugin.leaderboard())["leaderboard"]
+        self.assertEqual([(entry["id"], entry["resolved"], entry["streak"]) for entry in board], [(KEY_B, True, 2)])
+
+    async def test_a_repeater_of_the_same_name_isnt_the_sender(self):
+        self.transport.contacts = {
+            KEY_A.lower(): {"adv_name": "Hill", "last_advert": 100, "type": 1},
+            KEY_B.lower(): {"adv_name": "Hill", "last_advert": 100, "type": 2},
+        }
+        self.plugin._refresh_from_radio()
+        await self.observed("Hill: #MeshCoreMonday", 2001)
+        entry = (await self.plugin.leaderboard())["leaderboard"][0]
+        self.assertEqual((entry["id"], entry["resolved"]), (KEY_A, True))
+
     async def test_longest_name_and_title_fit_in_one_message(self):
         # MeshCore node names are at most 31 bytes.
         name = "A very long node name, 31 bytes"

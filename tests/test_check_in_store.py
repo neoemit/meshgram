@@ -90,6 +90,57 @@ class CheckInTests(StoreTestCase):
         self.assertEqual(self.people()["Twin"].node_id, KEY_C)
         self.assertEqual([h.participant_id for h in self.store.histories(WEEKLY)], [pid])
 
+    def test_later_check_ins_under_a_shared_name_go_to_the_linked_node(self):
+        self.store.upsert_nodes([NodeSighting(KEY_B, "Twin", 100), NodeSighting(KEY_C, "Twin", 100)], NOW)
+        pid = self.store.record_check_in(record("Twin", "k1"))
+        self.store.upsert_nodes([NodeSighting(KEY_C, "Twin", 200, flood=True)], NOW)
+        # Both nodes still go by the name; the flood advert decided which one checks in under it.
+        self.assertEqual(self.store.record_check_in(record("Twin", "k2", day=MON + timedelta(weeks=1))), pid)
+        # A name-only twin an older version made meanwhile joins it at the next check-in.
+        self.store.create_participant("Twin", None, NOW)
+        self.assertEqual(self.store.record_check_in(record("Twin", "k3", day=MON + timedelta(weeks=2))), pid)
+        histories = self.store.histories(WEEKLY)
+        self.assertEqual([(h.participant_id, h.node_id, len(h.periods)) for h in histories], [(pid, KEY_C, 3)])
+
+    def test_a_flood_advert_heard_before_the_first_check_in_decides_it(self):
+        self.store.upsert_nodes([NodeSighting(KEY_A, "Twin", 100), NodeSighting(KEY_C, "Twin", 100)], NOW)
+        self.store.upsert_nodes([NodeSighting(KEY_B, "Twin", 200, flood=True)], NOW)
+        self.store.upsert_nodes([NodeSighting(KEY_C, "Twin", 300, flood=True)], NOW + 60)
+        # Its latest one: the node heard flooding the name last is around under it.
+        self.store.record_check_in(record("Twin", "k1"))
+        self.assertEqual(self.people()["Twin"].node_id, KEY_C)
+
+    def test_a_flood_advert_under_an_old_name_doesnt_count_for_the_new_one(self):
+        self.store.upsert_nodes([NodeSighting(KEY_A, "Old", 100, flood=True), NodeSighting(KEY_B, "New", 100)], NOW)
+        # Renamed: its contact entry says so, but no flood advert of the new name has been heard.
+        self.store.upsert_nodes([NodeSighting(KEY_A, "New", 200)], NOW)
+        self.store.record_check_in(record("New", "k1"))
+        self.assertIsNone(self.people()["New"].node_id)
+
+    def test_repeaters_rooms_and_sensors_dont_check_in(self):
+        self.store.upsert_nodes(
+            [
+                NodeSighting(KEY_A, "Hill", 100, node_type="chat"),
+                NodeSighting(KEY_B, "Hill", 100, node_type="repeater"),
+                NodeSighting(KEY_C, "Hall", 100, node_type="room"),
+            ],
+            NOW,
+        )
+        self.store.record_check_in(record("Hill", "k1"))
+        self.store.record_check_in(record("Hall", "k2"))
+        # Nor does a repeater's flood advert link a name-only participant.
+        self.store.upsert_nodes([NodeSighting(KEY_C, "Hall", 200, flood=True)], NOW)
+        people = self.people()
+        self.assertEqual((people["Hill"].node_id, people["Hall"].node_id), (KEY_A, None))
+
+    def test_a_node_known_as_a_repeater_leaves_the_name_to_the_other(self):
+        self.store.upsert_nodes([NodeSighting(KEY_A, "Hill", 100), NodeSighting(KEY_B, "Hill", 100)], NOW)
+        self.store.record_check_in(record("Hill", "k1"))
+        self.assertIsNone(self.people()["Hill"].node_id)
+        # Its advert says what it is (the name unchanged): the companion is the one left.
+        self.assertEqual(self.store.upsert_nodes([NodeSighting(KEY_B, "Hill", 100, node_type="repeater")], NOW), 1)
+        self.assertEqual(self.people()["Hill"].node_id, KEY_A)
+
     def test_stale_flood_advert_doesnt_link_an_old_name(self):
         self.store.upsert_nodes([NodeSighting(KEY_A, "Current", 200)], NOW)
         self.store.record_check_in(record("Unlinked", "k1"))
@@ -339,6 +390,27 @@ class FileTests(unittest.TestCase):
         conn = sqlite3.connect(self.path)
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         conn.close()
+
+    def test_nodes_get_the_columns_added_since(self):
+        store = CheckInStore(self.path)
+        store.open()
+        store.close()
+        conn = sqlite3.connect(self.path)
+        conn.execute("ALTER TABLE nodes DROP COLUMN node_type")
+        conn.execute("ALTER TABLE nodes DROP COLUMN flood_at")
+        conn.execute("INSERT INTO nodes VALUES (?, 'Hill', 100, 0)", (KEY_B,))
+        conn.commit()
+        conn.close()
+        store = CheckInStore(self.path)
+        store.open()
+        self.addCleanup(store.close)
+        store.upsert_nodes([NodeSighting(KEY_A, "Hill", 100, node_type="chat"), NodeSighting(KEY_B, "Hill", 100, node_type="repeater")], NOW)
+        store.record_check_in(record("Hill", "k1"))
+        self.assertEqual(store.histories(WEEKLY)[0].node_id, KEY_A)
+        store.upsert_nodes([NodeSighting(KEY_C, "Hall", 100, flood=True)], NOW)
+        store.upsert_nodes([NodeSighting(KEY_B, "Hall", 100)], NOW)
+        store.record_check_in(record("Hall", "k2"))
+        self.assertEqual({h.name: h.node_id for h in store.histories(WEEKLY)}["Hall"], KEY_C)
 
     def test_newer_schema_is_refused(self):
         conn = sqlite3.connect(self.path)
