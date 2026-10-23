@@ -407,7 +407,7 @@
       return;
     }
     panel.replaceChildren(statusCard(data), slot, identityCard(data), radioParamsCard(data), behaviourCard(data),
-      data.tuning ? tuningCard(data) : null);
+      ...(data.tuning ? [tuningCard(data)] : []));
   }
 
   function statusCard(data) {
@@ -423,9 +423,10 @@
       fact("Device", device.model || dash, device.firmware ? `Firmware ${device.firmware}${device.build ? ` (${device.build})` : ""}` : null),
       fact("Battery", Number.isFinite(batteryMv) ? `${(batteryMv / 1000).toFixed(2)} V` : dash,
         battery && Number.isFinite(battery.total_kb) && battery.total_kb > 0 ? `Storage ${fmtNumber(battery.used_kb)} of ${fmtNumber(battery.total_kb)} KB used` : null),
-      fact("Uptime", fmtDuration(core.uptime_secs), stats.core ? `${plural(core.queue_len, "message", "messages")} queued` : null),
+      fact("Uptime", fmtDuration(core.uptime_secs), Number.isFinite(core.queue_len) ? `${plural(core.queue_len, "message", "messages")} queued` : null),
       fact("Radio", radio.freq ? `${fmtNumber(radio.freq, 3)} MHz` : dash,
-        radio.freq ? `BW ${radio.bw} kHz · SF ${radio.sf} · CR 4/${radio.cr} · ${radio.tx_power} dBm` : null),
+        radio.freq ? [radio.bw != null ? `BW ${radio.bw} kHz` : null, radio.sf != null ? `SF ${radio.sf}` : null,
+          radio.cr != null ? `CR 4/${radio.cr}` : null, radio.tx_power != null ? `${radio.tx_power} dBm` : null].filter(Boolean).join(" · ") || null : null),
       fact("Noise floor", Number.isFinite(rf.noise_floor) ? `${rf.noise_floor} dBm` : dash,
         Number.isFinite(rf.last_rssi) ? `Last packet ${rf.last_rssi} dBm, SNR ${fmtNumber(rf.last_snr, 1)} dB` : null),
       fact("Airtime", stats.radio ? `${fmtDuration(rf.tx_air_secs)} sending` : dash, stats.radio ? `${fmtDuration(rf.rx_air_secs)} receiving` : null),
@@ -650,7 +651,7 @@
     const fact = (label, value, sub) => el("div", {}, el("dt", {}, label), el("dd", {}, value, sub ? el("span", { class: "sub" }, sub) : null));
     const facts = el("dl", { class: "facts" },
       fact("Installed", device.version || dash, device.build ? `Built ${device.build}` : (device.connected ? null : "The radio isn't connected")),
-      fact("Latest", data.latest ? `v${data.latest}` : dash, latest ? `Released ${fmtDate(latest.published_at)}` : null),
+      fact("Latest", data.latest ? `v${data.latest}` : dash, latest && latest.published_at ? `Released ${fmtDate(latest.published_at)}` : null),
       fact("Board", data.board || "Not sure", device.model ? `The radio says: ${device.model}` : null),
       fact("Status", el("span", { class: "badge-state", "data-state": state[0] }, state[1])));
 
@@ -689,7 +690,8 @@
       if (release.version === data.latest) notes.push("latest");
       if (release.installed) notes.push("installed");
       if (release.prerelease) notes.push("pre-release");
-      return `v${release.version}${notes.length ? ` (${notes.join(", ")})` : ""} · ${fmtDate(release.published_at)}`;
+      const date = fmtDate(release.published_at);
+      return `v${release.version}${notes.length ? ` (${notes.join(", ")})` : ""}${date ? ` · ${date}` : ""}`;
     };
     if (!releases.some((release) => release.version === ui.firmwareVersion)) {
       ui.firmwareVersion = (latest || releases.find((release) => release.installed) || releases[0] || {}).version || null;
@@ -819,7 +821,7 @@
         used ? channelTable(data) : el("p", { class: "hint" }, "No channels yet. Add one below."),
       ],
     });
-    panel.replaceChildren(list, addChannelCard(data), used ? composerCard(data) : null);
+    panel.replaceChildren(list, addChannelCard(data), ...(used ? [composerCard(data)] : []));
   }
 
   function channelTable(data) {
