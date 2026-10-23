@@ -1801,7 +1801,7 @@ function syncChips(wrap, options, selected, minOptions = 1, leading = null) {
   if (wrap.dataset.keys !== keys) {
     wrap.dataset.keys = keys;
     wrap.replaceChildren(
-      leading,
+      ...(leading ? [leading] : []),
       el("button", { class: "filter-chip", type: "button", "data-key": "" }, "All"),
       ...options.map((o) => el("button", { class: "filter-chip", type: "button", "data-key": o.key, title: o.title },
         o.color ? el("i", { style: `--c:${o.color}`, "aria-hidden": "true" }) : null, o.label, el("span", { class: "n" }))));
