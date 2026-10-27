@@ -205,6 +205,7 @@ class CheckInConfig:
     schedule: Schedule = Schedule()
     timezone: str = DEFAULT_TIMEZONE
     reply: bool = True
+    count_observed: bool = True
     reply_to_observed: bool = True
     reply_template: str = DEFAULT_TEMPLATE
     reply_cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS
@@ -222,6 +223,7 @@ class CheckInConfig:
             schedule=schedule_from_settings(settings),
             timezone=str(settings.get("timezone") or "").strip() or DEFAULT_TIMEZONE,
             reply=_as_bool(settings.get("reply"), True),
+            count_observed=_as_bool(settings.get("count_observed"), True),
             reply_to_observed=_as_bool(settings.get("reply_to_observed"), True),
             reply_template=template,
             reply_cooldown_seconds=max(0.0, _as_float(settings.get("reply_cooldown_seconds"), DEFAULT_COOLDOWN_SECONDS)),
@@ -402,12 +404,30 @@ class CheckInPlugin(BasePlugin):
                 "enum": time_zones(),
                 "default": DEFAULT_TIMEZONE,
             },
-            "reply": {"type": "boolean", "title": "Reply to check-ins", "default": True},
+            "count_observed": {
+                "type": "boolean",
+                "title": "Count check-ins other observers heard",
+                "description": (
+                    "Listen for check-ins in the packets other observers heard (through the MQTT observer plugins), "
+                    "not only the radio's, and count them on the leaderboard, whether replies are on or off."
+                ),
+                "default": True,
+            },
+            "reply": {
+                "type": "boolean",
+                "title": "Reply to check-ins",
+                "description": "Off: check-ins still count, nobody gets an answer on the channel.",
+                "default": True,
+            },
             "reply_to_observed": {
                 "type": "boolean",
-                "title": "Also reply to check-ins only observers heard",
-                "description": "Check-ins other observers heard (through the MQTT observer plugins) count either way.",
+                "title": "Reply to check-ins only observers heard",
+                "description": (
+                    "Off: check-ins only other observers heard count, unanswered; "
+                    "the ones our radio heard are still answered."
+                ),
                 "default": True,
+                "x-shown-if": {"count_observed": [True], "reply": [True]},
             },
             "reply_template": {
                 "type": "string",
@@ -549,8 +569,8 @@ class CheckInPlugin(BasePlugin):
         if sender is None:
             return []  # Nobody to count: the message has no "<name>: " in front.
         observed = event.source == SOURCE_MQTT
-        if observed and self._is_own_name(sender):
-            return []  # Our own replies come back through observers too.
+        if observed and (not self.config.count_observed or self._is_own_name(sender)):
+            return []  # Turned off; or our own reply, which comes back through observers too.
         return await self._handle_message(
             sender,
             body,
