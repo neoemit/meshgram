@@ -251,8 +251,9 @@ plugins:
       frequency: weekly       # weekly: once a week, on "day"; daily: once a day, any day
       day: 0                  # weekly only: the day that counts, 0 = Monday ... 6 = Sunday
       timezone: UTC           # IANA name, e.g. Europe/Rome; where days and weeks begin
-      reply: true
-      reply_to_observed: true # also reply to check-ins only observers heard
+      count_observed: true    # count check-ins other observers heard (MQTT observer plugins), replies or not
+      reply: true             # false: check-ins still count, unanswered
+      reply_to_observed: true # also answer check-ins only other observers heard
       # Leave it out for the default (below), which always fits in one radio message.
       # Placeholders: {title} {name} {rank} {this_period} ("today" or "this week")
       # {streak} {streak_label} ("3 days" / "3 weeks") {participants}

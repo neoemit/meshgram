@@ -269,6 +269,23 @@ class CheckInTests(CheckInTestCase):
         log = await self.plugin.check_ins(participants[0]["id"])
         self.assertEqual((log[0]["source"], log[0]["observer_id"]), ("observer", OBSERVER_KEY))
 
+    async def test_check_ins_observers_heard_count_without_replies(self):
+        await self.plugin.apply_settings({"reply": False})
+        await self.observed("Faraway: #MeshCoreMonday", 2000)
+        self.assertEqual(await self.check_in("LMB-T", 2001), [])
+        await self.plugin.apply_settings({"reply_to_observed": False})
+        await self.observed("Hiker: #MeshCoreMonday", 2002)
+        self.assertEqual(self.sent, [])
+        participants = (await self.plugin.participants())["participants"]
+        self.assertEqual(sorted(p["name"] for p in participants), ["Faraway", "Hiker", "LMB-T"])
+
+    async def test_check_ins_observers_heard_can_be_ignored(self):
+        await self.plugin.apply_settings({"count_observed": False})
+        await self.observed("Faraway: #MeshCoreMonday", 2000)
+        self.assertEqual(self.sent, [])
+        self.assertEqual((await self.plugin.participants())["participants"], [])
+        self.assertEqual(len(await self.check_in("LMB-T", 2001)), 1)
+
     async def test_name_only_participant_linked_by_an_advert(self):
         await self.check_in("Newbie", 1000)
         self.assertFalse((await self.plugin.leaderboard())["leaderboard"][0]["resolved"])
