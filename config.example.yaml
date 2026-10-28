@@ -59,8 +59,10 @@ web:
   # machines; in Docker it must be 0.0.0.0 (docker-compose.yml publishes 8080).
   host: 127.0.0.1
   port: 8080
-  # HTTP Basic auth (any username). Required for the control panel to change
-  # anything unless host is 127.0.0.1: without it the panel is read-only.
+  # The web app's password. Browsers log in on a login page and stay logged in
+  # for 30 days (changing the password logs everyone out); scripts can send it
+  # with HTTP Basic auth (any username). Required for the control panel to
+  # change anything unless host is 127.0.0.1: without it the panel is read-only.
   # password: ""
   # title: Meshgram
   # Map tiles; empty uses OpenStreetMap, restyled for the light/dark theme.

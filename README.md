@@ -747,10 +747,12 @@ web:
   enabled: true
   host: 127.0.0.1        # 0.0.0.0 to reach it from other machines; must be 0.0.0.0 in Docker
   port: 8080
-  password: "…"          # HTTP Basic auth, any username
+  password: "…"          # login page (30-day session) or HTTP Basic auth, any username
   # title: Meshgram
   # tile_url / tile_attribution: a custom Leaflet tile server (default: OpenStreetMap)
 ```
+
+**Logging in.** With a `password`, the browser shows a login page. Logging in keeps you logged in on that browser for 30 days (a session cookie; **Log out** in the header ends it sooner). Sessions survive restarts (the signing key is in `$MESHGRAM_DATA_DIR/web_session.json`), and changing the password logs everyone out. Behind an HTTPS reverse proxy that sets `X-Forwarded-Proto: https`, the cookie is only sent over HTTPS. Scripts can still send the password with HTTP Basic auth (any username), e.g. `curl -u :password …`.
 
 **Connections (header):** a status dot for each service Meshgram connects to: the **radio**, the **Telegram** bot and, with the MQTT observer plugins, one **MQTT** dot for all their connections (green when every one that's on is connected, red when one is down); the panel lists each one: publishing and subscribing per server, and MeshMapper's **live feed**. Green is connected, amber is connecting, red is disconnected, and a hollow dot means turned off. Click it for details. If the page loses its connection to Meshgram, the dots turn hollow grey until it reconnects.
 

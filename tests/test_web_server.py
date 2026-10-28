@@ -87,6 +87,78 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         status, _, _ = await http(server.port, "GET", "/", headers={"Authorization": f"Basic {token}"})
         self.assertEqual(status, 401)
 
+    async def test_browsers_log_in_for_a_30_day_session(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        key_path = Path(tempdir.name) / "web_session.json"
+        server = WebServer(WebConfig(port=0, password="s3cret", title="Mine"), StatusRegistry(), session_key_path=key_path)
+        server.login_failure_delay = 0
+        await server.start()
+        self.addAsyncCleanup(server.stop)
+        port = server.port
+        browser = {"Sec-Fetch-Mode": "navigate", "Accept": "text/html", "Origin": f"http://127.0.0.1:{port}"}
+
+        # A browser gets the login page, not its own password prompt.
+        status, headers, body = await http(port, "GET", "/", headers=browser)
+        self.assertEqual(status, 401)
+        self.assertNotIn("www-authenticate", headers)
+        self.assertIn(b"api/login", body)
+        self.assertIn(b'"title": "Mine"', body)
+        self.assertIn("frame-ancestors 'none'", headers["content-security-policy"])
+        status, headers, _ = await http(port, "GET", "/api/x", headers={"Sec-Fetch-Mode": "cors"})
+        self.assertEqual(status, 401)
+        self.assertNotIn("www-authenticate", headers)
+
+        status, headers, body = await http(port, "POST", "/api/login", body={"password": "nope"}, headers=browser)
+        self.assertEqual((status, as_json(body)["error"]), (401, "Wrong password"))
+        self.assertNotIn("set-cookie", headers)
+        self.assertFalse(key_path.exists())  # nobody logged in yet
+
+        status, headers, _ = await http(port, "POST", "/api/login", body={"password": "s3cret"}, headers=browser)
+        self.assertEqual(status, 204)
+        cookie = headers["set-cookie"]
+        self.assertIn("Max-Age=2592000", cookie)  # 30 days
+        for attribute in ("HttpOnly", "SameSite=Strict", "Path=/"):
+            self.assertIn(attribute, cookie)
+        self.assertNotIn("Secure", cookie)
+        self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
+        session = {"Cookie": "other=1; " + cookie.split(";")[0]}
+        status, _, body = await http(port, "GET", "/", headers={**browser, **session})
+        self.assertEqual(status, 200)
+        self.assertIn(b"leaflet", body)
+        self.assertTrue(server.is_authorized({"cookie": session["Cookie"]}))
+
+        # Another Meshgram (same key file, after a restart) takes the session...
+        again = WebServer(WebConfig(port=0, password="s3cret"), session_key_path=key_path)
+        self.assertTrue(again.is_authorized({"cookie": cookie.split(";")[0].replace(server.session_cookie, again.session_cookie)}))
+        # ...unless the password changed, or it's tampered with or too old.
+        changed = WebServer(WebConfig(port=0, password="new"), session_key_path=key_path)
+        self.assertFalse(changed.is_authorized({"cookie": cookie.split(";")[0]}))
+        name, _, token = cookie.split(";")[0].partition("=")
+        issued, _, mac = token.partition(".")
+        self.assertFalse(server.is_authorized({"cookie": f"{name}={int(issued) - 1}.{mac}"}))
+        old = server._session_signer().issue(now=int(issued) - 30 * 86400 - 1)
+        self.assertFalse(server.is_authorized({"cookie": f"{name}={old}"}))
+        nearly = server._session_signer().issue(now=int(issued) - 30 * 86400 + 60)
+        self.assertTrue(server.is_authorized({"cookie": f"{name}={nearly}"}))
+        self.assertFalse(server.is_authorized({"cookie": f"{name}=²."}))
+
+        # Behind HTTPS the cookie is Secure; logging out clears it.
+        status, headers, _ = await http(port, "POST", "/api/login", body={"password": "s3cret"}, headers={**browser, "X-Forwarded-Proto": "https"})
+        self.assertIn("; Secure", headers["set-cookie"])
+        status, headers, _ = await http(port, "POST", "/api/logout", body={}, headers={**browser, **session})
+        self.assertEqual(status, 204)
+        self.assertIn("Max-Age=0", headers["set-cookie"])
+        # Logging in from another site is refused.
+        status, _, _ = await http(port, "POST", "/api/login", body={"password": "s3cret"}, headers={"Origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+
+    async def test_login_without_a_password(self):
+        server = await self._start()
+        status, _, body = await http(server.port, "POST", "/api/login", body={"password": "x"})
+        self.assertEqual(status, 400)
+        self.assertIn(b'"login": false', (await http(server.port, "GET", "/"))[2])
+
     async def test_routes_params_and_errors(self):
         server = await self._start()
         seen = []

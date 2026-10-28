@@ -158,7 +158,7 @@ SCHEMA: dict[str, Any] = {
                     minLength=1,
                 ),
                 "port": _integer("Port", minimum=1, maximum=65535),
-                "password": _string("Password", "HTTP Basic auth, any user name. Empty: no password.", writeOnly=True),
+                "password": _string("Password", "Browsers log in for 30 days; scripts can use HTTP Basic auth (any user name). Empty: no password.", writeOnly=True),
                 "title": _string("Title", minLength=1),
                 "tile_url": _string("Map tiles URL", "Empty: OpenStreetMap, restyled for the light or dark theme."),
                 "tile_attribution": _string("Map tiles attribution"),
