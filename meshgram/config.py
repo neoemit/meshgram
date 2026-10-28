@@ -122,7 +122,7 @@ class WebConfig:
     enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 8080
-    # HTTP Basic auth (any username); empty means no password.
+    # Browsers log in for a 30-day session, scripts use HTTP Basic auth (any username); empty means no password.
     password: str = ""
     title: str = "Meshgram"
     # Empty: the page restyles OpenStreetMap tiles to match its light or dark theme.

@@ -5,9 +5,11 @@ live updates. Plugins add their data to the stream through ``WebServer.events``
 (see ``EventHub``) and may add routes of their own (removed when they stop); the
 app registers the control panel's API routes.
 
-Security: with ``web.password`` set, every request needs HTTP Basic auth, except
+Security: with ``web.password`` set, every request needs the password, except
 on routes added with ``public=True`` (a plugin's API for another site, say), whose
-handlers check access themselves.
+handlers check access themselves. Browsers get a login page that trades the
+password for a 30-day session cookie (``sessions.py``); other clients send it
+with HTTP Basic auth (any username).
 Requests that change something (POST/PUT/PATCH/DELETE) must also come from the
 page itself (same origin, JSON body), and are refused outright when the server
 listens beyond this machine without a password (see ``WebConfig.allows_changes``).
@@ -27,8 +29,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from ..config import WebConfig, is_loopback_host
+from ..config import WebConfig, data_dir, is_loopback_host
 from ..status import StatusRegistry
+from .sessions import KEY_FILE, SESSION_SECONDS, SessionSigner, load_session_key
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +43,13 @@ STATIC_FILES = {
     "/control.js": ("control.js", "text/javascript; charset=utf-8"),
     "/check_in.js": ("check_in.js", "text/javascript; charset=utf-8"),
 }
+# Shown instead of the page until the browser has logged in.
+LOGIN_PAGE = "login.html"
+PAGE_PATHS = {"/", "/index.html"}
+LOGIN_PATH = "/api/login"
+LOGOUT_PATH = "/api/logout"
+# A wrong password waits this long before the answer (slows down guessing).
+LOGIN_FAILURE_DELAY_SECONDS = 1.0
 CONFIG_PLACEHOLDER = "/*__MESHGRAM_CONFIG__*/{}"
 MAX_REQUEST_HEAD_BYTES = 16 * 1024
 MAX_BODY_BYTES = 256 * 1024
@@ -203,7 +213,9 @@ class EventHub:
 
 
 class WebServer:
-    def __init__(self, config: WebConfig, status: Optional[StatusRegistry] = None):
+    def __init__(
+        self, config: WebConfig, status: Optional[StatusRegistry] = None, *, session_key_path: Optional[Path] = None
+    ):
         self.config = config
         self.status = status
         self.events = EventHub()
@@ -211,7 +223,15 @@ class WebServer:
         self._routes: list[_Route] = []
         self._server: Optional[asyncio.AbstractServer] = None
         self._static: dict[str, tuple[bytes, str]] = {}
+        self._login_page = b""
         self._client_tasks: set[asyncio.Task[Any]] = set()
+        self._session_key_path = session_key_path
+        self._signer: Optional[SessionSigner] = None
+        # Cookies don't tell ports apart: one per Meshgram on the same host.
+        self.session_cookie = f"meshgram_session_{config.port}"
+        self.login_failure_delay = LOGIN_FAILURE_DELAY_SECONDS
+        self.route("POST", LOGIN_PATH, self._login, public=True)
+        self.route("POST", LOGOUT_PATH, self._logout, public=True)
 
     @property
     def port(self) -> Optional[int]:
@@ -257,6 +277,7 @@ class WebServer:
             "title": self.config.title,
             "tile_url": self.config.tile_url,
             "tile_attribution": self.config.tile_attribution,
+            "login": bool(self.config.password),
         }
         config_json = json.dumps(client_config).replace("</", "<\\/")
         for path, (name, content_type) in STATIC_FILES.items():
@@ -264,6 +285,8 @@ class WebServer:
             if name == "index.html":
                 body = body.replace(CONFIG_PLACEHOLDER, config_json)
             self._static[path] = (body.encode("utf-8"), content_type)
+        login_page = (STATIC_DIR / LOGIN_PAGE).read_text(encoding="utf-8")
+        self._login_page = login_page.replace(CONFIG_PLACEHOLDER, config_json).encode("utf-8")
 
         self._server = await asyncio.start_server(self._handle_client, self.config.host, self.config.port)
         if self.status is not None:
@@ -305,6 +328,9 @@ class WebServer:
     def _authorized(self, headers: dict[str, str]) -> bool:
         if not self.config.password:
             return True
+        return self._has_session(headers) or self._has_basic_auth(headers)
+
+    def _has_basic_auth(self, headers: dict[str, str]) -> bool:
         scheme, _, credentials = headers.get("authorization", "").partition(" ")
         if scheme.lower() != "basic":
             return False
@@ -313,7 +339,65 @@ class WebServer:
         except Exception:
             return False
         _, _, password = decoded.partition(":")
+        return self._password_matches(password)
+
+    def _password_matches(self, password: str) -> bool:
         return hmac.compare_digest(password.encode("utf-8"), self.config.password.encode("utf-8"))
+
+    # --- Login sessions -----------------------------------------------------------------
+
+    def _session_signer(self) -> SessionSigner:
+        # Read (or made) on first use: a server nobody logs in to leaves no key file.
+        if self._signer is None:
+            path = self._session_key_path or data_dir() / KEY_FILE
+            self._signer = SessionSigner(load_session_key(path), self.config.password)
+        return self._signer
+
+    def _has_session(self, headers: dict[str, str]) -> bool:
+        token = _cookies(headers.get("cookie", "")).get(self.session_cookie)
+        return bool(token) and self._session_signer().is_valid(token)
+
+    def _session_cookie_header(self, request: Request, value: str, max_age: int) -> str:
+        cookie = f"{self.session_cookie}={value}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Strict"
+        # Behind an HTTPS proxy, the cookie never travels over plain HTTP.
+        if request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https":
+            cookie += "; Secure"
+        return cookie
+
+    async def _login(self, request: Request) -> Response:
+        if not self.config.password:
+            raise HttpError(400, "The web app has no password (web.password): there's nothing to log in to")
+        data = request.json()
+        password = data.get("password") if isinstance(data, dict) else None
+        if not isinstance(password, str) or not self._password_matches(password):
+            await asyncio.sleep(self.login_failure_delay)
+            raise HttpError(401, "Wrong password")
+        response = no_content()
+        response.headers["Set-Cookie"] = self._session_cookie_header(
+            request, self._session_signer().issue(), SESSION_SECONDS
+        )
+        return response
+
+    async def _logout(self, request: Request) -> Response:
+        response = no_content()
+        response.headers["Set-Cookie"] = self._session_cookie_header(request, "", 0)
+        return response
+
+    def _login_required(self, method: str, target: str, headers: dict[str, str]) -> Response:
+        """The answer to a request without the password."""
+        path = unquote(urlsplit(target).path)
+        browser = "sec-fetch-mode" in headers
+        if method.upper() in {"GET", "HEAD"} and path in PAGE_PATHS and (
+            browser or "text/html" in headers.get("accept", "")
+        ):
+            return Response(
+                401, self._login_page, "text/html; charset=utf-8", {"Content-Security-Policy": CONTENT_SECURITY_POLICY}
+            )
+        response = _error(401, "Authentication required")
+        # The page logs in with its own form: no browser password prompt for it.
+        if not browser:
+            response.headers["WWW-Authenticate"] = 'Basic realm="meshgram", charset="UTF-8"'
+        return response
 
     @staticmethod
     def _same_origin(headers: dict[str, str]) -> bool:
@@ -363,11 +447,7 @@ class WebServer:
                 headers[name.strip().lower()] = value.strip()
 
         if not self._authorized(headers) and not self._is_public(method, target):
-            await self._send(
-                writer,
-                _error(401, "Authentication required"),
-                extra_headers={"WWW-Authenticate": 'Basic realm="meshgram", charset="UTF-8"'},
-            )
+            await self._send(writer, self._login_required(method, target, headers), include_body=method.upper() != "HEAD")
             return
 
         try:
@@ -503,6 +583,15 @@ class WebServer:
     async def _send_event(writer: asyncio.StreamWriter, event: dict[str, Any]) -> None:
         writer.write(b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n")
         await writer.drain()
+
+
+def _cookies(header: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for part in header.split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name not in cookies:
+            cookies[name] = value.strip().strip('"')
+    return cookies
 
 
 def _error(status: int, message: str, details: Any = None) -> Response:

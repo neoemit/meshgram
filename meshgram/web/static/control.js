@@ -71,6 +71,11 @@
       throw new ApiError("Can't reach Meshgram; check that it's running", 0);
     }
     if (response.status === 204) return null;
+    // The login session ended: the reload shows the login page.
+    if (response.status === 401 && CONFIG.login) {
+      location.reload();
+      throw new ApiError("Logged out: log in again", 401);
+    }
     let data = null;
     try { data = await response.json(); } catch { /* not JSON */ }
     if (!response.ok) {
