@@ -12,6 +12,7 @@ from meshgram.types import (
     SendMeshAction,
     SendTelegramAction,
     TelegramMessageEvent,
+    TelegramReactionEvent,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -22,7 +23,8 @@ class BridgePlugin(BasePlugin):
     title = "Telegram bridge"
     description = (
         "Relays messages between the Telegram group and one radio channel. Long Telegram "
-        "messages are split into numbered chunks that fit in a radio packet."
+        "messages are split into numbered chunks that fit in a radio packet. Emoji reactions "
+        "in Telegram go out as a short message quoting the message reacted to."
     )
     settings_schema = {
         "type": "object",
@@ -34,6 +36,17 @@ class BridgePlugin(BasePlugin):
                 "format": CHANNEL_FORMAT,
                 "title": "Radio channel",
                 "description": "The channel bridged to the Telegram group. Empty: meshcore.bridge_channel from config.yaml.",
+            },
+            "relay_reactions": {
+                "type": "boolean",
+                "default": True,
+                "title": "Relay reactions",
+                "description": (
+                    "Send emoji reactions in Telegram to the radio channel as a message, e.g. "
+                    "[Alice] reacted 👍 to \"[Bob] hello\". Telegram only tells the bot about "
+                    "reactions when it's an admin of the group; reactions to messages Meshgram "
+                    "didn't see since it started, and custom emoji, are left out."
+                ),
             },
         },
     }
@@ -49,6 +62,35 @@ class BridgePlugin(BasePlugin):
                 LOGGER.warning("bridge.settings.channel must be an integer; falling back to meshcore.bridge_channel")
 
         return context.settings.meshcore.bridge_channel
+
+    def _payload_limit(self, context: PluginContext) -> int:
+        chunking = context.settings.chunking
+        # Channel messages are broadcasts: apply the broadcast size cap and pacing.
+        payload_limit = context.mesh_payload_limit - max(0, chunking.payload_safety_margin_bytes)
+        configured_max_chunk_bytes = chunking.max_chunk_bytes
+        effective_max_chunk_bytes = (
+            configured_max_chunk_bytes
+            if configured_max_chunk_bytes > 0
+            else self.DEFAULT_SAFE_MAX_CHUNK_BYTES
+        )
+        broadcast_cap = (
+            chunking.broadcast_max_chunk_bytes
+            if chunking.broadcast_max_chunk_bytes > 0
+            else effective_max_chunk_bytes
+        )
+        effective_max_chunk_bytes = min(effective_max_chunk_bytes, broadcast_cap)
+        return min(payload_limit, effective_max_chunk_bytes)
+
+    def _with_sender_prefix(self, context: PluginContext, sender_display_name: str, text: str) -> str:
+        template = context.settings.telegram.sender_prefix_template
+        compact_display_name = _compact_display_name(sender_display_name)
+        try:
+            return template.format(display_name=compact_display_name, message=text)
+        except (KeyError, ValueError):
+            LOGGER.warning(
+                "Invalid sender_prefix_template placeholders; expected display_name/message. Falling back."
+            )
+            return f"[{compact_display_name}] {text}"
 
     async def on_mesh_message(
         self,
@@ -89,32 +131,10 @@ class BridgePlugin(BasePlugin):
         if not text:
             return []
 
-        template = context.settings.telegram.sender_prefix_template
-        compact_display_name = _compact_display_name(event.sender_display_name)
-        try:
-            mesh_text = template.format(display_name=compact_display_name, message=text)
-        except (KeyError, ValueError):
-            LOGGER.warning(
-                "Invalid sender_prefix_template placeholders; expected display_name/message. Falling back."
-            )
-            mesh_text = f"[{compact_display_name}] {text}"
+        mesh_text = self._with_sender_prefix(context, event.sender_display_name, text)
 
         chunking = context.settings.chunking
-        # Channel messages are broadcasts: apply the broadcast size cap and pacing.
-        payload_limit = context.mesh_payload_limit - max(0, chunking.payload_safety_margin_bytes)
-        configured_max_chunk_bytes = chunking.max_chunk_bytes
-        effective_max_chunk_bytes = (
-            configured_max_chunk_bytes
-            if configured_max_chunk_bytes > 0
-            else self.DEFAULT_SAFE_MAX_CHUNK_BYTES
-        )
-        broadcast_cap = (
-            chunking.broadcast_max_chunk_bytes
-            if chunking.broadcast_max_chunk_bytes > 0
-            else effective_max_chunk_bytes
-        )
-        effective_max_chunk_bytes = min(effective_max_chunk_bytes, broadcast_cap)
-        payload_limit = min(payload_limit, effective_max_chunk_bytes)
+        payload_limit = self._payload_limit(context)
         min_split_payload_limit = utf8_len(chunking.prefix_template.format(index=1, total=1)) + 1
         payload_limit = max(min_split_payload_limit, payload_limit)
         try:
@@ -178,6 +198,66 @@ class BridgePlugin(BasePlugin):
             )
 
         return actions
+
+    async def on_telegram_reaction(
+        self,
+        event: TelegramReactionEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        if not self.settings.get("relay_reactions", True):
+            return []
+
+        if event.chat_id != context.telegram_group_id or event.is_from_bot or not event.emojis:
+            return []
+
+        # MeshCore has no reactions: a message names it, and the message reacted to,
+        # which the reaction update itself doesn't carry. Without it, say nothing.
+        quoted = " ".join((event.message_text or "").split())
+        if not quoted:
+            LOGGER.debug(
+                "Reaction to unknown Telegram message %s not relayed: its text isn't known",
+                event.message_id,
+            )
+            return []
+
+        emojis = "".join(event.emojis)
+        payload_limit = self._payload_limit(context)
+        mesh_text = self._with_sender_prefix(
+            context, event.sender_display_name, f'reacted {emojis} to "{quoted}"'
+        )
+        if utf8_len(mesh_text) > payload_limit:
+            # One packet: shorten the quote rather than send a reaction in chunks.
+            overflow = utf8_len(mesh_text) - payload_limit
+            keep = utf8_len(quoted) - overflow - utf8_len(ELLIPSIS)
+            shortened = _truncate_utf8(quoted, keep).rstrip()
+            if not shortened:
+                LOGGER.debug("Reaction to Telegram message %s doesn't fit in a radio packet", event.message_id)
+                return []
+            mesh_text = self._with_sender_prefix(
+                context, event.sender_display_name, f'reacted {emojis} to "{shortened}{ELLIPSIS}"'
+            )
+            if utf8_len(mesh_text) > payload_limit:
+                return []
+
+        chunking = context.settings.chunking
+        return [
+            SendMeshAction(
+                text=mesh_text,
+                channel_index=self._bridge_channel(context),
+                retry_max_attempts=chunking.retry_max_attempts,
+                retry_initial_delay_ms=chunking.retry_initial_delay_ms,
+                retry_backoff_factor=chunking.retry_backoff_factor,
+            )
+        ]
+
+
+ELLIPSIS = "…"
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _compact_display_name(sender_display_name: str) -> str:

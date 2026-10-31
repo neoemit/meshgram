@@ -48,14 +48,14 @@ MeshCore has no packet-level reactions and no reply threading, so the bridge rel
 
 ### Plugin system
 
-`meshgram/plugin.py` defines `BasePlugin` with async hooks `on_telegram_message`, `on_mesh_message`, and lifecycle hooks `on_startup`, `on_mesh_connected(transport, context)` (after every radio (re)connect, and on start when already connected), `on_shutdown`. Plugins also declare `title`, `description` and `settings_schema` (JSON Schema subset, see `settings_schema.py`; `format: "channel"` marks a channel-slot integer) for the control panel.
+`meshgram/plugin.py` defines `BasePlugin` with async hooks `on_telegram_message`, `on_telegram_reaction`, `on_mesh_message`, and lifecycle hooks `on_startup`, `on_mesh_connected(transport, context)` (after every radio (re)connect, and on start when already connected), `on_shutdown`. Plugins also declare `title`, `description` and `settings_schema` (JSON Schema subset, see `settings_schema.py`; `format: "channel"` marks a channel-slot integer) for the control panel.
 
 Each hook returns `PluginAction`s (`SendTelegramAction`, `SendMeshAction`); outside a hook (an RX log listener, say) a plugin runs them with `context.execute_actions(actions, plugin_name)`. Built-ins are registered in `BUILTIN_PLUGINS` (canonical names; "trace-me" style aliases resolve via `plugin_key`) and enabled via `config.yaml`.
 
 `meshgram/plugin_manager.py` runs them and changes them at runtime: `update(name, enabled=…, settings=…)` validates (secrets come back masked as `SECRET_MASK` and are restored), saves the override to `$MESHGRAM_DATA_DIR/plugins.json` (atomic, 0600), then applies it: if the effective settings changed, the running instance's `apply_settings(settings)` may take them live (return True), otherwise the plugin restarts (`on_shutdown` + new instance). `update`/`reset` report `restarted`. Overrides win over config.yaml until `reset(name)`; `overrides()` returns them unmasked for the config export, and on startup any part of an override that config.yaml now says too is dropped (and `plugins.json` rewritten). Because plugins can now be stopped at runtime, `on_shutdown` must release everything, including transport listeners (`remove_rx_log_listener`) and status entries (`StatusRegistry.remove`).
 
 **Built-in plugins:**
-- `plugins/bridge.py` — core relay (Telegram group ↔ one radio channel) with chunking
+- `plugins/bridge.py` — core relay (Telegram group ↔ one radio channel) with chunking. Only new messages are relayed (`MeshgramApp._telegram_handlers`: no edited messages; Telegram reports reaction changes as edits). Emoji reactions (`on_telegram_reaction`, `TelegramReactionEvent`: the added Unicode emoji, plus `message_text` from the app's cache of the last 500 messages seen/sent) go out as one packet, `[Alice] reacted 👍 to "<quote>"`; none when the message isn't known (`relay_reactions`, default on)
 - `plugins/ping_pong.py` — keyword-response automation with dedupe and channel filtering
 - `plugins/dm_http_command.py` — DMs that invoke HTTP endpoints and return formatted responses
 - `plugins/trace_me.py` — route trace responder

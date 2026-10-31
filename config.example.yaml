@@ -31,7 +31,7 @@ runtime:
   log_level: INFO   # DEBUG | INFO | WARNING | ERROR
 
 # The MeshCore companion radio. MeshCore has no packet-level reactions and no
-# reply threading, so the bridge relays messages only.
+# reply threading, so the bridge relays messages only (reactions as messages).
 meshcore:
   # The channel slot bridged to the Telegram group.
   bridge_channel: 0
@@ -92,6 +92,9 @@ plugins:
     settings:
       # Overrides meshcore.bridge_channel when set.
       channel: 0
+      # Send emoji reactions in the Telegram group to the channel as a message
+      # quoting the message reacted to. Needs the bot to be a group admin.
+      relay_reactions: true
 
   - name: ping_pong
     enabled: true

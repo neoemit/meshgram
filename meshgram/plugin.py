@@ -9,6 +9,7 @@ from .types import (
     PluginAction,
     PluginContext,
     TelegramMessageEvent,
+    TelegramReactionEvent,
 )
 
 if TYPE_CHECKING:
@@ -71,6 +72,13 @@ class BasePlugin:
     async def on_telegram_message(
         self,
         event: TelegramMessageEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        return []
+
+    async def on_telegram_reaction(
+        self,
+        event: TelegramReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         return []
