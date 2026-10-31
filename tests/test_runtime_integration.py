@@ -1,8 +1,11 @@
 import asyncio
+import datetime
 import os
 import tempfile
 import unittest
 from unittest import mock
+
+from telegram import Chat, Message, MessageReactionUpdated, ReactionTypeCustomEmoji, ReactionTypeEmoji, Update, User
 
 from meshgram.app import MeshgramApp
 from meshgram.config import MeshgramSettings, PluginConfig
@@ -76,6 +79,26 @@ def _mesh(text, from_id="bbbb2222cccc", channel_index=0, packet_id="mc-ch-1") ->
         channel_index=channel_index,
         text=text,
         sender_label="Remote",
+    )
+
+
+_GROUP = Chat(id=-555, type=Chat.SUPERGROUP, title="Mesh")
+_ALICE = User(id=7, first_name="Alice", is_bot=False)
+_DATE = datetime.datetime(2026, 10, 31, tzinfo=datetime.timezone.utc)
+
+
+def _reaction_update(old=(), new=(), message_id=1, user=_ALICE, actor_chat=None) -> Update:
+    return Update(
+        update_id=1,
+        message_reaction=MessageReactionUpdated(
+            chat=_GROUP,
+            message_id=message_id,
+            date=_DATE,
+            old_reaction=tuple(old),
+            new_reaction=tuple(new),
+            user=user,
+            actor_chat=actor_chat,
+        ),
     )
 
 
@@ -182,6 +205,49 @@ class RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("meshgram.app", level="WARNING"):
             self.assertIsNone(await self.app._execute_send_mesh(SendMeshAction(text="hi")))
         self.assertEqual(self.mesh.attempts, [])
+
+    def _handled_by(self, update):
+        return [handler for handler in self.app._telegram_handlers() if handler.check_update(update)]
+
+    async def test_edited_messages_are_not_handled(self):
+        # Telegram sends edited_message updates when reactions change: relaying them sent the message again.
+        message = Message(message_id=1, date=_DATE, chat=_GROUP, from_user=_ALICE, text="hello")
+        self.assertEqual(len(self._handled_by(Update(update_id=1, message=message))), 1)
+        self.assertEqual(self._handled_by(Update(update_id=2, edited_message=message)), [])
+        self.assertEqual(self._handled_by(Update(update_id=3, edited_channel_post=message)), [])
+
+    async def test_reaction_updates_are_handled(self):
+        self.assertEqual(len(self._handled_by(_reaction_update(new=[ReactionTypeEmoji("👍")]))), 1)
+
+    async def test_reaction_to_relayed_message_goes_to_mesh(self):
+        await self.app._on_mesh_text(_mesh("from mesh"))
+        sent_id = self.app.bot_app.bot._next_message_id
+        update = _reaction_update(
+            old=[ReactionTypeEmoji("👍")],
+            new=[ReactionTypeEmoji("👍"), ReactionTypeEmoji("❤"), ReactionTypeCustomEmoji("123")],
+            message_id=sent_id,
+        )
+        await self.app._handle_telegram_reaction(update, None)
+        self.assertEqual([action.text for action in self.mesh.sent], ['[Alice] reacted ❤ to "[Remote] from mesh"'])
+
+    async def test_reaction_to_telegram_message_quotes_it(self):
+        message = Message(message_id=42, date=_DATE, chat=_GROUP, from_user=_ALICE, text="hi all")
+        await self.app._handle_telegram_message(Update(update_id=1, message=message), None)
+        self.mesh.sent.clear()
+        bob = User(id=8, first_name="Bob", is_bot=False)
+        await self.app._handle_telegram_reaction(
+            _reaction_update(new=[ReactionTypeEmoji("😂")], message_id=42, user=bob), None
+        )
+        self.assertEqual([action.text for action in self.mesh.sent], ['[Bob] reacted 😂 to "hi all"'])
+
+    async def test_removed_custom_or_unknown_reactions_send_nothing(self):
+        await self.app._on_mesh_text(_mesh("from mesh"))
+        sent_id = self.app.bot_app.bot._next_message_id
+        # A reaction taken back, a custom emoji, a message Meshgram never saw.
+        await self.app._handle_telegram_reaction(_reaction_update(old=[ReactionTypeEmoji("👍")], message_id=sent_id), None)
+        await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeCustomEmoji("1")], message_id=sent_id), None)
+        await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeEmoji("👍")], message_id=999), None)
+        self.assertEqual(self.mesh.sent, [])
 
     async def test_restart_stops_the_bot_for_main_to_start_again(self):
         self.app.bot_app.stop_running = mock.Mock()

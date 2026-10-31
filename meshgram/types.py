@@ -32,6 +32,24 @@ class TelegramMessageEvent:
 
 
 @dataclass(slots=True)
+class TelegramReactionEvent:
+    """Someone added emoji reactions to a message in a Telegram chat.
+
+    Only the emoji the update added are listed (Unicode emoji only: custom and paid
+    reactions have no text form). Telegram sends these to bots that are admins in the group.
+    """
+
+    chat_id: int
+    message_id: int
+    emojis: tuple[str, ...]
+    is_from_bot: bool
+    sender_display_name: str
+    # The text of the message reacted to, when Meshgram saw it (it isn't in the update).
+    message_text: Optional[str] = None
+    raw_reaction: Any = None
+
+
+@dataclass(slots=True)
 class MeshTextEvent:
     from_id: Optional[str]
     # The local node for direct messages; None for channel messages.
@@ -100,6 +118,13 @@ class Plugin(Protocol):
     async def on_telegram_message(
         self,
         event: TelegramMessageEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        ...
+
+    async def on_telegram_reaction(
+        self,
+        event: TelegramReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         ...

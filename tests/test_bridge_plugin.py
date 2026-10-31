@@ -5,7 +5,7 @@ from meshgram.config import MeshgramSettings
 from meshgram.plugins.bridge import BridgePlugin
 from meshgram.settings_schema import validate
 from meshgram.text_utils import utf8_len
-from meshgram.types import MeshTextEvent, PluginContext, TelegramMessageEvent
+from meshgram.types import MeshTextEvent, PluginContext, TelegramMessageEvent, TelegramReactionEvent
 
 
 def _telegram(text="hello", **overrides) -> TelegramMessageEvent:
@@ -20,6 +20,19 @@ def _telegram(text="hello", **overrides) -> TelegramMessageEvent:
     )
     fields.update(overrides)
     return TelegramMessageEvent(**fields)
+
+
+def _reaction(emojis=("👍",), message_text="[Alpha] hello mesh", **overrides) -> TelegramReactionEvent:
+    fields = dict(
+        chat_id=-999,
+        message_id=10,
+        emojis=emojis,
+        is_from_bot=False,
+        sender_display_name="Alice Smith",
+        message_text=message_text,
+    )
+    fields.update(overrides)
+    return TelegramReactionEvent(**fields)
 
 
 def _mesh(text="hello", channel_index=2, from_id="aaaa1111bbbb", packet_id="mc-ch-1") -> MeshTextEvent:
@@ -164,6 +177,36 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(actions[0].text, "[Name] hello")
         actions = self._send_telegram(_telegram(sender_display_name="Alice"))
         self.assertEqual(actions[0].text, "[Alice] hello")
+
+    def _react(self, event, payload_limit=80, plugin=None):
+        return asyncio.run((plugin or self.plugin).on_telegram_reaction(event, self._context(payload_limit=payload_limit)))
+
+    def test_reaction_goes_out_as_one_message_quoting_the_message(self):
+        actions = self._react(_reaction(emojis=("👍", "🔥")))
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].text, '[Alice] reacted 👍🔥 to "[Alpha] hello mesh"')
+        self.assertEqual(actions[0].channel_index, 2)
+        self.assertIsNone(actions[0].sequence_id)
+
+    def test_reaction_to_unknown_message_is_not_relayed(self):
+        self.assertEqual(self._react(_reaction(message_text=None)), [])
+        self.assertEqual(self._react(_reaction(message_text="  ")), [])
+
+    def test_reaction_ignores_bots_other_chats_and_no_emoji(self):
+        self.assertEqual(self._react(_reaction(is_from_bot=True)), [])
+        self.assertEqual(self._react(_reaction(chat_id=-1)), [])
+        self.assertEqual(self._react(_reaction(emojis=())), [])
+
+    def test_reactions_can_be_turned_off(self):
+        self.assertEqual(self._react(_reaction(), plugin=BridgePlugin({"relay_reactions": False})), [])
+
+    def test_reaction_shortens_long_quote_to_one_packet(self):
+        actions = self._react(_reaction(message_text="é" * 200), payload_limit=80)
+        self.assertEqual(len(actions), 1)
+        text = actions[0].text
+        self.assertLessEqual(utf8_len(text), 64)  # payload limit 80 minus the 16-byte margin
+        self.assertTrue(text.startswith('[Alice] reacted 👍 to "éé'))
+        self.assertTrue(text.endswith('é…"'))
 
     def test_settings_schema(self):
         validate({"channel": 3}, BridgePlugin.settings_schema)

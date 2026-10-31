@@ -35,7 +35,7 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 - **macOS:** Docker Desktop **cannot** pass through USB or Bluetooth. Use bare-metal Python for serial/BLE, or run a host-side serial→TCP bridge (`socat`) and point Meshgram at it over TCP.
 - **Docker:** USB passthrough requires a Linux host. BLE never works in Docker.
 
-**MeshCore limits:** the protocol has no packet-level reactions and no reply threading, so the bridge relays messages only (a Telegram reply goes out as a plain message). Message identifiers are opaque strings.
+**MeshCore limits:** the protocol has no packet-level reactions and no reply threading, so the bridge relays messages only (a Telegram reply goes out as a plain message, an emoji reaction as a short message quoting what it reacts to; edits aren't relayed). Message identifiers are opaque strings.
 
 ---
 
@@ -354,6 +354,8 @@ Plugins are listed in `config.yaml` and can also be turned on and off and reconf
 - Forwards Telegram media captions when `telegram.include_captions: true`
 - Ignores bot-authored Telegram messages (loop prevention)
 - Filters by channel: `bridge.settings.channel` (fallback to `meshcore.bridge_channel`)
+- Edited Telegram messages aren't sent again (MeshCore can't edit a message; Telegram also reports reaction changes as edits)
+- Emoji reactions in the group go to the channel as one message, e.g. `[Alice] reacted 👍 to "[Bob] see you at 8"` (the quote is shortened to fit one packet). Telegram only sends reactions to bots that are **admins** of the group. Only newly added Unicode emoji count; custom emoji, removed reactions and reactions to messages Meshgram hasn't seen since it started (it remembers the last 500) are left out. Turn it off with `relay_reactions: false`.
 
 Settings:
 
@@ -362,6 +364,7 @@ Settings:
   enabled: true
   settings:
     channel: 1
+    relay_reactions: true
 ```
 
 ### `ping_pong` — keyword auto-responder

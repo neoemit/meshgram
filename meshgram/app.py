@@ -6,15 +6,18 @@ import logging
 import os
 import sys
 import time
+from collections import OrderedDict
 from typing import AsyncIterator, Optional
 
-from telegram import Message, Update
+from telegram import Message, ReactionTypeEmoji, Update
 from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    BaseHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
     TypeHandler,
     filters,
 )
@@ -42,6 +45,7 @@ from .types import (
     SendMeshAction,
     SendTelegramAction,
     TelegramMessageEvent,
+    TelegramReactionEvent,
 )
 from .web import WebServer
 from .web.api import register_control_api
@@ -49,6 +53,8 @@ from .web.api import register_control_api
 LOGGER = logging.getLogger(__name__)
 MESH_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 TELEGRAM_HEALTH_CHECK_SECONDS = 60.0
+# Recent Telegram messages' texts, so a reaction (which only names the message) can quote it.
+TELEGRAM_TEXT_CACHE_SIZE = 500
 # Long enough for the control panel to get its answer before the web server goes.
 RESTART_DELAY_SECONDS = 0.5
 
@@ -97,6 +103,7 @@ class MeshgramApp:
         self._radio_connected = asyncio.Condition()
         self._telegram_health_task: Optional[asyncio.Task[None]] = None
         self._seen_mesh_packet_ids: dict[MeshPacketRef, float] = {}
+        self._telegram_texts: OrderedDict[tuple[int, int], str] = OrderedDict()
         self._mesh_send_lock = asyncio.Lock()
 
     async def _post_init(self, app: Application) -> None:
@@ -333,6 +340,9 @@ class MeshgramApp:
             )
             is_from_bot = bool(from_user.is_bot)
 
+        if text is not None:
+            self._remember_telegram_text(chat.id, message.message_id, text)
+
         event = TelegramMessageEvent(
             chat_id=chat.id,
             message_id=message.message_id,
@@ -345,6 +355,65 @@ class MeshgramApp:
         )
 
         await self._dispatch_telegram_message(event)
+
+    async def _handle_telegram_reaction(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        reaction = update.message_reaction
+        if reaction is None:
+            return
+
+        # The update lists the reactions before and after; only newly added Unicode
+        # emoji are relayed (custom emoji and paid reactions have no text form).
+        old_emojis = {item.emoji for item in reaction.old_reaction if isinstance(item, ReactionTypeEmoji)}
+        added: list[str] = []
+        for item in reaction.new_reaction:
+            if isinstance(item, ReactionTypeEmoji) and item.emoji not in old_emojis and item.emoji not in added:
+                added.append(item.emoji)
+        if not added:
+            return
+
+        sender_display_name = "Unknown"
+        is_from_bot = False
+        if reaction.user is not None:
+            user = reaction.user
+            sender_display_name = user.full_name or user.username or str(user.id)
+            is_from_bot = bool(user.is_bot)
+        elif reaction.actor_chat is not None:
+            # An anonymous admin, reacting on behalf of the group or a channel.
+            sender_display_name = reaction.actor_chat.title or str(reaction.actor_chat.id)
+
+        event = TelegramReactionEvent(
+            chat_id=reaction.chat.id,
+            message_id=reaction.message_id,
+            emojis=tuple(added),
+            is_from_bot=is_from_bot,
+            sender_display_name=sender_display_name,
+            message_text=self._telegram_texts.get((reaction.chat.id, reaction.message_id)),
+            raw_reaction=reaction,
+        )
+        await self._dispatch_telegram_reaction(event)
+
+    async def _dispatch_telegram_reaction(self, event: TelegramReactionEvent) -> None:
+        context = self.plugin_context()
+
+        for name, plugin in self.plugins.running:
+            try:
+                actions = await plugin.on_telegram_reaction(event, context)
+            except Exception:
+                LOGGER.exception("Plugin %s failed handling telegram reaction", name)
+                continue
+
+            await self.execute_actions(actions, name)
+
+    def _remember_telegram_text(self, chat_id: int, message_id: int, text: str) -> None:
+        key = (chat_id, message_id)
+        self._telegram_texts[key] = text
+        self._telegram_texts.move_to_end(key)
+        while len(self._telegram_texts) > TELEGRAM_TEXT_CACHE_SIZE:
+            self._telegram_texts.popitem(last=False)
 
     async def _dispatch_telegram_message(self, event: TelegramMessageEvent) -> None:
         context = self.plugin_context()
@@ -401,7 +470,11 @@ class MeshgramApp:
         if self.bot_app is None:
             raise RuntimeError("Telegram bot app is not initialized")
 
-        return await self.bot_app.bot.send_message(chat_id=action.chat_id, text=action.text)
+        sent = await self.bot_app.bot.send_message(chat_id=action.chat_id, text=action.text)
+        message_id = getattr(sent, "message_id", None)
+        if message_id is not None:
+            self._remember_telegram_text(action.chat_id, message_id, action.text)
+        return sent
 
     async def _execute_send_mesh(self, action: SendMeshAction) -> Optional[MeshPacketRef]:
         async with self._mesh_send_lock:
@@ -482,6 +555,21 @@ class MeshgramApp:
         self.restart_requested = True
         asyncio.get_running_loop().call_later(RESTART_DELAY_SECONDS, self.bot_app.stop_running)
 
+    def _telegram_handlers(self) -> list[BaseHandler]:
+        return [
+            # New messages only: MeshCore can't edit a message, and Telegram also sends
+            # edited_message updates when reactions change, which would send it again.
+            MessageHandler(
+                (filters.UpdateType.MESSAGE | filters.UpdateType.CHANNEL_POST) & ~filters.COMMAND,
+                self._handle_telegram_message,
+            ),
+            # Who reacted with what (sent to bots that are admins); not the anonymous counts.
+            MessageReactionHandler(
+                self._handle_telegram_reaction,
+                message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED,
+            ),
+        ]
+
     def run(self) -> None:
         self.bot_app = (
             ApplicationBuilder()
@@ -491,9 +579,7 @@ class MeshgramApp:
             .build()
         )
 
-        self.bot_app.add_handler(
-            MessageHandler(filters.ALL & ~filters.COMMAND, self._handle_telegram_message)
-        )
+        self.bot_app.add_handlers(self._telegram_handlers())
         self.bot_app.add_handler(TypeHandler(Update, self._on_telegram_update), group=-1)
         self.bot_app.add_error_handler(self._on_telegram_error)
 
