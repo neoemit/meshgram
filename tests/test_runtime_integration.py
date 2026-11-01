@@ -17,6 +17,8 @@ from telegram import (
     User,
 )
 
+from telegram.ext import ApplicationBuilder
+
 from meshgram.app import MeshgramApp
 from meshgram.config import MeshgramSettings, PluginConfig
 from meshgram.types import MeshTextEvent, SendMeshAction, TelegramMessageEvent
@@ -258,8 +260,17 @@ class RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # Telegram sends edited_message updates when reactions change: relaying them sent the message again.
         message = Message(message_id=1, date=_DATE, chat=_GROUP, from_user=_ALICE, text="hello")
         self.assertEqual(len(self._handled_by(Update(update_id=1, message=message))), 1)
-        self.assertEqual(self._handled_by(Update(update_id=2, edited_message=message)), [])
-        self.assertEqual(self._handled_by(Update(update_id=3, edited_channel_post=message)), [])
+        for update in (Update(update_id=2, edited_message=message), Update(update_id=3, edited_channel_post=message)):
+            self.assertEqual([handler.callback for handler in self._handled_by(update)], [self.app._handle_telegram_edit])
+
+    async def test_edit_updates_the_quoted_text_without_relaying(self):
+        message = Message(message_id=42, date=_DATE, chat=_GROUP, from_user=_ALICE, text="hi al")
+        await self.app._handle_telegram_message(Update(update_id=1, message=message), None)
+        edited = Message(message_id=42, date=_DATE, chat=_GROUP, from_user=_ALICE, text="hi all")
+        await self.app._handle_telegram_edit(Update(update_id=2, edited_message=edited), None)
+        self.assertEqual(len(self.mesh.sent), 1)
+        await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeEmoji("👍")], message_id=42), None)
+        self.assertEqual(self.mesh.sent[-1].text, '[Alice] reacted 👍 to "hi all"')
 
     async def test_reaction_updates_are_handled(self):
         self.assertEqual(len(self._handled_by(_reaction_update(new=[ReactionTypeEmoji("👍")]))), 1)
@@ -288,11 +299,38 @@ class RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_removed_custom_or_unknown_reactions_send_nothing(self):
         await self.app._on_mesh_text(_mesh("from mesh"))
         sent_id = self.app.bot_app.bot._next_message_id
-        # A reaction taken back, a custom emoji, a message Meshgram never saw.
+        # A reaction taken back, a custom emoji.
         await self.app._handle_telegram_reaction(_reaction_update(old=[ReactionTypeEmoji("👍")], message_id=sent_id), None)
         await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeCustomEmoji("1")], message_id=sent_id), None)
-        await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeEmoji("👍")], message_id=999), None)
         self.assertEqual(self.mesh.sent, [])
+
+    async def test_raw_telegram_updates_reach_the_radio(self):
+        # The Bot API's JSON, through python-telegram-bot's own dispatch: a message, then reactions to it
+        # and to a message Meshgram never saw.
+        bot_app = ApplicationBuilder().token("1:token").build()
+        bot_app.add_handlers(self.app._telegram_handlers())
+        bot_app._initialized = True  # initialize() would ask Telegram who the bot is
+        chat = {"id": -555, "title": "Group", "type": "supergroup"}
+        bob = {"id": 8, "is_bot": False, "first_name": "Bob"}
+        updates = [
+            {"update_id": 1, "message": {"message_id": 5, "date": 1700000000, "chat": chat,
+                                         "from": {"id": 7, "is_bot": False, "first_name": "Alice"}, "text": "hello"}},
+            {"update_id": 2, "message_reaction": {"chat": chat, "message_id": 5, "user": bob, "date": 1700000001,
+                                                  "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}]}},
+            {"update_id": 3, "message_reaction": {"chat": chat, "message_id": 77, "user": bob, "date": 1700000002,
+                                                  "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "❤"}]}},
+        ]
+        for data in updates:
+            await bot_app.process_update(Update.de_json(data, bot_app.bot))
+        self.assertEqual(
+            [action.text for action in self.mesh.sent],
+            ["[Alice] hello", '[Bob] reacted 👍 to "hello"', "[Bob] reacted ❤"],
+        )
+
+    async def test_reaction_to_unknown_message_goes_out_without_quote(self):
+        # A photo, a sticker, or a message from before Meshgram kept texts.
+        await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeEmoji("👍")], message_id=999), None)
+        self.assertEqual([action.text for action in self.mesh.sent], ["[Alice] reacted 👍"])
 
     async def test_reaction_to_message_from_before_a_restart_goes_to_mesh(self):
         message = Message(message_id=42, date=_DATE, chat=_GROUP, from_user=_ALICE, text="before restart")
