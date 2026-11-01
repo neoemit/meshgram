@@ -44,7 +44,7 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 ### 1. Get a Telegram bot
 
 1. Talk to [@BotFather](https://t.me/BotFather), `/newbot`, save the token.
-2. Add the bot to your group, make it admin (or at least allow it to read messages).
+2. Add the bot to your group and make it an admin (no admin rights need to be ticked). It must at least be allowed to read messages (privacy mode off in @BotFather), and Telegram only sends emoji reactions to admin bots: without that, reactions are never relayed.
 3. Get the group's chat ID — easiest way: forward a message from the group to [@userinfobot](https://t.me/userinfobot).
 
 ### 2. Clone and configure
@@ -355,7 +355,7 @@ Plugins are listed in `config.yaml` and can also be turned on and off and reconf
 - Ignores bot-authored Telegram messages (loop prevention)
 - Filters by channel: `bridge.settings.channel` (fallback to `meshcore.bridge_channel`)
 - Edited Telegram messages aren't sent again (MeshCore can't edit a message; Telegram also reports reaction changes as edits)
-- Emoji reactions in the group go to the channel as one message, e.g. `[Alice] reacted 👍 to "[Bob] see you at 8"` (the quote is shortened to fit one packet). Telegram only sends reactions to bots that are **admins** of the group. Only newly added Unicode emoji count; custom emoji, removed reactions and reactions to messages Meshgram hasn't seen since it started (it remembers the last 500) are left out. Turn it off with `relay_reactions: false`.
+- Emoji reactions in the group go to the channel as one message, e.g. `[Alice] reacted 👍 to "[Bob] see you at 8"` (the quote is shortened to fit one packet). Telegram only sends reactions to bots that are **admins** of the group: Meshgram checks this on start (and when the bot is promoted or demoted), logs a warning and shows *not a group admin* on the Telegram connection in the web app when it isn't. Only newly added Unicode emoji count; custom emoji, removed reactions and reactions to messages Meshgram never saw the text of (it remembers the last 500 it received or sent, across restarts, in `$MESHGRAM_DATA_DIR/telegram_messages.json`) are left out. Turn it off with `relay_reactions: false`.
 
 Settings:
 
@@ -911,6 +911,7 @@ meshgram/
 │   │                             # the update itself (updater.py), flashing process (worker.py)
 │   ├── status.py                 # connection status registry
 │   ├── text_utils.py
+│   ├── telegram_texts.py         # recent Telegram message texts, for quoting reactions
 │   ├── types.py
 │   ├── meshcore_packets.py       # raw MeshCore RF packet decoding
 │   ├── transport/

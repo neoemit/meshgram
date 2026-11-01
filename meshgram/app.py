@@ -6,15 +6,15 @@ import logging
 import os
 import sys
 import time
-from collections import OrderedDict
 from typing import AsyncIterator, Optional
 
-from telegram import Message, ReactionTypeEmoji, Update
+from telegram import ChatMember, ChatMemberUpdated, Message, ReactionTypeEmoji, Update
 from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     BaseHandler,
+    ChatMemberHandler,
     ContextTypes,
     MessageHandler,
     MessageReactionHandler,
@@ -36,6 +36,7 @@ from .firmware import FIRMWARE_FILE, FirmwareCatalog, FirmwareUpdater
 from .plugin_manager import OVERRIDES_FILE, PluginManager, PluginOverrideStore
 from .radio_admin import RadioAdmin
 from .status import CONNECTED, CONNECTING, DISCONNECTED, StatusRegistry
+from .telegram_texts import TELEGRAM_TEXT_CACHE_SIZE, TELEGRAM_TEXTS_FILE, TelegramTextCache
 from .transport import MeshCoreTransport, RadioCommandError
 from .types import (
     MeshPacketRef,
@@ -53,8 +54,10 @@ from .web.api import register_control_api
 LOGGER = logging.getLogger(__name__)
 MESH_PACKET_ID_DEDUPE_TTL_SECONDS = 120.0
 TELEGRAM_HEALTH_CHECK_SECONDS = 60.0
-# Recent Telegram messages' texts, so a reaction (which only names the message) can quote it.
-TELEGRAM_TEXT_CACHE_SIZE = 500
+# New texts are saved in one go after this many seconds (and on shutdown).
+TELEGRAM_TEXT_SAVE_DELAY_SECONDS = 5.0
+# Telegram only sends message_reaction updates to bots that are admins of the chat.
+_ADMIN_STATUSES = frozenset({ChatMember.ADMINISTRATOR, ChatMember.OWNER})
 # Long enough for the control panel to get its answer before the web server goes.
 RESTART_DELAY_SECONDS = 0.5
 
@@ -103,12 +106,16 @@ class MeshgramApp:
         self._radio_connected = asyncio.Condition()
         self._telegram_health_task: Optional[asyncio.Task[None]] = None
         self._seen_mesh_packet_ids: dict[MeshPacketRef, float] = {}
-        self._telegram_texts: OrderedDict[tuple[int, int], str] = OrderedDict()
+        self._telegram_texts = TelegramTextCache(data_dir() / TELEGRAM_TEXTS_FILE, TELEGRAM_TEXT_CACHE_SIZE)
+        self._telegram_text_save_task: Optional[asyncio.Task[None]] = None
+        # Whether the bot is an admin of the group (None: not known yet).
+        self._telegram_is_admin: Optional[bool] = None
         self._mesh_send_lock = asyncio.Lock()
 
     async def _post_init(self, app: Application) -> None:
         self.loop = asyncio.get_running_loop()
         self._set_telegram_connected(app.bot.username)
+        await self._check_telegram_admin(app)
         self._telegram_health_task = asyncio.create_task(self._monitor_telegram())
 
         await self._start_web()
@@ -206,6 +213,7 @@ class MeshgramApp:
                 await self._telegram_health_task
             self._telegram_health_task = None
         await self.plugins.stop_all()
+        await self._save_telegram_texts_now()
         if self.web is not None:
             await self.web.stop()
 
@@ -275,7 +283,42 @@ class MeshgramApp:
         return " ".join(part for part in ("meshcore", connection.mode, target) if part)
 
     def _set_telegram_connected(self, username: Optional[str]) -> None:
-        self.status.set_state("telegram", CONNECTED, f"@{username}" if username else "Bot API reachable")
+        detail = f"@{username}" if username else "Bot API reachable"
+        if self._telegram_is_admin is False:
+            detail += " · not a group admin, so Telegram doesn't send it reactions"
+        self.status.set_state("telegram", CONNECTED, detail)
+
+    async def _check_telegram_admin(self, app: Application) -> None:
+        bot = app.bot
+        try:
+            member = await bot.get_chat_member(self.settings.telegram_group_id, bot.id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.warning("Couldn't check the bot's role in the Telegram group: %s", exc)
+            return
+        self._set_telegram_admin(member.status in _ADMIN_STATUSES, bot.username)
+
+    def _set_telegram_admin(self, is_admin: bool, username: Optional[str]) -> None:
+        changed = is_admin != self._telegram_is_admin
+        self._telegram_is_admin = is_admin
+        if changed:
+            if is_admin:
+                LOGGER.info("The bot is an admin of the Telegram group: emoji reactions are received")
+            else:
+                LOGGER.warning(
+                    "The bot isn't an admin of the Telegram group, so Telegram doesn't send it emoji "
+                    "reactions and they can't be relayed. Make it an admin (no rights needed) to relay them."
+                )
+        if self.status.get("telegram")["state"] == CONNECTED:
+            self._set_telegram_connected(username)
+
+    async def _handle_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # The bot was promoted, demoted, added or removed.
+        change: Optional[ChatMemberUpdated] = update.my_chat_member
+        if change is None or change.chat.id != self.settings.telegram_group_id:
+            return
+        self._set_telegram_admin(change.new_chat_member.status in _ADMIN_STATUSES, context.bot.username)
 
     async def _monitor_telegram(self) -> None:
         # Polling errors mark the bot disconnected (_on_telegram_error); this notices recovery.
@@ -391,7 +434,7 @@ class MeshgramApp:
             emojis=tuple(added),
             is_from_bot=is_from_bot,
             sender_display_name=sender_display_name,
-            message_text=self._telegram_texts.get((reaction.chat.id, reaction.message_id)),
+            message_text=self._telegram_texts.get(reaction.chat.id, reaction.message_id),
             raw_reaction=reaction,
         )
         await self._dispatch_telegram_reaction(event)
@@ -409,11 +452,22 @@ class MeshgramApp:
             await self.execute_actions(actions, name)
 
     def _remember_telegram_text(self, chat_id: int, message_id: int, text: str) -> None:
-        key = (chat_id, message_id)
-        self._telegram_texts[key] = text
-        self._telegram_texts.move_to_end(key)
-        while len(self._telegram_texts) > TELEGRAM_TEXT_CACHE_SIZE:
-            self._telegram_texts.popitem(last=False)
+        self._telegram_texts.remember(chat_id, message_id, text)
+        if self._telegram_text_save_task is None or self._telegram_text_save_task.done():
+            self._telegram_text_save_task = asyncio.create_task(self._save_telegram_texts_later())
+
+    async def _save_telegram_texts_later(self) -> None:
+        await asyncio.sleep(TELEGRAM_TEXT_SAVE_DELAY_SECONDS)
+        await asyncio.to_thread(self._telegram_texts.save)
+
+    async def _save_telegram_texts_now(self) -> None:
+        task, self._telegram_text_save_task = self._telegram_text_save_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        # The cache's lock makes this the last write even if a cancelled save's thread still runs.
+        await asyncio.to_thread(self._telegram_texts.save)
 
     async def _dispatch_telegram_message(self, event: TelegramMessageEvent) -> None:
         context = self.plugin_context()
@@ -568,6 +622,8 @@ class MeshgramApp:
                 self._handle_telegram_reaction,
                 message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED,
             ),
+            # Promoted or demoted: only admins get reactions.
+            ChatMemberHandler(self._handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER),
         ]
 
     def run(self) -> None:

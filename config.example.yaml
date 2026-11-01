@@ -93,7 +93,8 @@ plugins:
       # Overrides meshcore.bridge_channel when set.
       channel: 0
       # Send emoji reactions in the Telegram group to the channel as a message
-      # quoting the message reacted to. Needs the bot to be a group admin.
+      # quoting the message reacted to. Needs the bot to be a group admin:
+      # Telegram sends reactions to admin bots only.
       relay_reactions: true
 
   - name: ping_pong
