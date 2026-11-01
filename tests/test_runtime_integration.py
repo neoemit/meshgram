@@ -5,7 +5,17 @@ import tempfile
 import unittest
 from unittest import mock
 
-from telegram import Chat, Message, MessageReactionUpdated, ReactionTypeCustomEmoji, ReactionTypeEmoji, Update, User
+from telegram import (
+    Chat,
+    ChatMemberAdministrator,
+    ChatMemberMember,
+    ChatMemberUpdated,
+    Message,     MessageReactionUpdated,
+    ReactionTypeCustomEmoji,
+    ReactionTypeEmoji,
+    Update,
+    User,
+)
 
 from meshgram.app import MeshgramApp
 from meshgram.config import MeshgramSettings, PluginConfig
@@ -17,10 +27,23 @@ class _FakeTelegramMessage:
         self.message_id = message_id
 
 
+_BOT_USER = User(id=99, first_name="Meshgram", is_bot=True, username="meshgram_bot")
+
+
 class _FakeBot:
+    id = _BOT_USER.id
+    username = _BOT_USER.username
+
     def __init__(self):
         self.messages = []
         self._next_message_id = 100
+        self.member = ChatMemberMember(user=_BOT_USER)
+        self.member_error = None
+
+    async def get_chat_member(self, chat_id, user_id):
+        if self.member_error is not None:
+            raise self.member_error
+        return self.member
 
     async def send_message(self, **kwargs):
         self.messages.append(kwargs)
@@ -102,6 +125,27 @@ def _reaction_update(old=(), new=(), message_id=1, user=_ALICE, actor_chat=None)
     )
 
 
+def _admin() -> ChatMemberAdministrator:
+    rights = dict.fromkeys(
+        (
+            "can_be_edited",
+            "is_anonymous",
+            "can_manage_chat",
+            "can_delete_messages",
+            "can_manage_video_chats",
+            "can_restrict_members",
+            "can_promote_members",
+            "can_change_info",
+            "can_invite_users",
+            "can_post_stories",
+            "can_edit_stories",
+            "can_delete_stories",
+        ),
+        False,
+    )
+    return ChatMemberAdministrator(user=_BOT_USER, **rights)
+
+
 def _chunk(index, total=3, attempts=3, sequence="seq"):
     return SendMeshAction(
         text=f"chunk{index}",
@@ -141,6 +185,7 @@ class RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.app.bot_app = _FakeTelegramApp()
         self.mesh = _FakeMesh()
         self.app.mesh = self.mesh
+        self.addAsyncCleanup(self.app._save_telegram_texts_now)
         await self.app.plugins.start_all()
         self.addAsyncCleanup(self.app.plugins.stop_all)
         # Chunks wait a while between sends; not in tests.
@@ -248,6 +293,59 @@ class RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeCustomEmoji("1")], message_id=sent_id), None)
         await self.app._handle_telegram_reaction(_reaction_update(new=[ReactionTypeEmoji("👍")], message_id=999), None)
         self.assertEqual(self.mesh.sent, [])
+
+    async def test_reaction_to_message_from_before_a_restart_goes_to_mesh(self):
+        message = Message(message_id=42, date=_DATE, chat=_GROUP, from_user=_ALICE, text="before restart")
+        await self.app._handle_telegram_message(Update(update_id=1, message=message), None)
+        await self.app._save_telegram_texts_now()
+
+        restarted = MeshgramApp(self.app.settings)
+        restarted.bot_app = _FakeTelegramApp()
+        restarted.mesh = self.mesh
+        self.addAsyncCleanup(restarted._save_telegram_texts_now)
+        await restarted.plugins.start_all()
+        self.addAsyncCleanup(restarted.plugins.stop_all)
+        self.mesh.sent.clear()
+        await restarted._handle_telegram_reaction(_reaction_update(new=[ReactionTypeEmoji("👍")], message_id=42), None)
+        self.assertEqual([action.text for action in self.mesh.sent], ['[Alice] reacted 👍 to "before restart"'])
+
+    async def test_bot_that_is_not_an_admin_says_so(self):
+        self.app._set_telegram_connected("meshgram_bot")
+        # Telegram sends reactions to admins only; otherwise they silently never arrive.
+        with self.assertLogs("meshgram.app", level="WARNING") as logs:
+            await self.app._check_telegram_admin(self.app.bot_app)
+        self.assertIn("isn't an admin", "\n".join(logs.output))
+        self.assertFalse(self.app._telegram_is_admin)
+        self.assertIn("not a group admin", self.app.status.get("telegram")["detail"])
+
+        promoted = ChatMemberUpdated(
+            chat=_GROUP,
+            from_user=_ALICE,
+            date=_DATE,
+            old_chat_member=ChatMemberMember(user=_BOT_USER),
+            new_chat_member=_admin(),
+        )
+        update = Update(update_id=5, my_chat_member=promoted)
+        self.assertEqual(len(self._handled_by(update)), 1)
+        context = mock.Mock(bot=self.app.bot_app.bot)
+        with self.assertLogs("meshgram.app", level="INFO"):
+            await self.app._handle_my_chat_member(update, context)
+        self.assertTrue(self.app._telegram_is_admin)
+        self.assertEqual(self.app.status.get("telegram")["detail"], "@meshgram_bot")
+
+    async def test_admin_bot_and_failed_check(self):
+        self.app._set_telegram_connected("meshgram_bot")
+        self.app.bot_app.bot.member = _admin()
+        with self.assertLogs("meshgram.app", level="INFO"):
+            await self.app._check_telegram_admin(self.app.bot_app)
+        self.assertTrue(self.app._telegram_is_admin)
+        self.assertEqual(self.app.status.get("telegram")["detail"], "@meshgram_bot")
+
+        self.app._telegram_is_admin = None
+        self.app.bot_app.bot.member_error = RuntimeError("chat not found")
+        with self.assertLogs("meshgram.app", level="WARNING"):
+            await self.app._check_telegram_admin(self.app.bot_app)
+        self.assertIsNone(self.app._telegram_is_admin)
 
     async def test_restart_stops_the_bot_for_main_to_start_again(self):
         self.app.bot_app.stop_running = mock.Mock()

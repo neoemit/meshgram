@@ -4,6 +4,7 @@ import logging
 import uuid
 
 from meshgram.plugin import CHANNEL_FORMAT, BasePlugin
+from meshgram.telegram_texts import TELEGRAM_TEXT_CACHE_SIZE
 from meshgram.text_utils import split_for_mesh, utf8_len
 from meshgram.types import (
     MeshTextEvent,
@@ -214,9 +215,11 @@ class BridgePlugin(BasePlugin):
         # which the reaction update itself doesn't carry. Without it, say nothing.
         quoted = " ".join((event.message_text or "").split())
         if not quoted:
-            LOGGER.debug(
-                "Reaction to unknown Telegram message %s not relayed: its text isn't known",
+            LOGGER.info(
+                "Reaction to Telegram message %s not relayed: Meshgram never saw its text "
+                "(a message without text, or older than the last %s messages)",
                 event.message_id,
+                TELEGRAM_TEXT_CACHE_SIZE,
             )
             return []
 
