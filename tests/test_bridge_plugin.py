@@ -188,9 +188,10 @@ class BridgePluginTests(unittest.TestCase):
         self.assertEqual(actions[0].channel_index, 2)
         self.assertIsNone(actions[0].sequence_id)
 
-    def test_reaction_to_unknown_message_is_not_relayed(self):
-        self.assertEqual(self._react(_reaction(message_text=None)), [])
-        self.assertEqual(self._react(_reaction(message_text="  ")), [])
+    def test_reaction_to_unknown_message_goes_out_without_quote(self):
+        for text in (None, "  "):
+            actions = self._react(_reaction(message_text=text))
+            self.assertEqual([action.text for action in actions], ["[Alice] reacted 👍"])
 
     def test_reaction_ignores_bots_other_chats_and_no_emoji(self):
         self.assertEqual(self._react(_reaction(is_from_bot=True)), [])

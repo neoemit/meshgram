@@ -399,6 +399,15 @@ class MeshgramApp:
 
         await self._dispatch_telegram_message(event)
 
+    async def _handle_telegram_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # Edits aren't relayed, but a reaction to the message should quote what it says now.
+        message = update.effective_message
+        if message is None or message.chat is None:
+            return
+        text = message.text if message.text is not None else message.caption
+        if text is not None and self._telegram_texts.get(message.chat.id, message.message_id) != text:
+            self._remember_telegram_text(message.chat.id, message.message_id, text)
+
     async def _handle_telegram_reaction(
         self,
         update: Update,
@@ -415,6 +424,13 @@ class MeshgramApp:
         for item in reaction.new_reaction:
             if isinstance(item, ReactionTypeEmoji) and item.emoji not in old_emojis and item.emoji not in added:
                 added.append(item.emoji)
+        # Logged so it's clear whether Telegram delivers reactions at all.
+        LOGGER.info(
+            "Telegram reaction update: chat=%s message=%s added=%s",
+            reaction.chat.id,
+            reaction.message_id,
+            "".join(added) or "none (removed, changed back or custom emoji)",
+        )
         if not added:
             return
 
@@ -611,11 +627,16 @@ class MeshgramApp:
 
     def _telegram_handlers(self) -> list[BaseHandler]:
         return [
-            # New messages only: MeshCore can't edit a message, and Telegram also sends
-            # edited_message updates when reactions change, which would send it again.
+            # New messages only are relayed: MeshCore can't edit a message, and Telegram also
+            # sends edited_message updates when reactions change, which would send it again.
             MessageHandler(
                 (filters.UpdateType.MESSAGE | filters.UpdateType.CHANNEL_POST) & ~filters.COMMAND,
                 self._handle_telegram_message,
+            ),
+            # Edits only update the text a reaction quotes.
+            MessageHandler(
+                filters.UpdateType.EDITED_MESSAGE | filters.UpdateType.EDITED_CHANNEL_POST,
+                self._handle_telegram_edit,
             ),
             # Who reacted with what (sent to bots that are admins); not the anonymous counts.
             MessageReactionHandler(

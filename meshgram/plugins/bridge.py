@@ -25,7 +25,7 @@ class BridgePlugin(BasePlugin):
     description = (
         "Relays messages between the Telegram group and one radio channel. Long Telegram "
         "messages are split into numbered chunks that fit in a radio packet. Emoji reactions "
-        "in Telegram go out as a short message quoting the message reacted to."
+        "in Telegram go out as a short message quoting the message reacted to (when Meshgram saw it)."
     )
     settings_schema = {
         "type": "object",
@@ -45,8 +45,8 @@ class BridgePlugin(BasePlugin):
                 "description": (
                     "Send emoji reactions in Telegram to the radio channel as a message, e.g. "
                     "[Alice] reacted 👍 to \"[Bob] hello\". Telegram only tells the bot about "
-                    "reactions when it's an admin of the group; reactions to messages Meshgram "
-                    "didn't see since it started, and custom emoji, are left out."
+                    "reactions when it's an admin of the group. Reactions to messages Meshgram "
+                    "never saw the text of go out without the quote; custom emoji are left out."
                 ),
             },
         },
@@ -206,42 +206,59 @@ class BridgePlugin(BasePlugin):
         context: PluginContext,
     ) -> list[PluginAction]:
         if not self.settings.get("relay_reactions", True):
+            LOGGER.info("Reaction to Telegram message %s not relayed: relay_reactions is off", event.message_id)
             return []
 
-        if event.chat_id != context.telegram_group_id or event.is_from_bot or not event.emojis:
+        if event.chat_id != context.telegram_group_id:
+            LOGGER.info(
+                "Reaction in Telegram chat %s not relayed: the bridged group is %s",
+                event.chat_id,
+                context.telegram_group_id,
+            )
+            return []
+        if event.is_from_bot or not event.emojis:
             return []
 
-        # MeshCore has no reactions: a message names it, and the message reacted to,
-        # which the reaction update itself doesn't carry. Without it, say nothing.
+        # MeshCore has no reactions: a message names it, quoting the message reacted to,
+        # which the reaction update itself doesn't carry (it comes from the app's cache).
+        # A message Meshgram never saw the text of (a photo or sticker, or one from before
+        # the cache) still gets its reaction relayed, just without the quote.
+        emojis = "".join(event.emojis)
         quoted = " ".join((event.message_text or "").split())
+        payload_limit = self._payload_limit(context)
         if not quoted:
             LOGGER.info(
-                "Reaction to Telegram message %s not relayed: Meshgram never saw its text "
+                "Reaction to Telegram message %s relayed without a quote: Meshgram never saw its text "
                 "(a message without text, or older than the last %s messages)",
                 event.message_id,
                 TELEGRAM_TEXT_CACHE_SIZE,
             )
-            return []
-
-        emojis = "".join(event.emojis)
-        payload_limit = self._payload_limit(context)
-        mesh_text = self._with_sender_prefix(
-            context, event.sender_display_name, f'reacted {emojis} to "{quoted}"'
-        )
-        if utf8_len(mesh_text) > payload_limit:
+            mesh_text = self._with_sender_prefix(context, event.sender_display_name, f"reacted {emojis}")
+        else:
+            mesh_text = self._with_sender_prefix(
+                context, event.sender_display_name, f'reacted {emojis} to "{quoted}"'
+            )
+        if quoted and utf8_len(mesh_text) > payload_limit:
             # One packet: shorten the quote rather than send a reaction in chunks.
             overflow = utf8_len(mesh_text) - payload_limit
             keep = utf8_len(quoted) - overflow - utf8_len(ELLIPSIS)
             shortened = _truncate_utf8(quoted, keep).rstrip()
-            if not shortened:
-                LOGGER.debug("Reaction to Telegram message %s doesn't fit in a radio packet", event.message_id)
-                return []
-            mesh_text = self._with_sender_prefix(
-                context, event.sender_display_name, f'reacted {emojis} to "{shortened}{ELLIPSIS}"'
-            )
-            if utf8_len(mesh_text) > payload_limit:
-                return []
+            if shortened:
+                mesh_text = self._with_sender_prefix(
+                    context, event.sender_display_name, f'reacted {emojis} to "{shortened}{ELLIPSIS}"'
+                )
+            if not shortened or utf8_len(mesh_text) > payload_limit:
+                mesh_text = self._with_sender_prefix(context, event.sender_display_name, f"reacted {emojis}")
+        if utf8_len(mesh_text) > payload_limit:
+            LOGGER.info("Reaction to Telegram message %s doesn't fit in a radio packet", event.message_id)
+            return []
 
+        LOGGER.info(
+            "Relaying reaction to Telegram message %s to channel %s: %s",
+            event.message_id,
+            self._bridge_channel(context),
+            mesh_text,
+        )
         chunking = context.settings.chunking
         return [
             SendMeshAction(
