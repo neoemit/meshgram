@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import hmac
 import json
 import logging
@@ -53,7 +54,11 @@ LOGIN_FAILURE_DELAY_SECONDS = 1.0
 CONFIG_PLACEHOLDER = "/*__MESHGRAM_CONFIG__*/{}"
 MAX_REQUEST_HEAD_BYTES = 16 * 1024
 MAX_BODY_BYTES = 256 * 1024
+# A ``ping`` event this often on an idle event stream: proxies keep it open, and
+# pages notice a dead connection (no ping for a while) and reconnect.
 SSE_KEEPALIVE_SECONDS = 15.0
+# How long browsers wait before reconnecting a dropped event stream (milliseconds).
+SSE_RETRY_MILLISECONDS = 3000
 SSE_QUEUE_SIZE = 500
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 READ_ONLY_REASON = (
@@ -227,6 +232,10 @@ class WebServer:
         self._client_tasks: set[asyncio.Task[Any]] = set()
         self._session_key_path = session_key_path
         self._signer: Optional[SessionSigner] = None
+        # Identifies the page served (its files and settings); set by ``start``. Open
+        # pages compare it with theirs on every snapshot and reload when it changed
+        # (Meshgram updated or restarted with another title, say).
+        self.build = ""
         # Cookies don't tell ports apart: one per Meshgram on the same host.
         self.session_cookie = f"meshgram_session_{config.port}"
         self.login_failure_delay = LOGIN_FAILURE_DELAY_SECONDS
@@ -265,6 +274,7 @@ class WebServer:
         return {
             "connections": self.status.snapshot() if self.status is not None else [],
             "control": self.control_state(),
+            "build": self.build,
         }
 
     def _on_status(self, entry: dict[str, Any]) -> None:
@@ -278,10 +288,17 @@ class WebServer:
             "tile_url": self.config.tile_url,
             "tile_attribution": self.config.tile_attribution,
             "login": bool(self.config.password),
+            "keepalive_seconds": SSE_KEEPALIVE_SECONDS,
         }
+        sources = {name: (STATIC_DIR / name).read_text(encoding="utf-8") for name, _ in STATIC_FILES.values()}
+        digest = hashlib.sha256(json.dumps(client_config, sort_keys=True).encode("utf-8"))
+        for name in sorted(sources):
+            digest.update(name.encode("utf-8") + b"\0" + sources[name].encode("utf-8") + b"\0")
+        self.build = digest.hexdigest()[:16]
+        client_config["build"] = self.build
         config_json = json.dumps(client_config).replace("</", "<\\/")
         for path, (name, content_type) in STATIC_FILES.items():
-            body = (STATIC_DIR / name).read_text(encoding="utf-8")
+            body = sources[name]
             if name == "index.html":
                 body = body.replace(CONFIG_PLACEHOLDER, config_json)
             self._static[path] = (body.encode("utf-8"), content_type)
@@ -561,7 +578,7 @@ class WebServer:
             b"X-Content-Type-Options: nosniff\r\n"
             b"Connection: close\r\n"
             b"X-Accel-Buffering: no\r\n\r\n"
-            b"retry: 3000\n\n"
+            + f"retry: {SSE_RETRY_MILLISECONDS}\n\n".encode("ascii")
         )
         queue = self.events.subscribe()
         try:
@@ -570,7 +587,7 @@ class WebServer:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
                 except asyncio.TimeoutError:
-                    writer.write(b": keepalive\n\n")
+                    writer.write(b"event: ping\ndata: {}\n\n")
                     await writer.drain()
                     continue
                 if event.get("type") == "overflow":

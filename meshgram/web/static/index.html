@@ -2539,6 +2539,7 @@ setInterval(() => { if (!$("conns-panel").hidden) renderConnections(); }, 15000)
 
 function handleEvent(event) {
   if (event.type === "snapshot") {
+    if (event.build && CONFIG.build && event.build !== CONFIG.build) reloadForNewBuild();
     // The map's data comes from the packet_map plugin, which may be off.
     state.mapAvailable = Boolean(event.map);
     const data = event.map || { self_id: null, nodes: [], packets: [], remote_packets: [], messages: [] };
@@ -2595,18 +2596,110 @@ function setStatus(live, text) {
   $("status-text").textContent = text;
 }
 
-function connect() {
-  const source = new EventSource("api/events");
-  source.onopen = () => setStatus(true, "Live");
-  source.onerror = () => {
-    setStatus(false, "Reconnecting…");
+// The event stream keeps the page live. EventSource reconnects by itself after a dropped
+// connection, but gives up for good when a reconnect gets an error answer (a reverse
+// proxy's 502 while Meshgram restarts, say), and can't tell a connection that died
+// silently (the host suspended, the network changed) from a quiet one. So the page
+// watches for the server's pings, retries on its own with backoff once the browser gave
+// up, retries at once when the network or the tab comes back, and reloads itself when
+// Meshgram serves a different page than this one. Each (re)connect starts with a full
+// snapshot, so nothing missed while offline stays missing.
+const live = { source: null, lastSeen: 0, attempt: 0, retryTimer: null, reloadPending: false };
+const LIVE_STALL_MS = (CONFIG.keepalive_seconds || 15) * 2500;  // 2.5 pings missed
+const LIVE_RETRY_MIN_MS = 1000;
+const LIVE_RETRY_MAX_MS = 30000;
+
+function showOffline() {
+  setStatus(false, navigator.onLine === false ? "Offline" : "Reconnecting…");
+  if (!connections.stale) {
     connections.stale = true;
     renderConnections();
+  }
+}
+
+function closeLive() {
+  clearTimeout(live.retryTimer);
+  live.retryTimer = null;
+  if (live.source) live.source.close();
+  live.source = null;
+}
+
+function connect() {
+  closeLive();
+  const source = new EventSource("api/events");
+  live.source = source;
+  live.lastSeen = Date.now();
+  const alive = () => { if (live.source === source) live.lastSeen = Date.now(); };
+  source.onopen = () => {
+    alive();
+    setStatus(true, "Live");
+  };
+  source.addEventListener("ping", alive);
+  source.onerror = () => {
+    if (live.source !== source) return;
+    showOffline();
     checkSession();
+    // CONNECTING: the browser retries by itself. CLOSED: it gave up, so do it here.
+    if (source.readyState === EventSource.CLOSED) scheduleReconnect();
   };
   source.onmessage = (message) => {
-    try { handleEvent(JSON.parse(message.data)); } catch (err) { console.error(err); }
+    if (live.source !== source) return;
+    alive();
+    let event;
+    try { event = JSON.parse(message.data); } catch (err) { console.error(err); return; }
+    if (event.type === "snapshot") live.attempt = 0;
+    try { handleEvent(event); } catch (err) { console.error(err); }
   };
+}
+
+// Exponential backoff with jitter, so pages don't all knock at once after a restart.
+function scheduleReconnect() {
+  closeLive();
+  const delay = Math.min(LIVE_RETRY_MAX_MS, LIVE_RETRY_MIN_MS * 2 ** live.attempt) * (0.5 + Math.random() / 2);
+  live.attempt += 1;
+  live.retryTimer = setTimeout(connect, delay);
+}
+
+function isLive() {
+  return Boolean(live.source) && live.source.readyState === EventSource.OPEN && Date.now() - live.lastSeen < LIVE_STALL_MS;
+}
+
+function reconnectNow() {
+  if (isLive()) return;
+  live.attempt = 0;
+  showOffline();
+  connect();
+}
+
+// A stream that went quiet for longer than the pings allow is dead: start a new one.
+setInterval(() => {
+  if (live.source && Date.now() - live.lastSeen > LIVE_STALL_MS) reconnectNow();
+}, 5000);
+// The network came back: the old connection rarely survives that, so start afresh.
+window.addEventListener("online", () => {
+  live.attempt = 0;
+  connect();
+});
+window.addEventListener("offline", showOffline);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) reconnectNow(); });
+// Leaving the page closes the stream (keeps it eligible for the back/forward cache);
+// coming back from that cache opens a new one.
+window.addEventListener("pagehide", closeLive);
+window.addEventListener("pageshow", (event) => { if (event.persisted) reconnectNow(); });
+
+// Meshgram serves another page now (updated, or restarted with another title, say):
+// load it, once that loses nothing (no unsaved form, open dialog or field being typed in).
+function reloadForNewBuild() {
+  if (live.reloadPending) return;
+  live.reloadPending = true;
+  const attempt = () => {
+    const field = document.activeElement;
+    const busy = document.querySelector("form[data-dirty], dialog[open]")
+      || (field && field.matches("input, textarea, select, [contenteditable]"));
+    if (busy) setTimeout(attempt, 5000);
+    else location.reload();
+  };
+  attempt();
 }
 
 buildTypeList();
