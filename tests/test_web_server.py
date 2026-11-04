@@ -263,6 +263,33 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await next_event())["map"], {"nodes": []})
         writer.close()
 
+    async def test_pages_learn_the_build_they_should_run(self):
+        server = await self._start(title="Mine")
+        self.assertRegex(server.build, r"^[0-9a-f]{16}$")
+        _, _, body = await http(server.port, "GET", "/")
+        self.assertIn(f'"build": "{server.build}"'.encode(), body)
+        self.assertEqual(server.events.snapshot()["build"], server.build)
+
+        # Another title (or other page files) is another build: open pages reload.
+        other = await self._start(title="Other")
+        self.assertNotEqual(other.build, server.build)
+        same = await self._start(title="Mine")
+        self.assertEqual(same.build, server.build)
+
+    async def test_idle_event_stream_sends_pings(self):
+        server = await self._start()
+        with mock.patch("meshgram.web.server.SSE_KEEPALIVE_SECONDS", 0.05):
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            writer.write(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=2)
+            self.assertIn(b"text/event-stream", head)
+            self.assertEqual(await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=2), b"retry: 3000\n\n")
+            self.assertTrue((await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=2)).startswith(b"data: "))
+            ping = await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=2)
+            self.assertEqual(ping, b"event: ping\ndata: {}\n\n")
+            writer.close()
+
 
 class _Host:
     def __init__(self, radio):
