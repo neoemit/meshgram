@@ -1,11 +1,12 @@
 """A MeshSOS channel in a Telegram group, worked with buttons instead of typed text.
 
-The bridge plugin hands its group to a desk when its mode is "sos". The desk keeps the
-open incidents the way the boards do (meshgram.sos_protocol), shows each as one message
-with ACK and Resolved buttons, and keeps a pinned message with the SOS button. A press
-goes out on the radio in the name of whoever pressed, with the incident's id, so it can't
-land on the wrong alarm. Nothing typed in the group reaches the radio: on an SOS channel
-any stray text starts an alarm on every board.
+The bridge plugin hands its group to a desk when its mode is "sos". Like the boards
+(meshgram.sos_protocol), the desk knows one emergency or none: it shows the emergency as
+one message with ACK and Resolved buttons, and keeps a pinned message with the SOS
+button. While an emergency is open nobody can start another; anyone but its callers can
+acknowledge it, and anyone can resolve it. A press goes out on the radio under the
+presser's Telegram first name. Nothing typed in the group reaches the radio: on an SOS
+channel any stray text starts an alarm on every board.
 """
 from __future__ import annotations
 
@@ -43,31 +44,33 @@ CONFIRM_SECONDS = 30.0
 # Someone typing gets pointed to the buttons at most this often.
 HINT_SECONDS = 20.0
 TICK_SECONDS = 1.0
-MAX_OPEN = 8
 CLOSED_MEMORY = 32
+MAX_NAMES = 500
 
 PANEL_TEXT = (
     "🆘 <b>MeshSOS</b>\n"
     "Press the button to call for help: everyone here and every board on the radio is alerted.\n"
-    "Alarms appear below with buttons to answer them. Typed messages are not sent to the radio."
+    "The emergency appears below with buttons to answer it. Typed messages are not sent to the radio."
 )
 SOS_LABEL = "🚨 SOS: I need help"
 HINT_TEXT = "Typed messages aren't sent to the radio. Use the buttons."
+ALREADY_ACTIVE = "An emergency is already active. Answer it with the buttons on its message."
 
 
 @dataclass(slots=True)
-class Incident:
+class Emergency:
     key: str
-    sender: str
+    # Who called, first caller first: a board's name, or a Telegram user's first name.
+    callers: list[str]
     text: str
     opened: float
+    # Never shown: an id tells a repeat of an SOS from a new one, and a late message about an
+    # earlier emergency from one about this. Newest last.
     ids: list[str] = field(default_factory=list)
     aware: list[str] = field(default_factory=list)
     message_id: Optional[int] = None
-    # "radio", or "telegram" for an SOS sent with the button here.
-    origin: str = "radio"
-    # Who pressed the button (their Telegram name), for an SOS sent from here.
-    by: str = ""
+    # True for an SOS sent with the button here: the desk repeats it on the radio.
+    from_telegram: bool = False
     sends: int = 0
     retrying: bool = False
     next_send: float = 0.0
@@ -83,8 +86,7 @@ class Question:
 
     token: str
     user_id: Optional[int]
-    asked: str  # their Telegram first name
-    name: str  # the name the action goes out under
+    name: str  # the presser, as they're named on the radio
     action: str  # "sos" or "resolve"
     key: Optional[str]
     expires: float
@@ -101,7 +103,6 @@ class SosDesk:
         chat_id: Callable[[], int],
         send_mesh: Callable[[str], Awaitable[None]],
         radio_online: Callable[[], bool],
-        radio_name: Callable[[Any], str],
         now: Callable[[], float] = time.time,
     ):
         self._label = label
@@ -110,10 +111,11 @@ class SosDesk:
         self._chat_id = chat_id
         self._send_mesh = send_mesh
         self._radio_online = radio_online
-        self._radio_name = radio_name
         self._now = now
-        self._incidents: list[Incident] = []  # oldest first
+        self._emergency: Optional[Emergency] = None
         self._closed: list[str] = []
+        # Telegram user ID -> the name they go by on the radio (see name_for).
+        self._names: dict[int, str] = {}
         self._panel_id: Optional[int] = None
         self._panel_checked = False
         self._questions: dict[str, Question] = {}
@@ -154,15 +156,45 @@ class SosDesk:
             now = self._now()
             for question in [item for item in self._questions.values() if item.expires <= now]:
                 await self._drop_question(question)
-            for incident in list(self._incidents):
-                if incident.retrying and incident.next_send <= now:
-                    await self._send_sos(incident)
-                    await self._refresh(incident)
-                    self._save()
+            emergency = self._emergency
+            if emergency is not None and emergency.retrying and emergency.next_send <= now:
+                await self._send_sos(emergency)
+                await self._refresh(emergency)
+                self._save()
 
     @property
-    def incidents(self) -> list[Incident]:
-        return list(self._incidents)
+    def emergency(self) -> Optional[Emergency]:
+        return self._emergency
+
+    # --- Names ------------------------------------------------------------------------------------
+
+    def name_for(self, event: Any) -> str:
+        """The name a Telegram user goes by on the radio: their first name.
+
+        Two people with the same first name must stay two people (an ACK counts once per
+        name), so the second gets their last initial, or a number. A name is kept for as long
+        as the person keeps their first name.
+        """
+        words = _clean_name(event.sender_display_name).split()
+        first = (words[0] if words else "Telegram")[: protocol.MAX_NAME_LENGTH]
+        user_id = event.sender_id
+        if user_id is None:
+            return first
+        known = self._names.get(user_id)
+        if known is not None and known.split()[0] == first:
+            return known
+        taken = {name.casefold() for other, name in self._names.items() if other != user_id}
+        candidates = [first]
+        if len(words) > 1:
+            candidates.append(f"{first[: protocol.MAX_NAME_LENGTH - 2]} {words[-1][0]}")
+        candidates.extend(f"{first[: protocol.MAX_NAME_LENGTH - 3]} {number}" for number in range(2, 100))
+        name = next((candidate for candidate in candidates if candidate.casefold() not in taken), first)
+        self._names.pop(user_id, None)
+        self._names[user_id] = name  # newest last
+        while len(self._names) > MAX_NAMES:
+            del self._names[next(iter(self._names))]
+        self._save()
+        return name
 
     # --- From the radio ---------------------------------------------------------------------------
 
@@ -181,48 +213,61 @@ class SosDesk:
     async def _mesh_alarm(self, message: protocol.SosMessage) -> None:
         incident_id = message.incident_id
         if incident_id and incident_id in self._closed:
-            return  # A late repeat of an incident that's resolved.
+            return  # A late repeat of an emergency that's resolved.
         text = protocol.display_text(message.body)
-        known = self._by_sender(message.sender)
-        if known is not None and incident_id and incident_id in known.ids:
-            return  # A repeat: never a second incident.
-        if known is not None:
-            # More from someone whose incident is open: the same incident, with the new text.
-            if incident_id:
-                known.ids.append(incident_id)
-            known.text = text
-            await self._supersede(known)
-            self._incidents.remove(known)
-            self._incidents.append(known)
-            await self._post(known)
-            self._save()
+        emergency = self._emergency
+        if emergency is None:
+            await self._open(
+                Emergency(
+                    key=secrets.token_hex(4),
+                    callers=[message.sender],
+                    text=text,
+                    opened=self._now(),
+                    ids=[incident_id] if incident_id else [],
+                )
+            )
             return
-        incident = Incident(
-            key=self._new_key(),
-            sender=message.sender,
-            text=text,
-            opened=self._now(),
-            ids=[incident_id] if incident_id else [],
-        )
-        await self._open(incident)
+        if incident_id and incident_id in emergency.ids:
+            return  # A repeat: nothing new.
+        # Something new while it's open: still the one emergency, shown again so everyone notices.
+        if incident_id:
+            emergency.ids.append(incident_id)
+        if message.sender not in emergency.callers:
+            emergency.callers.append(message.sender)
+        elif message.sender == emergency.callers[0]:
+            emergency.text = text
+        await self._supersede(emergency)
+        await self._post(emergency)
+        self._save()
+
+    def _is_for(self, emergency: Emergency, incident_id: Optional[str]) -> bool:
+        """False for an ACK or RESOLVED that names another emergency than the open one."""
+        return not incident_id or not emergency.ids or incident_id in emergency.ids
 
     async def _mesh_ack(self, message: protocol.SosMessage) -> None:
-        incident = self._target(message.incident_id)
-        if incident is None:
-            if message.incident_id is None:
-                await self._send(f"[{html.escape(message.sender)}] {html.escape(message.body)}")
+        emergency = self._emergency
+        if emergency is None:
+            await self._show_stray(message)
             return
-        if incident.sender == message.sender or message.sender in incident.aware:
+        if not self._is_for(emergency, message.incident_id):
             return
-        await self._add_aware(incident, message.sender)
+        if message.sender in emergency.callers or message.sender in emergency.aware:
+            return
+        await self._add_aware(emergency, message.sender)
 
     async def _mesh_resolved(self, message: protocol.SosMessage) -> None:
-        incident = self._target(message.incident_id)
-        if incident is None:
-            if message.incident_id is None:
-                await self._send(f"[{html.escape(message.sender)}] {html.escape(message.body)}")
+        emergency = self._emergency
+        if emergency is None:
+            await self._show_stray(message)
             return
-        await self._close(incident, message.sender)
+        if not self._is_for(emergency, message.incident_id):
+            return
+        await self._close(emergency, message.sender)
+
+    async def _show_stray(self, message: protocol.SosMessage) -> None:
+        """Someone typed "ack" or "resolved" on the radio with nothing open: shown as it is."""
+        if message.incident_id is None:
+            await self._send(f"[{html.escape(message.sender)}] {html.escape(message.body)}")
 
     # --- From Telegram ----------------------------------------------------------------------------
 
@@ -232,7 +277,8 @@ class SosDesk:
         if now - self._last_hint < HINT_SECONDS:
             return
         self._last_hint = now
-        await self._send(HINT_TEXT, keyboard=[[(SOS_LABEL, SOS)]], reply_to=event.message_id)
+        keyboard = None if self._emergency is not None else [[(SOS_LABEL, SOS)]]
+        await self._send(HINT_TEXT, keyboard=keyboard, reply_to=event.message_id)
 
     async def on_button(self, event: TelegramButtonEvent) -> None:
         data = event.data
@@ -251,31 +297,32 @@ class SosDesk:
                 await self._reply(event)
 
     async def _ask_sos(self, event: TelegramButtonEvent) -> None:
-        name = self._radio_name(event)
-        if self._by_sender(name) is not None:
-            await self._reply(event, f"An SOS from {name} is already open. Use its Resolved button when it's over.", alert=True)
+        if self._emergency is not None:
+            await self._reply(event, ALREADY_ACTIVE, alert=True)
             return
+        name = self.name_for(event)
         await self._ask(
             event,
             action="sos",
             key=None,
             name=name,
-            text=f"🚨 <b>{html.escape(_first_name(event))}</b>, send an SOS as <b>{html.escape(name)}</b>?",
+            text=f"🚨 <b>{html.escape(name)}</b>, send an SOS? Everyone here and every board is alerted.",
             yes="🚨 Yes, send SOS",
         )
 
     async def _ask_resolve(self, event: TelegramButtonEvent, key: str) -> None:
-        incident = await self._open_incident(event, key)
-        if incident is None:
+        emergency = await self._open_emergency(event, key)
+        if emergency is None:
             return
+        name = self.name_for(event)
         await self._ask(
             event,
             action="resolve",
             key=key,
-            name=self._radio_name(event),
+            name=name,
             text=(
-                f"🟢 <b>{html.escape(_first_name(event))}</b>, is <b>{html.escape(incident.sender)}</b>'s SOS over? "
-                "Every board stops its alarm."
+                f"🟢 <b>{html.escape(name)}</b>, is the emergency over? "
+                "Every board stops its alarm, and a new SOS can be sent."
             ),
             yes="🟢 Yes, resolved",
         )
@@ -288,7 +335,6 @@ class SosDesk:
         question = Question(
             token=secrets.token_hex(4),
             user_id=event.sender_id,
-            asked=_first_name(event),
             name=name,
             action=action,
             key=key,
@@ -310,7 +356,7 @@ class SosDesk:
             await self._delete(event.message_id)
             return
         if question.user_id != event.sender_id:
-            await self._reply(event, f"This question is for {question.asked}.", alert=True)
+            await self._reply(event, f"This question is for {question.name}.", alert=True)
             return
         await self._drop_question(question)
         if not confirmed:
@@ -319,153 +365,131 @@ class SosDesk:
         if question.action == "sos":
             await self._press_sos(event, question.name)
             return
-        incident = await self._open_incident(event, question.key or "")
-        if incident is None:
+        emergency = await self._open_emergency(event, question.key or "")
+        if emergency is None:
             return
-        await self._send_mesh(protocol.relayed(question.name, protocol.build_resolved(incident.incident_id)))
-        await self._close(incident, question.name)
-        await self._reply(event, self._sent_note(f"Resolved as {question.name}."))
+        await self._send_mesh(protocol.relayed(question.name, protocol.build_resolved(emergency.incident_id)))
+        await self._close(emergency, question.name)
+        await self._reply(event, self._sent_note("Resolved."))
 
     async def _press_sos(self, event: TelegramButtonEvent, name: str) -> None:
-        if self._by_sender(name) is not None:
-            await self._reply(event, f"An SOS from {name} is already open.", alert=True)
+        if self._emergency is not None:
+            # One arrived while the question was open.
+            await self._reply(event, ALREADY_ACTIVE, alert=True)
             return
-        incident = Incident(
-            key=self._new_key(),
-            sender=name,
+        emergency = Emergency(
+            key=secrets.token_hex(4),
+            callers=[name],
             text=protocol.SOS_TEXT,
             opened=self._now(),
             ids=[self._new_incident_id()],
-            origin="telegram",
-            by=" ".join(event.sender_display_name.split()),
+            from_telegram=True,
             retrying=True,
         )
-        await self._send_sos(incident)
-        await self._open(incident)
-        await self._reply(event, self._sent_note(f"SOS sent as {name}."))
+        await self._send_sos(emergency)
+        await self._open(emergency)
+        await self._reply(event, self._sent_note("SOS sent."))
 
     async def _press_ack(self, event: TelegramButtonEvent, key: str) -> None:
-        incident = await self._open_incident(event, key)
-        if incident is None:
+        emergency = await self._open_emergency(event, key)
+        if emergency is None:
             return
-        name = self._radio_name(event)
-        if name == incident.sender:
-            await self._reply(event, "This is your own SOS: the others acknowledge it.", alert=True)
+        name = self.name_for(event)
+        if name in emergency.callers:
+            await self._reply(event, "You called this SOS: the others acknowledge it.", alert=True)
             return
-        if name in incident.aware:
-            await self._reply(event, f"{name} is already listed as aware.")
+        if name in emergency.aware:
+            await self._reply(event, "You're already listed as aware.")
             return
-        await self._send_mesh(protocol.relayed(name, protocol.build_ack(incident.incident_id)))
-        await self._add_aware(incident, name)
-        await self._reply(event, self._sent_note(f"ACK sent as {name}."))
+        await self._send_mesh(protocol.relayed(name, protocol.build_ack(emergency.incident_id)))
+        await self._add_aware(emergency, name)
+        await self._reply(event, self._sent_note("ACK sent."))
 
-    async def _open_incident(self, event: TelegramButtonEvent, key: str) -> Optional[Incident]:
-        """The open incident a button belongs to; tells the presser when it's gone."""
-        incident = next((item for item in self._incidents if item.key == key), None)
-        if incident is None:
-            await self._reply(event, "This alarm is closed.", alert=True)
-        return incident
+    async def _open_emergency(self, event: TelegramButtonEvent, key: str) -> Optional[Emergency]:
+        """The open emergency, when the pressed button belongs to it; else the presser is told it's over."""
+        emergency = self._emergency
+        if emergency is None or emergency.key != key:
+            await self._reply(event, "This emergency is closed.", alert=True)
+            return None
+        return emergency
 
     def _sent_note(self, text: str) -> str:
         return text if self._radio_online() else f"{text} The radio is offline: only this group has seen it."
 
-    # --- Incidents --------------------------------------------------------------------------------
-
-    def _by_sender(self, sender: str) -> Optional[Incident]:
-        return next((item for item in self._incidents if item.sender == sender), None)
-
-    def _target(self, incident_id: Optional[str]) -> Optional[Incident]:
-        """The incident an ACK or RESOLVED is for: the one it names, else the newest."""
-        if incident_id:
-            return next((item for item in self._incidents if incident_id in item.ids), None)
-        return self._incidents[-1] if self._incidents else None
-
-    def _new_key(self) -> str:
-        return secrets.token_hex(4)
+    # --- The emergency ----------------------------------------------------------------------------
 
     def _new_incident_id(self) -> str:
-        used = {incident_id for item in self._incidents for incident_id in item.ids} | set(self._closed)
         for _ in range(16):
             incident_id = protocol.new_incident_id()
-            if incident_id not in used:
+            if incident_id not in self._closed:
                 break
         return incident_id
 
-    async def _open(self, incident: Incident) -> None:
-        while len(self._incidents) >= MAX_OPEN:
-            await self._close(self._incidents[0], None)
-        self._incidents.append(incident)
-        await self._post(incident)
+    async def _open(self, emergency: Emergency) -> None:
+        self._emergency = emergency
+        # A question about sending an SOS has its answer: one is open.
+        for question in [item for item in self._questions.values() if item.action == "sos"]:
+            await self._drop_question(question)
+        await self._post(emergency)
         self._save()
 
-    async def _add_aware(self, incident: Incident, name: str) -> None:
-        incident.aware.append(name)
-        incident.retrying = False  # As on a board: the first ACK stops the repeats.
-        await self._refresh(incident)
+    async def _add_aware(self, emergency: Emergency, name: str) -> None:
+        emergency.aware.append(name)
+        emergency.retrying = False  # As on a board: the first ACK stops the repeats.
+        await self._refresh(emergency)
+        await self._send(f"✅ <b>{html.escape(name)}</b> is aware", reply_to=emergency.message_id)
+        self._save()
+
+    async def _close(self, emergency: Emergency, by: str) -> None:
+        self._emergency = None
+        self._closed = [*self._closed, *emergency.ids][-CLOSED_MEMORY:]
+        for question in list(self._questions.values()):
+            await self._drop_question(question)
+        minutes = max(0, round((self._now() - emergency.opened) / 60))
+        lines = [
+            f"🟢 <b>Resolved: {html.escape(_names(emergency.callers))}</b>",
+            html.escape(emergency.text),
+            f"Resolved by {html.escape(by)} after {_duration(minutes)}",
+        ]
+        if emergency.aware:
+            lines.append("✅ Aware: " + html.escape(", ".join(emergency.aware)))
+        await self._edit(emergency.message_id, "\n".join(lines))
         await self._send(
-            f"✅ <b>{html.escape(name)}</b> is aware of <b>{html.escape(incident.sender)}</b>'s SOS",
-            reply_to=incident.message_id,
+            f"🟢 Resolved by <b>{html.escape(by)}</b>. A new SOS can be sent.",
+            reply_to=emergency.message_id,
         )
         self._save()
 
-    async def _close(self, incident: Incident, by: Optional[str]) -> None:
-        """Resolved by ``by``; None when it only makes room for a newer incident."""
-        if incident in self._incidents:
-            self._incidents.remove(incident)
-        self._closed = [*self._closed, *incident.ids][-CLOSED_MEMORY:]
-        for question in [item for item in self._questions.values() if item.key == incident.key]:
-            await self._drop_question(question)
-        minutes = max(0, round((self._now() - incident.opened) / 60))
-        if by is None:
-            ending = "No longer tracked here: too many alarms are open."
-            title = f"⚪ <b>Closed here: {html.escape(incident.sender)}</b>"
-        else:
-            ending = f"Resolved by {html.escape(by)} after {_duration(minutes)}"
-            title = f"🟢 <b>Resolved: {html.escape(incident.sender)}</b>"
-        lines = [title, html.escape(incident.text), ending]
-        if incident.aware:
-            lines.append("✅ Aware: " + html.escape(", ".join(incident.aware)))
-        await self._edit(incident.message_id, "\n".join(lines))
-        if by is not None:
-            await self._send(
-                f"🟢 <b>{html.escape(incident.sender)}</b>'s SOS is resolved (by {html.escape(by)})",
-                reply_to=incident.message_id,
-            )
-        self._save()
-
-    async def _send_sos(self, incident: Incident) -> None:
+    async def _send_sos(self, emergency: Emergency) -> None:
         """Send (or repeat) an SOS that started here."""
-        await self._send_mesh(protocol.relayed(incident.sender, protocol.build_sos(incident.incident_id or "")))
-        incident.sends += 1
-        incident.retrying = incident.sends < MAX_SENDS
-        incident.next_send = self._now() + RETRY_SECONDS
+        await self._send_mesh(protocol.relayed(emergency.callers[0], protocol.build_sos(emergency.ids[0])))
+        emergency.sends += 1
+        emergency.retrying = emergency.sends < MAX_SENDS
+        emergency.next_send = self._now() + RETRY_SECONDS
 
     # --- What the group sees ----------------------------------------------------------------------
 
-    def _render(self, incident: Incident) -> str:
-        lines = [f"🚨 <b>SOS: {html.escape(incident.sender)}</b>", html.escape(incident.text)]
-        if incident.origin == "telegram":
-            lines.append(f"Sent from Telegram by {html.escape(incident.by or incident.sender)} · on the radio {incident.sends}×")
-        if incident.aware:
-            lines.append("✅ Aware: " + html.escape(", ".join(incident.aware)))
+    def _render(self, emergency: Emergency) -> str:
+        lines = [f"🚨 <b>SOS: {html.escape(_names(emergency.callers))}</b>", html.escape(emergency.text)]
+        if emergency.from_telegram:
+            lines.append(f"Sent from Telegram · on the radio {emergency.sends}×")
+        if emergency.aware:
+            lines.append("✅ Aware: " + html.escape(", ".join(emergency.aware)))
         else:
             lines.append("⏳ Nobody has acknowledged yet")
         return "\n".join(lines)
 
-    def _buttons(self, incident: Incident) -> list[list[tuple[str, str]]]:
-        return [[("✅ ACK: I'm aware", ACK + incident.key), ("🟢 Resolved", RESOLVE + incident.key)]]
+    def _buttons(self, emergency: Emergency) -> list[list[tuple[str, str]]]:
+        return [[("✅ ACK: I'm aware", ACK + emergency.key), ("🟢 Resolved", RESOLVE + emergency.key)]]
 
-    async def _post(self, incident: Incident) -> None:
-        incident.message_id = await self._send(self._render(incident), keyboard=self._buttons(incident))
+    async def _post(self, emergency: Emergency) -> None:
+        emergency.message_id = await self._send(self._render(emergency), keyboard=self._buttons(emergency))
 
-    async def _refresh(self, incident: Incident) -> None:
-        await self._edit(incident.message_id, self._render(incident), keyboard=self._buttons(incident))
+    async def _refresh(self, emergency: Emergency) -> None:
+        await self._edit(emergency.message_id, self._render(emergency), keyboard=self._buttons(emergency))
 
-    async def _supersede(self, incident: Incident) -> None:
-        await self._edit(
-            incident.message_id,
-            f"🚨 <b>SOS: {html.escape(incident.sender)}</b>\nMore from {html.escape(incident.sender)}: see the newer message below.",
-        )
+    async def _supersede(self, emergency: Emergency) -> None:
+        await self._edit(emergency.message_id, "🚨 <b>SOS</b>\nThere is more: see the newer message below.")
 
     async def _ensure_panel(self) -> None:
         """Keep one message with the SOS button, pinned when the bot may pin."""
@@ -519,10 +543,10 @@ class SosDesk:
             kwargs["reply_markup"] = _markup(keyboard)
         if quiet:
             kwargs["disable_notification"] = True
+        if reply_to is not None:
+            # Still posted when the message it answers has been deleted.
+            kwargs.update(reply_to_message_id=reply_to, allow_sending_without_reply=True)
         try:
-            if reply_to is not None:
-                # Still posted when the message it answers has been deleted.
-                kwargs.update(reply_to_message_id=reply_to, allow_sending_without_reply=True)
             sent = await bot.send_message(**kwargs)
             return getattr(sent, "message_id", None)
         except Exception as exc:
@@ -581,12 +605,20 @@ class SosDesk:
         panel = data.get("panel_message_id")
         self._panel_id = panel if isinstance(panel, int) else None
         self._closed = [str(item) for item in data.get("closed") or []][-CLOSED_MEMORY:]
-        fields = set(Incident.__slots__)
-        for item in data.get("incidents") or []:
+        names = data.get("names")
+        if isinstance(names, dict):
+            for user_id, name in names.items():
+                if str(user_id).lstrip("-").isdigit() and isinstance(name, str) and name:
+                    self._names[int(user_id)] = name
+        saved = data.get("emergency")
+        if isinstance(saved, dict):
+            fields = set(Emergency.__slots__)
             try:
-                self._incidents.append(Incident(**{key: value for key, value in item.items() if key in fields}))
+                emergency = Emergency(**{key: value for key, value in saved.items() if key in fields})
             except TypeError:
-                continue
+                emergency = None
+            if emergency is not None and emergency.callers:
+                self._emergency = emergency
 
     def _save(self) -> None:
         if self._path is None:
@@ -594,7 +626,8 @@ class SosDesk:
         payload = {
             "panel_message_id": self._panel_id,
             "closed": self._closed,
-            "incidents": [asdict(incident) for incident in self._incidents],
+            "names": {str(user_id): name for user_id, name in self._names.items()},
+            "emergency": asdict(self._emergency) if self._emergency is not None else None,
         }
         try:
             write_private_json(self._path, payload)
@@ -610,9 +643,13 @@ def _markup(keyboard: list[list[tuple[str, str]]]) -> Any:
     )
 
 
-def _first_name(event: Any) -> str:
-    name = " ".join(str(event.sender_display_name or "").split())
-    return name.split(" ", 1)[0] if name else "You"
+def _clean_name(display_name: Any) -> str:
+    """A Telegram name without what a name on the radio can't hold (see sos_protocol)."""
+    return " ".join("".join(char for char in str(display_name or "") if char not in "<>:").split())
+
+
+def _names(names: list[str]) -> str:
+    return ", ".join(names)
 
 
 def _duration(minutes: int) -> str:

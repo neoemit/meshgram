@@ -5,32 +5,26 @@ the control panel): the plain ``bridge`` relays the main group, and each further
 instance bridges its own channel to its own group, through the main bot or one
 of its own (``telegram_bot_token``).
 
-``senders`` maps Telegram users to names on the radio. With a sender prefix of
-``<{display_name}> {message}`` the message goes out the way chat relay bots
-write it, which MeshSOS boards read as sent by that name (see MeshSOS's
-SosProtocol.h): that's how a Telegram group stands in for the boards when the
-radio path is down.
+In "sos" mode the group isn't a chat at all: a SosDesk (meshgram/sos_desk.py) works a
+MeshSOS channel with buttons. It shows the emergency with ACK and Resolved buttons, keeps
+an SOS button pinned, and sends nothing that is typed to the radio.
 
-In "sos" mode the group isn't a chat at all: a SosDesk (meshgram/sos_desk.py) shows every
-alarm with ACK and Resolved buttons, keeps an SOS button pinned, and sends nothing that
-is typed to the radio.
+In "chat" mode a sender prefix of ``<{display_name}> {message}`` sends a message the way
+chat relay bots write it, which MeshSOS boards read as sent by that name (see MeshSOS's
+SosProtocol.h).
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
-import time
 import uuid
-from pathlib import Path
 from typing import Any, Optional
 
 from meshgram import sos_desk
 from meshgram.config import data_dir
 from meshgram.plugin import CHANNEL_FORMAT, BasePlugin
 from meshgram.status import CONNECTED, CONNECTING, DISCONNECTED
-from meshgram.storage import write_private_json
 from meshgram.telegram_events import button_event_from_query, event_from_message
 from meshgram.telegram_texts import TELEGRAM_TEXT_CACHE_SIZE
 from meshgram.text_utils import split_for_mesh, utf8_len
@@ -52,7 +46,6 @@ RELAY_MARK = "<{display_name}>"
 RELAY_TEMPLATE = "<{display_name}> {message}"
 # What MeshSOS accepts as a name (SosProtocol.h: MAX_NAME_LEN, no ':' and no angle brackets).
 MAX_NODE_NAME_LENGTH = 31
-NODE_NAME_PATTERN = r"^[^<>:\r\n]+$"
 
 MODE_CHAT = "chat"
 MODE_SOS = "sos"
@@ -61,8 +54,6 @@ LONG_SPLIT = "split"
 LONG_TRUNCATE = "truncate"
 ELLIPSIS = "…"
 
-MAX_PEOPLE = 200
-MAX_NODES = 100
 OWN_BOT_RETRY_SECONDS = 15.0
 OWN_BOT_HEALTH_CHECK_SECONDS = 60.0
 
@@ -99,9 +90,9 @@ class BridgePlugin(BasePlugin):
                 "default": MODE_CHAT,
                 "title": "Mode",
                 "description": (
-                    "MeshSOS, for a channel of MeshSOS boards: every alarm appears in the group with ACK and "
+                    "MeshSOS, for a channel of MeshSOS boards: an emergency appears in the group with ACK and "
                     "Resolved buttons, and a pinned message has the SOS button. A press goes out on the radio "
-                    "in the name of whoever pressed (see People). Nothing typed in the group is sent, so a "
+                    "under the presser's Telegram first name. Nothing typed in the group is sent, so a "
                     "stray message can't start an alarm; the sender prefix, long-message and reaction "
                     "settings below don't apply. Let the bot pin messages in the group."
                 ),
@@ -140,28 +131,9 @@ class BridgePlugin(BasePlugin):
                 "title": "Sender prefix",
                 "description": (
                     "How Telegram messages read on the radio; {display_name} and {message} are filled in. "
-                    f"Empty: telegram.sender_prefix_template. Use {RELAY_TEMPLATE} to send in the sender's "
-                    "name: MeshSOS boards then treat the message as coming from that person."
+                    f"Empty: telegram.sender_prefix_template. With {RELAY_TEMPLATE} MeshSOS boards treat the "
+                    "message as coming from that person (the MeshSOS mode does this by itself)."
                 ),
-            },
-            "senders": {
-                "type": "object",
-                "title": "Telegram users → radio names",
-                "description": (
-                    "The name a Telegram user's messages carry on the radio, in place of their Telegram "
-                    "name: for MeshSOS, the name of their board. Several users can share a name. The user "
-                    "is a numeric Telegram ID (it never changes) or an @username; the people seen in the "
-                    "group are listed under People, where they can be picked."
-                ),
-                "x-key-title": "Telegram user",
-                "x-value-title": "Radio name",
-                "additionalProperties": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MAX_NODE_NAME_LENGTH,
-                    "pattern": NODE_NAME_PATTERN,
-                    "x-pattern-message": "can't contain < > or :",
-                },
             },
             "long_messages": {
                 "type": "string",
@@ -182,15 +154,6 @@ class BridgePlugin(BasePlugin):
     def __init__(self, settings: dict[str, Any] | None = None):
         super().__init__(settings)
         self._context: Optional[PluginContext] = None
-        self._senders_by_id: dict[int, str] = {}
-        self._senders_by_username: dict[str, str] = {}
-        self._load_senders()
-        self._people: dict[int, dict[str, Any]] = {}
-        self._nodes: dict[str, float] = {}
-        self._people_loaded = False
-        self._people_path: Optional[Path] = None
-        self._web: Any = None
-        self._routes: list[Any] = []
         self._own_bot_token = ""
         self._own_bot: Any = None  # telegram.ext.Application
         self._own_bot_task: Optional[asyncio.Task[None]] = None
@@ -267,31 +230,6 @@ class BridgePlugin(BasePlugin):
             )
             return f"[{display_name}] {text}"
 
-    def _load_senders(self) -> None:
-        self._senders_by_id = {}
-        self._senders_by_username = {}
-        senders = self.settings.get("senders")
-        if not isinstance(senders, dict):
-            return
-        for raw_user, raw_name in senders.items():
-            user = normalize_user(raw_user)
-            name = " ".join(str(raw_name or "").split())
-            if user is None or not name:
-                LOGGER.warning("%s: ignoring the sender mapping %r: %r", self.instance_name, raw_user, raw_name)
-                continue
-            if isinstance(user, int):
-                self._senders_by_id[user] = name
-            else:
-                self._senders_by_username[user] = name
-
-    def mapped_name(self, user_id: Optional[int], username: Optional[str]) -> Optional[str]:
-        """The radio name ``senders`` gives a Telegram user; the ID wins over the username."""
-        if user_id is not None and user_id in self._senders_by_id:
-            return self._senders_by_id[user_id]
-        if username:
-            return self._senders_by_username.get(username.lower())
-        return None
-
     # --- Lifecycle --------------------------------------------------------------------------------
 
     @property
@@ -305,14 +243,6 @@ class BridgePlugin(BasePlugin):
             raise ValueError("set its radio channel first")
 
         suffix = f"_{self.instance_id}" if self.instance_id else ""
-        self._people_path = data_dir() / f"bridge{suffix}_people.json"
-        await asyncio.to_thread(self._load_people)
-
-        web = getattr(context, "web", None)
-        if web is not None:
-            self._web = web
-            self._routes = [web.route("GET", f"/api/plugins/{self.instance_name}/people", self._people_route)]
-
         self._own_bot_token = self._configured_bot_token(context)
         if self._own_bot_token:
             self._set_bot_status(CONNECTING, "Starting bot")
@@ -325,7 +255,6 @@ class BridgePlugin(BasePlugin):
                 chat_id=lambda: self._group_id(self._context),
                 send_mesh=self._send_sos_text,
                 radio_online=self._radio_online,
-                radio_name=lambda event: self._radio_name(event, RELAY_TEMPLATE),
             )
             await self._desk.start()
         return []
@@ -359,11 +288,6 @@ class BridgePlugin(BasePlugin):
         self._context = context
 
     async def on_shutdown(self) -> None:
-        if self._web is not None:
-            for route in self._routes:
-                self._web.remove_route(route)
-        self._routes = []
-        self._web = None
         desk, self._desk = self._desk, None
         if desk is not None:
             await desk.stop()
@@ -392,8 +316,6 @@ class BridgePlugin(BasePlugin):
         ):
             self.settings = previous
             return False  # Another bot (or none), another mode, or nothing to bridge: start over.
-        self._load_senders()
-        self._announce()
         return True
 
     # --- A bot of its own -------------------------------------------------------------------------
@@ -511,7 +433,6 @@ class BridgePlugin(BasePlugin):
         if not text:
             return []
 
-        self._note_node(event.sender_label)
         if self._desk is not None:
             await self._desk.on_mesh(event.sender_label, text)
             return []
@@ -551,7 +472,6 @@ class BridgePlugin(BasePlugin):
     async def _handle_button(self, event: TelegramButtonEvent, context: PluginContext) -> None:
         if self._desk is None or event.chat_id != self._group_id(context) or not event.data.startswith(sos_desk.PREFIX):
             return
-        self._note_person(event)
         await self._desk.on_button(event)
 
     async def _handle_telegram(self, event: TelegramMessageEvent, context: PluginContext) -> list[PluginAction]:
@@ -559,7 +479,6 @@ class BridgePlugin(BasePlugin):
             return self._relay_telegram(event, context)
         if event.chat_id != self._group_id(context) or event.is_from_bot:
             return []
-        self._note_person(event)
         await self._desk.on_typed(event)
         return []
 
@@ -569,8 +488,6 @@ class BridgePlugin(BasePlugin):
 
         if event.is_from_bot:
             return []
-
-        self._note_person(event)
 
         if not event.text:
             return []
@@ -726,118 +643,14 @@ class BridgePlugin(BasePlugin):
             )
         ]
 
-    def _radio_name(
-        self, event: TelegramMessageEvent | TelegramReactionEvent | TelegramButtonEvent, template: str
-    ) -> str:
-        """The sender's name on the radio: the one ``senders`` gives them, else their Telegram first name."""
-        mapped = self.mapped_name(event.sender_id, event.sender_username)
-        if mapped:
-            return mapped
+    def _radio_name(self, event: TelegramMessageEvent | TelegramReactionEvent, template: str) -> str:
+        """The sender's name on the radio: their Telegram first name."""
         name = _compact_display_name(event.sender_display_name)
         if RELAY_MARK in template:
             # It must survive as "<name>": no brackets or colons, and no longer than a node's name.
             cleaned = "".join(char for char in name if char not in "<>:").strip()[:MAX_NODE_NAME_LENGTH].strip()
             return cleaned or "Telegram"
         return name
-
-    # --- People seen in the group, names heard on the channel -------------------------------------
-
-    def _load_people(self) -> None:
-        self._people_loaded = True
-        if self._people_path is None:
-            return
-        try:
-            data = json.loads(self._people_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("%s: can't read %s (%s)", self.instance_name, self._people_path, exc)
-            return
-        if not isinstance(data, dict):
-            return
-        for person in data.get("people") or []:
-            if isinstance(person, dict) and isinstance(person.get("id"), int):
-                self._people[person["id"]] = {
-                    "id": person["id"],
-                    "name": str(person.get("name") or ""),
-                    "username": person.get("username") or None,
-                    "last_seen": float(person.get("last_seen") or 0),
-                }
-        for node in data.get("nodes") or []:
-            if isinstance(node, dict) and node.get("name"):
-                self._nodes[str(node["name"])] = float(node.get("last_seen") or 0)
-
-    def _save_people(self) -> None:
-        if self._people_path is None or not self._people_loaded:
-            return
-        payload = {
-            "people": list(self._people.values()),
-            "nodes": [{"name": name, "last_seen": seen} for name, seen in self._nodes.items()],
-        }
-        try:
-            write_private_json(self._people_path, payload)
-        except OSError as exc:
-            LOGGER.warning("%s: can't save %s (%s)", self.instance_name, self._people_path, exc)
-
-    def _note_person(self, event: TelegramMessageEvent | TelegramButtonEvent) -> None:
-        if event.sender_id is None:
-            return
-        known = self._people.get(event.sender_id)
-        person = {
-            "id": event.sender_id,
-            "name": " ".join(event.sender_display_name.split()),
-            "username": event.sender_username,
-            "last_seen": time.time(),
-        }
-        self._people[event.sender_id] = person
-        if known is not None and (known["name"], known["username"]) == (person["name"], person["username"]):
-            return  # Only the time changed: not worth a write.
-        _trim_oldest(self._people, MAX_PEOPLE, key=lambda item: item["last_seen"])
-        self._save_people()
-        self._announce()
-
-    def _note_node(self, name: str) -> None:
-        name = " ".join(str(name or "").split())
-        if not name:
-            return
-        new = name not in self._nodes
-        self._nodes[name] = time.time()
-        if new:
-            _trim_oldest(self._nodes, MAX_NODES, key=lambda seen: seen)
-            self._save_people()
-            self._announce()
-
-    def _announce(self) -> None:
-        """Tell open control panels that this bridge's people changed."""
-        if self._web is not None:
-            self._web.events.publish({"type": "control", "what": self.instance_name})
-
-    def people(self) -> dict[str, Any]:
-        people = [
-            {**person, "radio_name": self.mapped_name(person["id"], person["username"])}
-            for person in sorted(self._people.values(), key=lambda item: item["last_seen"], reverse=True)
-        ]
-        nodes = [name for name, _ in sorted(self._nodes.items(), key=lambda item: item[1], reverse=True)]
-        for name in [*self._senders_by_id.values(), *self._senders_by_username.values()]:
-            if name not in nodes:
-                nodes.append(name)
-        return {"people": people, "nodes": nodes}
-
-    async def _people_route(self, request: Any) -> Any:
-        from meshgram.web.server import json_response
-
-        return json_response(self.people())
-
-
-def normalize_user(value: Any) -> int | str | None:
-    """A ``senders`` key: a numeric Telegram user ID, or a username (lower case, no "@")."""
-    if isinstance(value, bool):
-        return None
-    text = str(value).strip()
-    if text.isascii() and text.isdigit():
-        return int(text)
-    username = text.lstrip("@").lower()
-    return username or None
 
 
 def truncate_utf8(text: str, max_bytes: int) -> str:
@@ -851,11 +664,6 @@ def _truncate_utf8(text: str, max_bytes: int) -> str:
     if max_bytes <= 0:
         return ""
     return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
-
-
-def _trim_oldest(items: dict[Any, Any], limit: int, *, key: Any) -> None:
-    while len(items) > limit:
-        del items[min(items, key=lambda name: key(items[name]))]
 
 
 async def _shutdown_application(application: Any) -> None:

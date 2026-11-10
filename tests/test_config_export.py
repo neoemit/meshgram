@@ -103,7 +103,7 @@ class ExportConfigTests(unittest.TestCase):
         self.assertEqual(plugins(result.text)["packet_map"], (False, {"max_messages": 50}))
 
     def test_an_instance_added_in_the_control_panel_is_added(self):
-        settings = {"channel": 5, "telegram_group_id": -100555, "senders": {"1001": "Thomas"}}
+        settings = {"channel": 5, "telegram_group_id": -100555, "mode": "sos"}
         result = export_config(CONFIG, {"bridge@sos": {"enabled": True, "settings": settings}})
         self.assertEqual(result.problems, [])
         self.assertEqual(plugins(result.text)["bridge@sos"], (True, settings))

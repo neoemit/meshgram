@@ -374,7 +374,6 @@ Settings:
 | `telegram_group_id` | `telegram.group_id` | The Telegram group it bridges |
 | `telegram_bot_token` | the main bot | A bot of its own for this bridge |
 | `sender_prefix_template` | `telegram.sender_prefix_template` | How Telegram messages read on the radio |
-| `senders` | none | Telegram user (numeric ID or `@username`) → the name their messages carry on the radio |
 | `long_messages` | `split` | `split` into numbered chunks, or `truncate` to one radio message |
 | `relay_reactions` | `true` | Relay emoji reactions (see above) |
 
@@ -403,12 +402,13 @@ Either way the bot has to see the group's messages: make it an admin, or turn it
 
 #### A MeshSOS channel, worked with buttons
 
-[MeshSOS](https://github.com/neoemit/MeshSOS) boards raise, acknowledge and resolve alarms on a private channel, over LoRa only. A bridge on that channel in `mode: sos` gives them a second path through a Telegram group, and that group is worked with buttons, not by typing:
+[MeshSOS](https://github.com/neoemit/MeshSOS) boards raise, acknowledge and resolve an emergency on a private channel, over LoRa only. A bridge on that channel in `mode: sos` gives them a second path through a Telegram group, and that group is worked with buttons, not by typing. The rules are the boards' own (MeshSOS 0.4.0 and later):
 
-- **Every alarm is one message** with two buttons, **ACK: I'm aware** and **Resolved**. The message is updated as people acknowledge it, and closed when the alarm is resolved. A board's repeats of its own SOS don't show up again.
-- **A pinned message has the SOS button.** Pressing it asks once ("Thomas, send an SOS as LMB-T HQ?") and then sends the SOS on the radio, repeating it every 30 seconds, five times in all, until someone acknowledges it, as a board does. Resolved asks the same way; ACK is one tap.
-- **A press goes out in the name of whoever pressed**, with the alarm's number, so it can't land on the wrong alarm: `LMB-Bridge: <Thomas> ACK #83d3 I am aware`. MeshSOS 0.3.0 and later read that as Thomas's ACK, not as a message from the bridge's radio.
-- **Nothing typed in the group is sent to the radio.** On an SOS channel every message that isn't an ACK or RESOLVED word starts an alarm on every board, so stray text is the main source of false alarms. Someone who types is pointed to the buttons.
+- **One emergency at a time.** It shows as one message with two buttons, **ACK: I'm aware** and **Resolved**, updated as people acknowledge it and closed when it's resolved. While it's open nobody can send another SOS; if two people call at the same moment, both are listed on the one emergency.
+- **A pinned message has the SOS button.** Pressing it asks once ("Thomas, send an SOS?") and then sends the SOS on the radio, repeating it every 30 seconds, five times in all, until someone acknowledges it, as a board does.
+- **Anyone can acknowledge** (one tap) except whoever called, **and anyone can resolve**, before or after an ACK. Resolved asks for confirmation; only the person who pressed can answer.
+- **People go by their Telegram first name**, on the radio and in the group: `LMB-Bridge: <Thomas> ACK #83d3 I am aware` shows on the boards as "Thomas aware". Two people with the same first name are told apart by their last initial ("Anna R"). There is nothing to set up per person.
+- **Nothing typed in the group is sent to the radio.** On an SOS channel every message that isn't an ACK or RESOLVED word starts an emergency on every board, so stray text is the main source of false alarms. Someone who types is pointed to the buttons.
 - What happens on the radio (an ACK or RESOLVED from a board or a phone) shows up in the group the same way.
 
 ```yaml
@@ -417,10 +417,6 @@ Either way the bot has to see the group's messages: make it an admin, or turn it
       channel: 2                          # the radio's slot for the SOS channel
       telegram_group_id: -1009876543210   # the SOS group
       mode: sos
-      senders:
-        "123456789": Thomas               # numeric Telegram ID (never changes) ...
-        "@anna_tg": Anna                  # ... or @username
-        "987654321": Thomas               # several people can stand for the same board
 ```
 
 Setting it up:
@@ -428,19 +424,17 @@ Setting it up:
 1. Add the SOS channel to Meshgram's radio (control panel → **Channels**, with the same name and key as on the boards). The radio is an ordinary MeshCore companion; it needs no MeshSOS firmware.
 2. Add the bot to the SOS group and let it **pin messages** (make it an admin with that right). Without it everything works, but you pin the message with the SOS button by hand.
 3. Add the bridge (**Add another** on the bridge's card), set its channel, group and **Mode: MeshSOS**, and turn it on. The message with the SOS button appears in the group.
-4. Have everyone press a button or write once, then open the bridge's **People** panel: everyone is listed with their Telegram ID. Type (or pick) their board's name next to them and press Save; it applies right away.
 
 Good to know:
 
-- A name must be the board's name exactly as it was given in the MeshSOS flasher (capitals matter), at most 31 characters, without `<`, `>` or `:`. Someone without an entry sends under their Telegram first name.
-- Nobody can acknowledge their own SOS: a person mapped to the board that raised the alarm is told so.
-- An SOS sent from Telegram in a board's name shows on that board as its own SOS (it doesn't transmit it again); holding its button resolves it as usual.
+- The messages carry a number (`#83d3`) that nobody sees or types: it tells a repeat of an SOS from a new one, so a late repeat can't reopen an emergency that was resolved.
+- An SOS sent from Telegram alerts every board, also the one at the sender's home: the people there should know.
 - To keep people from typing at all, take away *Send messages* in the group's permissions: buttons still work. The sender prefix, `long_messages` and `relay_reactions` settings don't apply in this mode.
 - Keep `ping_pong` and the other answering plugins off the SOS channel.
 - When the radio is offline, a press still shows in the group, and whoever pressed is told that only the group has seen it.
-- Open alarms and the pinned message are remembered in `$MESHGRAM_DATA_DIR/bridge_<name>_sos.json`, so the buttons on older messages keep working after a restart.
+- The open emergency and the pinned message are remembered in `$MESHGRAM_DATA_DIR/bridge_<name>_sos.json`, so the buttons keep working after a restart.
 
-A bridge in `mode: chat` on an SOS channel still works as before (sender prefix `<{display_name}> {message}`, `long_messages: truncate`, `relay_reactions: false`), but everything typed in the group then reaches the boards.
+A bridge in `mode: chat` on an SOS channel still works (sender prefix `<{display_name}> {message}`, `long_messages: truncate`, `relay_reactions: false`), but everything typed in the group then reaches the boards.
 
 ### `ping_pong` — keyword auto-responder
 
@@ -994,7 +988,7 @@ meshgram/
 │   ├── web/
 │   │   ├── server.py             # HTTP server, auth/CSRF, SSE event hub
 │   │   ├── api.py                # control panel JSON API
-│   │   └── static/               # the page (index.html), control.js, check_in.js, bridge.js
+│   │   └── static/               # the page (index.html), control.js, check_in.js
 │   └── plugins/
 │       ├── bridge.py
 │       ├── ping_pong.py

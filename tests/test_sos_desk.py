@@ -61,7 +61,7 @@ def _buttons(markup):
     return [(button.text, button.callback_data) for row in markup.inline_keyboard for button in row]
 
 
-USERS = {1: ("Thomas Example", "LMB-T HQ"), 2: ("Anna Rossi", "Anna"), 3: ("Bob Stone", "Bob")}
+USERS = {1: "Thomas Example", 2: "Anna Rossi", 3: "Bob Stone", 4: "Anna Bianchi", 5: "Anna"}
 
 
 class SosDeskTests(unittest.IsolatedAsyncioTestCase):
@@ -87,7 +87,6 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
             chat_id=lambda: -5,
             send_mesh=send_mesh,
             radio_online=lambda: self.online,
-            radio_name=lambda event: USERS[event.sender_id][1],
             now=lambda: self.clock,
         )
         desk._load()
@@ -98,7 +97,7 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
         await self.desk.on_button(
             TelegramButtonEvent(
                 chat_id=-5, message_id=message_id, data=data, query_id=f"q{self.presses}",
-                sender_display_name=USERS[user][0], sender_id=user,
+                sender_display_name=USERS[user], sender_id=user,
             )
         )
         return self.bot.answers[-1]
@@ -106,6 +105,11 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
     async def press_on(self, user, fragment, label):
         (message_id,) = self.bot.find(fragment)
         return await self.press(user, self.bot.button(message_id, label), message_id)
+
+    async def send_sos(self, user=1):
+        await self.press(user, sos_desk.SOS)
+        (question,) = self.bot.find("send an SOS?")
+        return await self.press(user, self.bot.button(question, "Yes"), question)
 
     # --- The panel ------------------------------------------------------------------------------
 
@@ -134,26 +138,26 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
             await self.desk.tick()
         self.assertEqual(len(self.bot.find("MeshSOS")), 1)
 
-    # --- Alarms from the radio ------------------------------------------------------------------
+    # --- An emergency from the radio ------------------------------------------------------------
 
     async def test_radio_alarm_shows_with_buttons_and_repeats_are_not_shown_again(self):
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. bat 97% #83d3")
         (message,) = self.bot.find("SOS: LMB-S HQ")
         self.assertIn("SOS! Need help. bat 97%", self.bot.messages[message]["text"])
-        self.assertNotIn("#83d3", self.bot.messages[message]["text"])
+        self.assertNotIn("83d3", self.bot.messages[message]["text"])
         self.assertIn("Nobody has acknowledged yet", self.bot.messages[message]["text"])
         self.assertEqual(len(self.bot.messages[message]["buttons"]), 2)
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. bat 96% #83d3")
         self.assertEqual(len(self.bot.messages), 1)
 
-    async def test_ack_button_sends_an_ack_with_the_incident_id_in_the_pressers_name(self):
+    async def test_ack_button_sends_an_ack_under_the_pressers_first_name(self):
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
         answer = await self.press_on(1, "SOS: LMB-S HQ", "ACK")
-        self.assertEqual(self.sent, ["<LMB-T HQ> ACK #83d3 I am aware"])
-        self.assertEqual(answer[1:], ("ACK sent as LMB-T HQ.", False))
+        self.assertEqual(self.sent, ["<Thomas> ACK #83d3 I am aware"])
+        self.assertEqual(answer[1:], ("ACK sent.", False))
         (message,) = self.bot.find("SOS: LMB-S HQ")
-        self.assertIn("✅ Aware: LMB-T HQ", self.bot.messages[message]["text"])
-        (notice,) = self.bot.find("is aware of")
+        self.assertIn("✅ Aware: Thomas", self.bot.messages[message]["text"])
+        (notice,) = self.bot.find("is aware")
         self.assertEqual(self.bot.messages[notice]["reply_to"], message)
         # A second press sends nothing more.
         answer = await self.press_on(1, "SOS: LMB-S HQ", "ACK")
@@ -163,46 +167,45 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
     async def test_ack_from_the_radio_is_listed(self):
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
         await self.desk.on_mesh("LMB-T EDC", "ack")
-        await self.desk.on_mesh("LMBot", "<Anna> ACK #83d3 I am aware")
+        await self.desk.on_mesh("OtherGw", "<Carl> ACK #83d3 I am aware")
         await self.desk.on_mesh("LMB-T EDC", "ok")  # again
-        await self.desk.on_mesh("LMB-S HQ", "ack")  # their own
+        await self.desk.on_mesh("LMB-S HQ", "ack")  # the caller
+        await self.desk.on_mesh("Dora", "ACK #9999 I am aware")  # about another emergency
         (message,) = self.bot.find("SOS: LMB-S HQ")
-        self.assertIn("✅ Aware: LMB-T EDC, Anna", self.bot.messages[message]["text"])
+        self.assertIn("✅ Aware: LMB-T EDC, Carl", self.bot.messages[message]["text"])
+        self.assertNotIn("Dora", self.bot.messages[message]["text"])
         self.assertEqual(self.sent, [])
-
-    async def test_nobody_acknowledges_their_own_sos(self):
-        await self.desk.on_mesh("Anna", "fire at the gate")
-        answer = await self.press_on(2, "SOS: Anna", "ACK")
-        self.assertEqual(self.sent, [])
-        self.assertTrue(answer[2])
 
     async def test_resolved_asks_first_and_only_the_one_who_pressed_can_answer(self):
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
-        await self.press_on(1, "SOS: LMB-S HQ", "Resolved")
+        await self.press_on(1, "SOS: LMB-S HQ", "Resolved")  # nobody acknowledged yet: fine
         self.assertEqual(self.sent, [])
-        (question,) = self.bot.find("is <b>LMB-S HQ</b>'s SOS over?")
+        (question,) = self.bot.find("<b>Thomas</b>, is the emergency over?")
         answer = await self.press(2, self.bot.button(question, "Yes"), question)
         self.assertEqual(answer[1:], ("This question is for Thomas.", True))
         self.assertEqual(self.sent, [])
         await self.press(1, self.bot.button(question, "Yes"), question)
-        self.assertEqual(self.sent, ["<LMB-T HQ> RESOLVED #83d3 all OK"])
+        self.assertEqual(self.sent, ["<Thomas> RESOLVED #83d3 all OK"])
         self.assertNotIn(question, self.bot.messages)
         (message,) = self.bot.find("Resolved: LMB-S HQ")
         self.assertEqual(self.bot.messages[message]["buttons"], [])
-        self.assertIn("Resolved by LMB-T HQ", self.bot.messages[message]["text"])
-        self.assertEqual(self.desk.incidents, [])
-        # A late repeat of the closed incident stays closed; its old button says so.
+        self.assertIn("Resolved by Thomas", self.bot.messages[message]["text"])
+        self.assertIsNone(self.desk.emergency)
+        # A late repeat of the closed emergency stays closed.
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
-        self.assertEqual(self.desk.incidents, [])
+        self.assertIsNone(self.desk.emergency)
+        # A new one opens.
+        await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d4")
+        self.assertIsNotNone(self.desk.emergency)
 
     async def test_cancel_and_timeout_send_nothing(self):
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
         await self.press_on(1, "SOS: LMB-S HQ", "Resolved")
-        (question,) = self.bot.find("SOS over?")
+        (question,) = self.bot.find("emergency over?")
         await self.press(1, self.bot.button(question, "Cancel"), question)
         self.assertNotIn(question, self.bot.messages)
         await self.press_on(1, "SOS: LMB-S HQ", "Resolved")
-        (question,) = self.bot.find("SOS over?")
+        (question,) = self.bot.find("emergency over?")
         data = self.bot.button(question, "Yes")
         self.clock += sos_desk.CONFIRM_SECONDS + 1
         await self.desk.tick()
@@ -210,102 +213,171 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
         answer = await self.press(1, data, question)
         self.assertIn("expired", answer[1])
         self.assertEqual(self.sent, [])
-        self.assertEqual(len(self.desk.incidents), 1)
+        self.assertIsNotNone(self.desk.emergency)
 
-    async def test_resolved_from_the_radio_closes_the_incident(self):
+    async def test_resolved_from_the_radio_closes_it_and_old_buttons_say_so(self):
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
         (message,) = self.bot.find("SOS: LMB-S HQ")
         ack = self.bot.button(message, "ACK")
-        await self.desk.on_mesh("LMB-S HQ", "RESOLVED #83d3 all OK")
-        self.assertEqual(self.desk.incidents, [])
-        self.assertTrue(self.bot.find("SOS is resolved (by LMB-S HQ)"))
+        await self.desk.on_mesh("LMB-T EDC", "RESOLVED #9999 all OK")  # about another emergency
+        self.assertIsNotNone(self.desk.emergency)
+        await self.desk.on_mesh("LMB-T EDC", "safe")  # anyone, typed by hand
+        self.assertIsNone(self.desk.emergency)
+        self.assertTrue(self.bot.find("Resolved by <b>LMB-T EDC</b>"))
         answer = await self.press(1, ack, message)
-        self.assertEqual(answer[1:], ("This alarm is closed.", True))
+        self.assertEqual(answer[1:], ("This emergency is closed.", True))
+        # ... also when another emergency is open by then.
+        await self.desk.on_mesh("Anna", "fire at the gate")
+        await self.press(1, ack, message)
         self.assertEqual(self.sent, [])
 
-    async def test_ack_without_id_goes_to_the_newest_incident(self):
-        await self.desk.on_mesh("Anna", "SOS! Need help. #0001")
+    async def test_typed_alarm_has_no_id_and_any_ack_counts(self):
         await self.desk.on_mesh("Bob", "fire at the gate")
-        await self.desk.on_mesh("LMB-T EDC", "ack")
-        self.assertEqual([incident.aware for incident in self.desk.incidents], [[], ["LMB-T EDC"]])
-        # Bob's incident has no id: the ACK button sends one without.
+        await self.desk.on_mesh("Dora", "ACK #1234 I am aware")
         await self.press_on(1, "SOS: Bob", "ACK")
-        self.assertEqual(self.sent, ["<LMB-T HQ> ACK I am aware"])
+        self.assertEqual(self.sent, ["<Thomas> ACK I am aware"])
+        self.assertEqual(self.desk.emergency.aware, ["Dora", "Thomas"])
 
-    async def test_more_from_the_same_sender_moves_the_incident_to_a_new_message(self):
+    async def test_more_text_from_the_caller_moves_the_emergency_to_a_new_message(self):
         await self.desk.on_mesh("Anna", "fire at the gate")
         (first,) = self.bot.find("fire at the gate")
+        await self.desk.on_mesh("Bob", "ok")
         await self.desk.on_mesh("Anna", "it is spreading")
-        self.assertEqual(len(self.desk.incidents), 1)
         self.assertEqual(self.bot.messages[first]["buttons"], [])
         (second,) = self.bot.find("it is spreading")
         self.assertEqual(len(self.bot.messages[second]["buttons"]), 2)
+        self.assertIn("✅ Aware: Bob", self.bot.messages[second]["text"])
+        self.assertEqual(self.desk.emergency.callers, ["Anna"])
+
+    async def test_a_second_caller_joins_the_one_emergency(self):
+        await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #0001")
+        await self.desk.on_mesh("LMB-T EDC", "SOS! Need help. #0002")  # pressed at the same moment
+        self.assertEqual(self.desk.emergency.callers, ["LMB-S HQ", "LMB-T EDC"])
+        (message,) = self.bot.find("SOS: LMB-S HQ, LMB-T EDC")
+        await self.desk.on_mesh("LMB-T EDC", "SOS! Need help. #0002")  # its repeat
+        await self.desk.on_mesh("LMB-T EDC", "ack")  # a caller doesn't acknowledge
+        self.assertEqual(self.desk.emergency.aware, [])
+        self.assertEqual(self.bot.find("SOS: LMB-S HQ, LMB-T EDC"), [message])
+        await self.press_on(1, "SOS: LMB-S HQ, LMB-T EDC", "ACK")
+        self.assertEqual(self.sent, ["<Thomas> ACK #0002 I am aware"])
+        await self.desk.on_mesh("Bob", "RESOLVED #0001 all OK")  # either id names it
+        self.assertIsNone(self.desk.emergency)
 
     async def test_ack_with_nothing_open_is_shown_as_plain_text(self):
         await self.desk.on_mesh("LMB-T EDC", "ack")
+        await self.desk.on_mesh("LMB-T EDC", "ACK #83d3 I am aware")  # a late one from a board: not shown
         self.assertEqual(len(self.bot.find("[LMB-T EDC] ack")), 1)
-        self.assertEqual(self.desk.incidents, [])
+        self.assertEqual(len(self.bot.messages), 1)
+        self.assertIsNone(self.desk.emergency)
 
     # --- SOS from Telegram ----------------------------------------------------------------------
 
-    async def _send_sos(self, user=1):
-        await self.press(user, sos_desk.SOS)
-        (question,) = self.bot.find("send an SOS as")
-        return await self.press(user, self.bot.button(question, "Yes"), question)
-
-    async def test_sos_button_asks_then_sends_in_the_pressers_name(self):
+    async def test_sos_button_asks_then_sends_under_the_pressers_first_name(self):
         await self.press(1, sos_desk.SOS)
         self.assertEqual(self.sent, [])
-        (question,) = self.bot.find("send an SOS as <b>LMB-T HQ</b>?")
+        (question,) = self.bot.find("<b>Thomas</b>, send an SOS?")
         answer = await self.press(1, self.bot.button(question, "Yes"), question)
-        self.assertEqual(answer[1], "SOS sent as LMB-T HQ.")
-        (incident,) = self.desk.incidents
-        self.assertEqual(self.sent, [f"<LMB-T HQ> SOS! Need help. #{incident.incident_id}"])
-        (message,) = self.bot.find("SOS: LMB-T HQ")
-        self.assertIn("Sent from Telegram by Thomas Example · on the radio 1×", self.bot.messages[message]["text"])
+        self.assertEqual(answer[1], "SOS sent.")
+        emergency = self.desk.emergency
+        self.assertEqual(self.sent, [f"<Thomas> SOS! Need help. #{emergency.incident_id}"])
+        (message,) = self.bot.find("SOS: Thomas")
+        self.assertIn("Sent from Telegram · on the radio 1×", self.bot.messages[message]["text"])
         self.assertNotIn(question, self.bot.messages)
 
     async def test_sos_is_repeated_until_someone_acknowledges(self):
-        await self._send_sos()
+        await self.send_sos()
         for _ in range(2):
             self.clock += sos_desk.RETRY_SECONDS + 1
             await self.desk.tick()
         self.assertEqual(len(self.sent), 3)
         self.assertEqual(len(set(self.sent)), 1)
-        (message,) = self.bot.find("SOS: LMB-T HQ")
+        (message,) = self.bot.find("SOS: Thomas")
         self.assertIn("on the radio 3×", self.bot.messages[message]["text"])
-        await self.press_on(2, "SOS: LMB-T HQ", "ACK")
+        await self.press_on(2, "SOS: Thomas", "ACK")
         self.clock += sos_desk.RETRY_SECONDS + 1
         await self.desk.tick()
-        self.assertEqual(len(self.sent), 4)  # the three repeats and Anna's ACK
+        self.assertEqual(len(self.sent), 4)  # the three sends and Anna's ACK
 
     async def test_sos_stops_after_five_sends(self):
-        await self._send_sos()
+        await self.send_sos()
         for _ in range(10):
             self.clock += sos_desk.RETRY_SECONDS + 1
             await self.desk.tick()
         self.assertEqual(len(self.sent), sos_desk.MAX_SENDS)
 
-    async def test_one_open_sos_per_name(self):
-        await self._send_sos()
+    async def test_no_second_sos_while_an_emergency_is_active(self):
+        await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
         answer = await self.press(1, sos_desk.SOS)
-        self.assertTrue(answer[2])
-        self.assertIn("already open", answer[1])
+        self.assertEqual(answer[1:], (sos_desk.ALREADY_ACTIVE, True))
+        self.assertEqual(self.bot.find("send an SOS?"), [])
+        self.assertEqual(self.sent, [])
+        # After it's resolved a new one can be sent.
+        await self.desk.on_mesh("LMB-S HQ", "RESOLVED #83d3 all OK")
+        await self.send_sos()
         self.assertEqual(len(self.sent), 1)
+        # Nor a second one by someone else from Telegram.
+        answer = await self.press(2, sos_desk.SOS)
+        self.assertTrue(answer[2])
+        self.assertEqual(len(self.sent), 1)
+
+    async def test_an_emergency_that_starts_while_the_question_is_open_wins(self):
+        await self.press(1, sos_desk.SOS)
+        (question,) = self.bot.find("send an SOS?")
+        yes = self.bot.button(question, "Yes")
+        await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
+        self.assertNotIn(question, self.bot.messages)  # the question is withdrawn
+        answer = await self.press(1, yes, question)
+        self.assertTrue(answer[2])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.desk.emergency.callers, ["LMB-S HQ"])
+
+    async def test_the_caller_cannot_acknowledge_but_can_resolve(self):
+        await self.send_sos()
+        answer = await self.press_on(1, "SOS: Thomas", "ACK")
+        self.assertTrue(answer[2])
+        self.assertEqual(len(self.sent), 1)
+        await self.press_on(1, "SOS: Thomas", "Resolved")
+        (question,) = self.bot.find("emergency over?")
+        await self.press(1, self.bot.button(question, "Yes"), question)
+        self.assertIn("RESOLVED", self.sent[-1])
+        self.assertIsNone(self.desk.emergency)
 
     async def test_radio_offline_is_said_to_the_presser(self):
         self.online = False
-        answer = await self._send_sos()
+        answer = await self.send_sos()
         self.assertIn("radio is offline", answer[1])
 
-    async def test_own_board_resolving_closes_the_sos_sent_from_telegram(self):
-        await self._send_sos()
-        (incident,) = self.desk.incidents
-        await self.desk.on_mesh("LMB-T HQ", f"RESOLVED #{incident.incident_id} all OK")
-        self.assertEqual(self.desk.incidents, [])
+    async def test_a_board_resolving_closes_the_sos_sent_from_telegram(self):
+        await self.send_sos()
+        emergency = self.desk.emergency
+        await self.desk.on_mesh("LMB-S HQ", f"RESOLVED #{emergency.incident_id} all OK")
+        self.assertIsNone(self.desk.emergency)
         self.clock += sos_desk.RETRY_SECONDS + 1
         await self.desk.tick()
         self.assertEqual(len(self.sent), 1)
+
+    # --- Names ----------------------------------------------------------------------------------
+
+    async def test_people_with_the_same_first_name_stay_apart(self):
+        await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
+        for user in (2, 4, 5, 2):
+            await self.press_on(user, "SOS: LMB-S HQ", "ACK")
+        self.assertEqual(self.desk.emergency.aware, ["Anna", "Anna B", "Anna 2"])
+        self.assertEqual(self.sent[1], "<Anna B> ACK #83d3 I am aware")
+        # Names are kept across a restart.
+        self.desk = self._desk()
+        self.assertEqual(self.desk.name_for(SimpleNamespace(sender_id=4, sender_display_name="Anna Bianchi")), "Anna B")
+
+    async def test_names_fit_what_a_board_can_read(self):
+        name = lambda display, user=None: self.desk.name_for(SimpleNamespace(sender_id=user, sender_display_name=display))
+        self.assertEqual(name("<An:na> Rossi"), "Anna")
+        self.assertEqual(name("  "), "Telegram")
+        self.assertEqual(name("x" * 40), "x" * 31)
+        self.assertEqual(name("x" * 40 + " Yz", 8), "x" * 31)
+        self.assertEqual(name("x" * 40 + " Yz", 9), "x" * 29 + " Y")
+        # Someone who changes their first name gets the new one.
+        self.assertEqual(name("Thomas Example", 1), "Thomas")
+        self.assertEqual(name("Tom Example", 1), "Tom")
 
     # --- Typing, restarts -----------------------------------------------------------------------
 
@@ -320,27 +392,31 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.messages[hint]["reply_to"], 7)
         self.assertEqual(self.bot.messages[hint]["buttons"], [(sos_desk.SOS_LABEL, sos_desk.SOS)])
         self.assertEqual(self.sent, [])
+        # During an emergency the hint has no SOS button: there's nothing to send.
+        await self.desk.on_mesh("Anna", "fire at the gate")
         self.clock += sos_desk.HINT_SECONDS + 1
         await self.desk.on_typed(typed)
-        self.assertEqual(len(self.bot.find("Use the buttons")), 2)
+        hints = self.bot.find("Use the buttons")
+        self.assertEqual(len(hints), 2)
+        self.assertEqual(self.bot.messages[max(hints)]["buttons"], [])
 
     async def test_buttons_keep_working_after_a_restart(self):
         await self.desk.on_mesh("LMB-S HQ", "SOS! Need help. #83d3")
         self.desk = self._desk()
         await self.press_on(1, "SOS: LMB-S HQ", "ACK")
-        self.assertEqual(self.sent, ["<LMB-T HQ> ACK #83d3 I am aware"])
+        self.assertEqual(self.sent, ["<Thomas> ACK #83d3 I am aware"])
+
+    async def test_state_from_the_version_with_several_incidents_is_read(self):
+        self.path.write_text('{"panel_message_id": 7, "closed": ["0001"], "incidents": [{"key": "k", "sender": "A"}]}')
+        desk = self._desk()
+        self.assertIsNone(desk.emergency)
+        await desk.on_mesh("A", "SOS! Need help. #0001")
+        self.assertIsNone(desk.emergency)
 
     async def test_names_are_escaped(self):
         await self.desk.on_mesh("A&B", "smoke <b>everywhere</b>")
         (message,) = self.bot.find("SOS: A&amp;B")
         self.assertIn("smoke &lt;b&gt;everywhere&lt;/b&gt;", self.bot.messages[message]["text"])
-
-    async def test_oldest_incident_makes_room(self):
-        for index in range(sos_desk.MAX_OPEN + 1):
-            await self.desk.on_mesh(f"Node{index}", "help")
-        self.assertEqual(len(self.desk.incidents), sos_desk.MAX_OPEN)
-        self.assertEqual(self.desk.incidents[0].sender, "Node1")
-        self.assertEqual(len(self.bot.find("Closed here: Node0")), 1)
 
     async def test_telegram_down_does_not_lose_the_radio_side(self):
         bot, self.bot = self.bot, None
@@ -348,7 +424,7 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
         desk._bot = lambda: None
         with self.assertLogs("meshgram.sos_desk", level="WARNING"):
             await desk.on_mesh("Anna", "SOS! Need help. #0001")
-        self.assertEqual(len(desk.incidents), 1)
+        self.assertEqual(desk.emergency.callers, ["Anna"])
         self.bot = bot
 
 

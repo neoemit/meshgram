@@ -416,18 +416,15 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("POST", "/api/plugins", {"plugin": "nope", "instance": "b"}))[0], 404)
 
         self.plugins.host.web = self.web  # plugins started from here on get the web app
-        status, plugin = await self.call("PATCH", "/api/plugins/bridge%40sos", {"enabled": True, "settings": {"channel": 0, "senders": {"1001": "Thomas"}}})
+        status, plugin = await self.call("PATCH", "/api/plugins/bridge%40sos", {"enabled": True, "settings": {"channel": 0}})
         self.assertEqual((status, plugin["running"]), (200, True))
-        # Its channel shows as used by it, and its people route is served while it runs.
+        # Its channel shows as used by it.
         status, body = await self.call("GET", "/api/radio/channels")
         self.assertIn("Telegram bridge (sos)", {channel["index"]: channel for channel in body["channels"]}[0]["used_by"])
-        status, people = await self.call("GET", "/api/plugins/bridge@sos/people")
-        self.assertEqual((status, people), (200, {"people": [], "nodes": ["Thomas"]}))
 
         self.assertEqual((await self.call("DELETE", "/api/plugins/bridge%40sos/overrides"))[0], 409)
         self.assertEqual((await self.call("DELETE", "/api/plugins/bridge"))[0], 400)
         self.assertEqual((await self.call("DELETE", "/api/plugins/bridge%40sos"))[0], 204)
-        self.assertEqual((await self.call("GET", "/api/plugins/bridge@sos/people"))[0], 404)
         self.assertEqual((await self.call("DELETE", "/api/plugins/bridge%40sos"))[0], 404)
         self.assertEqual(self.announced(), ["plugins", "plugins", "plugins"])
 

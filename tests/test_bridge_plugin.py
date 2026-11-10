@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from meshgram.config import MeshgramSettings
-from meshgram.plugins.bridge import BridgePlugin, normalize_user, truncate_utf8
+from meshgram.plugins.bridge import BridgePlugin, truncate_utf8
 from meshgram.settings_schema import validate
 from meshgram.text_utils import utf8_len
 from meshgram.types import MeshTextEvent, PluginContext, TelegramMessageEvent, TelegramReactionEvent
@@ -224,7 +224,6 @@ SOS = {
     "telegram_group_id": -555,
     "sender_prefix_template": "<{display_name}> {message}",
     "long_messages": "truncate",
-    "senders": {"1001": "Thomas", "@AnnaTG": "Anna", 1003: "Thomas"},
 }
 
 
@@ -250,22 +249,8 @@ class SosBridgeTests(BridgePluginTests):
         actions = asyncio.run(self.sos.on_mesh_message(_mesh("SOS! Need help. #a3f1", channel_index=5), self._context()))
         self.assertEqual([(action.chat_id, action.text) for action in actions], [(-555, "[Alpha] SOS! Need help. #a3f1")])
 
-    def test_mapped_users_send_in_their_boards_name(self):
-        self.assertEqual(self._sos(sender_id=1001, sender_display_name="Tom L")[0].text, "<Thomas> ack")
-        # Several Telegram users can share a board.
-        self.assertEqual(self._sos(sender_id=1003, sender_display_name="Other Phone")[0].text, "<Thomas> ack")
-        # By username, whatever its case; the ID wins when both match.
-        self.assertEqual(self._sos(sender_id=7, sender_username="annatg")[0].text, "<Anna> ack")
-        self.assertEqual(self._sos(sender_id=1001, sender_username="AnnaTG")[0].text, "<Thomas> ack")
-        # Nobody's: their Telegram first name.
+    def test_people_send_under_their_first_name_made_safe_for_the_relay_mark(self):
         self.assertEqual(self._sos(sender_id=9, sender_display_name="Bob Builder")[0].text, "<Bob> ack")
-
-    def test_mapping_also_names_senders_with_the_usual_prefix(self):
-        plugin = BridgePlugin({"senders": {"1001": "SOS Bench B"}})
-        actions = self._send_telegram(_telegram(sender_id=1001), plugin=plugin)
-        self.assertEqual(actions[0].text, "[SOS Bench B] hello")
-
-    def test_unmapped_names_are_made_safe_for_the_relay_mark(self):
         self.assertEqual(self._sos(sender_display_name="<A>:B")[0].text, "<AB> ack")
         self.assertEqual(self._sos(sender_display_name="<>")[0].text, "<Telegram> ack")
         self.assertEqual(self._sos(sender_display_name="x" * 40)[0].text, f"<{'x' * 31}> ack")
@@ -273,7 +258,7 @@ class SosBridgeTests(BridgePluginTests):
         self.assertEqual(self._send_telegram(_telegram(sender_display_name="<A>"))[0].text, "[<A>] hello")
 
     def test_long_messages_are_cut_to_one_radio_message(self):
-        actions = self._sos("help " * 60, payload_limit=60, sender_id=1001)
+        actions = self._sos("help " * 60, payload_limit=60, sender_display_name="Thomas L")
         self.assertEqual(len(actions), 1)
         self.assertIsNone(actions[0].sequence_id)
         self.assertTrue(actions[0].text.startswith("<Thomas> help help"))
@@ -285,29 +270,22 @@ class SosBridgeTests(BridgePluginTests):
         # The main group's reactions aren't the SOS bridge's, and the other way round.
         self.assertEqual(send(self.sos), [])
         self.assertEqual(send(self.plugin, chat_id=-555), [])
-        actions = send(self.sos, chat_id=-555, sender_id=1001, message_text=None)
-        self.assertEqual([(action.channel_index, action.text) for action in actions], [(5, "<Thomas> reacted 👍")])
+        actions = send(self.sos, chat_id=-555, message_text=None)
+        self.assertEqual([(action.channel_index, action.text) for action in actions], [(5, "<Alice> reacted 👍")])
         # Off, as an SOS bridge should have it: nothing goes out.
         quiet = BridgePlugin({**SOS, "relay_reactions": False})
-        self.assertEqual(send(quiet, chat_id=-555, sender_id=1001), [])
+        self.assertEqual(send(quiet, chat_id=-555), [])
 
     def test_truncate_utf8(self):
         self.assertEqual(truncate_utf8("short", 10), "short")
         self.assertEqual(truncate_utf8("héllo wörld", 8), "héll…")
         self.assertLessEqual(utf8_len(truncate_utf8("😀" * 10, 9)), 9)
 
-    def test_normalize_user(self):
-        self.assertEqual(normalize_user("1001"), 1001)
-        self.assertEqual(normalize_user(1001), 1001)
-        self.assertEqual(normalize_user(" @AnnaTG "), "annatg")
-        self.assertIsNone(normalize_user("@"))
-        self.assertIsNone(normalize_user(True))
-
     def test_settings_schema_for_an_sos_bridge(self):
-        validate({**SOS, "senders": {"1001": "Thomas"}, "telegram_bot_token": "123:abc"}, BridgePlugin.settings_schema)
+        validate({**SOS, "telegram_bot_token": "123:abc"}, BridgePlugin.settings_schema)
+        # A setting from an earlier version (the user-to-board mapping) doesn't stop the bridge.
+        validate({**SOS, "senders": {"1001": "Thomas"}}, BridgePlugin.settings_schema)
         for bad in (
-            {"senders": {"1001": "A>B"}},
-            {"senders": {"1001": "x" * 32}},
             {"long_messages": "drop"},
             {"telegram_group_id": "-555"},
             {"telegram_bot_token": "nope"},
@@ -351,35 +329,15 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # The bridge itself still falls back to meshcore.bridge_channel.
         await self._started({}, instance_id=None)
 
-    async def test_people_seen_in_the_group_are_remembered(self):
+    async def test_settings_apply_without_a_restart_unless_the_bot_or_channel_changes(self):
         plugin = await self._started(SOS)
         self.assertEqual(plugin.instance_name, "bridge@sos")
-        await plugin.on_telegram_message(_telegram("ack", chat_id=-555, sender_id=1001, sender_username="tom", sender_display_name="Tom  L"), self._context())
-        await plugin.on_telegram_message(_telegram("x", chat_id=-555, sender_id=9, sender_display_name="Bob"), self._context())
-        await plugin.on_telegram_message(_telegram("x", chat_id=-999, sender_id=8, sender_display_name="Elsewhere"), self._context())
-        await plugin.on_mesh_message(_mesh("SOS!", channel_index=5), self._context())
-
-        people = plugin.people()
-        self.assertEqual({person["id"]: (person["name"], person["username"], person["radio_name"]) for person in people["people"]},
-                         {1001: ("Tom L", "tom", "Thomas"), 9: ("Bob", None, None)})
-        self.assertEqual(people["nodes"], ["Alpha", "Thomas", "Anna"])
-        self.assertTrue(os.path.exists(os.path.join(self.dir, "bridge_sos_people.json")))
-
-        # They're still known after a restart, and each bridge keeps its own.
-        again = await self._started(SOS)
-        self.assertEqual({person["id"] for person in again.people()["people"]}, {1001, 9})
-        other = await self._started({"channel": 1}, instance_id=None)
-        self.assertEqual(other.people()["people"], [])
-
-    async def test_new_senders_apply_without_a_restart(self):
-        plugin = await self._started(SOS)
-        self.assertTrue(await plugin.apply_settings({**SOS, "senders": {"9": "Bob Board"}}))
-        actions = await plugin.on_telegram_message(_telegram("ack", chat_id=-555, sender_id=9), self._context())
-        self.assertEqual(actions[0].text, "<Bob Board> ack")
-        # Another bot, or no channel any more, needs a restart.
+        self.assertTrue(await plugin.apply_settings({**SOS, "sender_prefix_template": "({display_name}) {message}"}))
+        actions = await plugin.on_telegram_message(_telegram("ack", chat_id=-555), self._context())
+        self.assertEqual(actions[0].text, "(Alice) ack")
         self.assertFalse(await plugin.apply_settings({**SOS, "telegram_bot_token": "2:other"}))
         self.assertFalse(await plugin.apply_settings({key: value for key, value in SOS.items() if key != "channel"}))
-        self.assertEqual(plugin.settings["senders"], {"9": "Bob Board"})
+        self.assertEqual(plugin.settings["sender_prefix_template"], "({display_name}) {message}")
 
     async def test_the_main_bots_token_is_not_a_bot_of_its_own(self):
         plugin = await self._started({**SOS, "telegram_bot_token": "1:main"})
@@ -453,7 +411,7 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
             from_user=SimpleNamespace(id=1001, full_name="Tom L", username="tom", is_bot=False),
         )
         await plugin._on_own_bot_update(SimpleNamespace(effective_message=message), None)
-        self.assertEqual(self.executed, [("bridge@sos", ["<Thomas> ack"])])
+        self.assertEqual(self.executed, [("bridge@sos", ["<Tom> ack"])])
 
         self.assertEqual(await plugin.on_telegram_reaction(_reaction(chat_id=-555), self._context()), [])
 
@@ -492,7 +450,7 @@ class SosModeTests(BridgeLifecycleTests):
         return TelegramButtonEvent(**fields)
 
     async def _sos_bridge(self, **settings):
-        return await self._started({"channel": 3, "telegram_group_id": -555, "mode": "sos", "senders": {"1001": "LMB-T HQ"}, **settings})
+        return await self._started({"channel": 3, "telegram_group_id": -555, "mode": "sos", **settings})
 
     async def test_radio_alarm_becomes_a_message_with_buttons_through_the_main_bot(self):
         plugin = await self._sos_bridge()
@@ -504,21 +462,20 @@ class SosModeTests(BridgeLifecycleTests):
         await plugin.on_mesh_message(_mesh("hello", channel_index=2), self._context())
         self.assertEqual(len(self.bot.messages), 1)
 
-    async def test_a_press_goes_out_under_the_mapped_name_and_lists_the_person(self):
+    async def test_a_press_goes_out_under_the_pressers_first_name(self):
         plugin = await self._sos_bridge()
+        await plugin.on_mesh_message(_mesh("SOS! Need help. #83d3", channel_index=3), self._context())
+        (message,) = self.bot.find("SOS: Alpha")
+        press = self._button(self.bot.button(message, "ACK"), sender_display_name="Anna: <Rossi>")
+        await plugin.on_telegram_button(press, self._context())
+        self.assertEqual(self.executed, [("bridge@sos", ["<Anna> ACK #83d3 I am aware"])])
+
+    async def test_a_mapping_from_an_earlier_version_is_ignored(self):
+        plugin = await self._sos_bridge(senders={"1001": "LMB-T HQ"})
         await plugin.on_mesh_message(_mesh("SOS! Need help. #83d3", channel_index=3), self._context())
         (message,) = self.bot.find("SOS: Alpha")
         await plugin.on_telegram_button(self._button(self.bot.button(message, "ACK")), self._context())
-        self.assertEqual(self.executed, [("bridge@sos", ["<LMB-T HQ> ACK #83d3 I am aware"])])
-        self.assertEqual([person["id"] for person in plugin.people()["people"]], [1001])
-
-    async def test_an_unmapped_person_sends_under_their_first_name(self):
-        plugin = await self._sos_bridge()
-        await plugin.on_mesh_message(_mesh("SOS! Need help. #83d3", channel_index=3), self._context())
-        (message,) = self.bot.find("SOS: Alpha")
-        press = self._button(self.bot.button(message, "ACK"), sender_id=7, sender_display_name="Anna: <Rossi>")
-        await plugin.on_telegram_button(press, self._context())
-        self.assertEqual(self.executed, [("bridge@sos", ["<Anna> ACK #83d3 I am aware"])])
+        self.assertEqual(self.executed, [("bridge@sos", ["<Thomas> ACK #83d3 I am aware"])])
 
     async def test_presses_elsewhere_and_other_buttons_are_ignored(self):
         plugin = await self._sos_bridge()
@@ -533,7 +490,6 @@ class SosModeTests(BridgeLifecycleTests):
         self.assertEqual(len(self.bot.find("Use the buttons")), 1)
         self.assertEqual(await plugin.on_telegram_reaction(_reaction(chat_id=-555), self._context()), [])
         self.assertEqual(self.executed, [])
-        self.assertEqual(len(plugin.people()["people"]), 1)
 
     async def test_chat_bridges_ignore_presses(self):
         plugin = await self._started({"channel": 3, "telegram_group_id": -555})
@@ -542,7 +498,7 @@ class SosModeTests(BridgeLifecycleTests):
 
     async def test_changing_the_mode_restarts_the_bridge(self):
         plugin = await self._sos_bridge()
-        self.assertTrue(await plugin.apply_settings({**plugin.settings, "senders": {"7": "Anna"}}))
+        self.assertTrue(await plugin.apply_settings({**plugin.settings, "relay_reactions": False}))
         self.assertFalse(await plugin.apply_settings({**plugin.settings, "mode": "chat"}))
         self.assertEqual(plugin.settings["mode"], "sos")
 

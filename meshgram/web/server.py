@@ -43,7 +43,6 @@ STATIC_FILES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/control.js": ("control.js", "text/javascript; charset=utf-8"),
     "/check_in.js": ("check_in.js", "text/javascript; charset=utf-8"),
-    "/bridge.js": ("bridge.js", "text/javascript; charset=utf-8"),
 }
 # Shown instead of the page until the browser has logged in.
 LOGIN_PAGE = "login.html"
