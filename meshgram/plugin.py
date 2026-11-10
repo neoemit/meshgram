@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 from typing import TYPE_CHECKING, Any
 
 from .config import canonical_plugin_name
@@ -28,6 +29,11 @@ BUILTIN_PLUGINS: dict[str, str] = {
     "check_in": "meshgram.plugins.check_in:CheckInPlugin",
 }
 
+# "bridge@sos" is a second instance of the bridge plugin, called "sos" (as systemd names
+# template units). Only plugins that say ``multi_instance`` can have them.
+INSTANCE_SEPARATOR = "@"
+INSTANCE_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_]{0,23}")
+
 # Schema keyword the control panel understands: an integer that is a radio
 # channel slot, picked by name from the radio's channels.
 CHANNEL_FORMAT = "channel"
@@ -41,9 +47,20 @@ class BasePlugin:
     # JSON Schema of ``settings`` (see meshgram.settings_schema). The control
     # panel renders a form from it and validates edits against it.
     settings_schema: dict[str, Any] = {"type": "object"}
+    # True: config.yaml and the control panel may run more instances of it ("<name>@<id>"),
+    # each with its own settings. The plugin must then keep whatever it names (status
+    # entries, routes, files) apart per instance: see ``instance_id``.
+    multi_instance = False
+    # Set by the plugin manager before ``on_startup``: None for the plugin itself.
+    instance_id: str | None = None
 
     def __init__(self, settings: dict[str, Any] | None = None):
         self.settings = settings or {}
+
+    @property
+    def instance_name(self) -> str:
+        """The name this instance runs under: ``name``, or ``name@instance_id``."""
+        return instance_key(self.name, self.instance_id)
 
     async def on_startup(self, context: PluginContext) -> list[PluginAction]:
         return []
@@ -91,15 +108,32 @@ class BasePlugin:
         return []
 
 
-def plugin_key(name: str) -> str:
-    """The name a plugin is known by: built-ins by their canonical name, others as configured."""
+def instance_key(base: str, instance_id: str | None) -> str:
+    return f"{base}{INSTANCE_SEPARATOR}{instance_id}" if instance_id else base
+
+
+def split_instance(name: str) -> tuple[str, str | None]:
+    """``("bridge", "sos")`` for "bridge@sos"; ``(name, None)`` for a plugin itself.
+
+    Only built-in plugins have instances: any other name (a module path) is taken whole.
+    """
     canonical = canonical_plugin_name(name)
-    return canonical if canonical in BUILTIN_PLUGINS else str(name).strip()
+    base, separator, instance_id = canonical.partition(INSTANCE_SEPARATOR)
+    if separator and base in BUILTIN_PLUGINS:
+        return base, instance_id.lower()
+    return (canonical if canonical in BUILTIN_PLUGINS else str(name).strip()), None
+
+
+def plugin_key(name: str) -> str:
+    """The name a plugin is known by: built-ins by their canonical name (with "@<instance>"
+    for a further instance), others as configured."""
+    return instance_key(*split_instance(name))
 
 
 def resolve_plugin_target(name: str) -> str:
     """``module:Class`` for a plugin name (a built-in name, ``module:Class`` or a module with a ``Plugin`` class)."""
-    target = BUILTIN_PLUGINS.get(plugin_key(name), name)
+    base, _ = split_instance(name)
+    target = BUILTIN_PLUGINS.get(base, name)
     if ":" in target:
         return target
     return f"{target}:Plugin"

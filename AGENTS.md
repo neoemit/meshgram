@@ -53,7 +53,7 @@ Each hook returns `PluginAction`s (`SendTelegramAction`, `SendMeshAction`); outs
 `meshgram/plugin_manager.py` runs them and changes them at runtime: `update(name, enabled=…, settings=…)` validates (secrets come back masked as `SECRET_MASK` and are restored), saves the override to `$MESHGRAM_DATA_DIR/plugins.json` (atomic, 0600), then applies it: if the effective settings changed, the running instance's `apply_settings(settings)` may take them live (return True), otherwise the plugin restarts (`on_shutdown` + new instance). `update`/`reset` report `restarted`. Overrides win over config.yaml until `reset(name)`. Because plugins can now be stopped at runtime, `on_shutdown` must release everything, including transport listeners (`remove_rx_log_listener`) and status entries (`StatusRegistry.remove`).
 
 **Built-in plugins:**
-- `plugins/bridge.py` — core relay (Telegram group ↔ one radio channel) with chunking
+- `plugins/bridge.py` — core relay (Telegram group ↔ one radio channel) with chunking; it can run more than once (`bridge@<id>` entries, each with its own channel, Telegram group and optionally bot) and maps Telegram users to radio names (`senders`), sending as `<Name> text` for MeshSOS boards. See CLAUDE.md for the details
 - `plugins/ping_pong.py` — keyword-response automation with dedupe and channel filtering
 - `plugins/dm_http_command.py` — DMs that invoke HTTP endpoints and return formatted responses
 - `plugins/trace_me.py` — route trace responder

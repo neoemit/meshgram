@@ -29,6 +29,9 @@ class TelegramMessageEvent:
     sender_display_name: str
     has_media: bool
     raw_message: Any = None
+    # The Telegram user who sent it: the numeric ID never changes, the username may.
+    sender_id: Optional[int] = None
+    sender_username: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -47,6 +50,9 @@ class TelegramReactionEvent:
     # The text of the message reacted to, when Meshgram saw it (it isn't in the update).
     message_text: Optional[str] = None
     raw_reaction: Any = None
+    # The Telegram user who reacted (None for an anonymous admin).
+    sender_id: Optional[int] = None
+    sender_username: Optional[str] = None
 
 
 @dataclass(slots=True)

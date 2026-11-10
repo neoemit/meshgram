@@ -102,6 +102,18 @@ class ExportConfigTests(unittest.TestCase):
         result = export_config(CONFIG, {"packet_map": {"settings": {"max_messages": 50}}})
         self.assertEqual(plugins(result.text)["packet_map"], (False, {"max_messages": 50}))
 
+    def test_an_instance_added_in_the_control_panel_is_added(self):
+        settings = {"channel": 5, "telegram_group_id": -100555, "senders": {"1001": "Thomas"}}
+        result = export_config(CONFIG, {"bridge@sos": {"enabled": True, "settings": settings}})
+        self.assertEqual(result.problems, [])
+        self.assertEqual(plugins(result.text)["bridge@sos"], (True, settings))
+        self.assertEqual(plugins(result.text)["bridge"], (True, {}))
+        self.assertEqual([change.name for change in result.changes], ["bridge@sos"])
+        # Once config.yaml has it, changing it merges into its entry.
+        again = export_config(result.text, {"bridge@sos": {"settings": {**settings, "channel": 6}}})
+        self.assertEqual(again.problems, [])
+        self.assertEqual(plugins(again.text)["bridge@sos"], (True, {**settings, "channel": 6}))
+
     def test_without_a_plugins_list_the_defaults_are_written_out(self):
         config = 'telegram:\n  bot_token: "123:abc"\n  group_id: -1\n'
         result = export_config(config, {"trace_me": {"enabled": True}})

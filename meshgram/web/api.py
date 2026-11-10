@@ -18,6 +18,9 @@
     POST   /api/radio/firmware/update                 {"version", "board", "allow_downgrade"?} -> 202 job;
                                                       progress follows as {"type": "firmware", "job"} events
     GET    /api/plugins                               every plugin with its schema and (masked) settings
+    POST   /api/plugins                               {"plugin", "instance"}: another instance of a plugin
+                                                      that allows it ("bridge@sos") -> 201, off until set up
+    DELETE /api/plugins/{name}                        remove an instance that was added here
     PATCH  /api/plugins/{name}                        {"enabled"?, "settings"?}
     DELETE /api/plugins/{name}/overrides              back to config.yaml
     GET    /api/settings                              Meshgram's own settings (config.yaml but the plugins)
@@ -47,7 +50,7 @@ from ..config_export import ConfigExport, ConfigExportError, export_config
 from ..core_settings import LEAVES, SCHEMA, CoreSettings, UnknownSectionError
 from ..firmware import FirmwareUpdater
 from ..plugin import CHANNEL_FORMAT
-from ..plugin_manager import PluginManager, UnknownPluginError
+from ..plugin_manager import PluginInstanceError, PluginManager, UnknownPluginError
 from ..radio_admin import RadioAdmin, RadioAdminError
 from ..settings_schema import SettingsError
 from ..text_utils import channel_message_max_bytes, utf8_len
@@ -86,7 +89,7 @@ def channel_usage(plugins: PluginManager, settings: MeshgramSettings) -> dict[in
             else:
                 continue
             slots.update(slot for slot in map(_slot_number, values) if slot is not None)
-        if plugin["name"] == "bridge" and not isinstance(plugin["settings"].get("channel"), int):
+        if plugin.get("base", plugin["name"]) == "bridge" and not isinstance(plugin["settings"].get("channel"), int):
             slots.add(settings.meshcore.bridge_channel)
         for slot in slots:
             usage[slot].append(plugin["title"])
@@ -136,6 +139,8 @@ def _wrap(handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Reques
             raise HttpError(422, "Some settings aren't valid", details) from None
         except UnknownPluginError:
             raise HttpError(404, "There's no such plugin") from None
+        except PluginInstanceError as exc:
+            raise HttpError(exc.status, str(exc)) from None
         except UnknownSectionError:
             raise HttpError(404, "There's no such settings section") from None
 
@@ -307,6 +312,28 @@ def register_control_api(
     @route("GET", "/api/plugins")
     async def get_plugins(request: Request) -> Response:
         return json_response({"plugins": plugins.catalog()})
+
+    @route("POST", "/api/plugins")
+    async def add_plugin_instance(request: Request) -> Response:
+        body = _body(request)
+        base, instance = body.get("plugin"), body.get("instance")
+        if not isinstance(base, str) or not isinstance(instance, str):
+            raise HttpError(400, "plugin and instance must be strings")
+        try:
+            plugin = await plugins.add_instance(base, instance)
+        except OSError as exc:
+            raise HttpError(500, f"Couldn't save the change: {exc}") from None
+        announce("plugins")
+        return json_response(plugin, status=201)
+
+    @route("DELETE", "/api/plugins/{name}")
+    async def remove_plugin_instance(request: Request) -> Response:
+        try:
+            await plugins.remove_instance(request.params["name"])
+        except OSError as exc:
+            raise HttpError(500, f"Couldn't save the change: {exc}") from None
+        announce("plugins")
+        return no_content()
 
     @route("PATCH", "/api/plugins/{name}")
     async def patch_plugin(request: Request) -> Response:

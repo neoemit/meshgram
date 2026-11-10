@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 from .config import PluginConfig
-from .plugin import BUILTIN_PLUGINS, load_plugin_class, plugin_key
+from .plugin import BUILTIN_PLUGINS, INSTANCE_ID_PATTERN, instance_key, load_plugin_class, plugin_key, split_instance
 from .settings_schema import SettingsError, mask_secrets, restore_secrets, validate
 from .storage import write_private_json
 from .types import Plugin, PluginAction, PluginContext
@@ -40,6 +40,14 @@ OVERRIDES_VERSION = 1
 
 class UnknownPluginError(KeyError):
     pass
+
+
+class PluginInstanceError(ValueError):
+    """An instance that can't be added or removed; ``status`` is the HTTP status that fits."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
 
 
 class PluginHost(Protocol):
@@ -91,6 +99,19 @@ class PluginEntry:
     load_error: Optional[str] = None
 
     @property
+    def base(self) -> str:
+        return split_instance(self.name)[0]
+
+    @property
+    def instance_id(self) -> Optional[str]:
+        return split_instance(self.name)[1]
+
+    @property
+    def added_here(self) -> bool:
+        """An instance added in the web app: config.yaml doesn't know it, only its override does."""
+        return self.instance_id is not None and not self.in_config
+
+    @property
     def enabled(self) -> bool:
         return bool(self.override.get("enabled", self.config_enabled))
 
@@ -108,7 +129,10 @@ class PluginEntry:
 def _differences(entry: PluginEntry, override: dict[str, Any]) -> dict[str, Any]:
     """The part of ``override`` that differs from config.yaml."""
     override = dict(override)
-    if override.get("enabled", entry.config_enabled) == entry.config_enabled:
+    if entry.added_here:
+        # Its override is all there is of it: without one it wouldn't be there after a restart.
+        override["enabled"] = bool(override.get("enabled", False))
+    elif override.get("enabled", entry.config_enabled) == entry.config_enabled:
         override.pop("enabled", None)
     if "settings" in override and override["settings"] == entry.config_settings:
         override.pop("settings")
@@ -148,6 +172,10 @@ class PluginManager:
         caught_up: list[str] = []
         for name, override in overrides.items():
             entry = self._entries.get(plugin_key(name))
+            if entry is None and split_instance(name)[1] is not None:
+                # An instance added in the web app.
+                entry = PluginEntry(name=plugin_key(name), in_config=False, config_enabled=False, config_settings={})
+                self._entries[entry.name] = entry
             if entry is None:
                 LOGGER.warning("Ignoring saved settings for unknown plugin %s", name)
                 continue
@@ -202,11 +230,19 @@ class PluginManager:
 
     def _describe(self, entry: PluginEntry) -> dict[str, Any]:
         plugin_class = entry.plugin_class
+        title = getattr(plugin_class, "title", "") or entry.base
         return {
             "name": entry.name,
-            "title": getattr(plugin_class, "title", "") or entry.name,
+            "title": f"{title} ({entry.instance_id})" if entry.instance_id else title,
+            # Instances: the plugin they're an instance of, and their own name.
+            "base": entry.base,
+            "instance": entry.instance_id,
+            # Whether more instances can be added, and whether this one can be removed here
+            # (one from config.yaml is removed there).
+            "multi_instance": bool(getattr(plugin_class, "multi_instance", False)),
+            "removable": entry.added_here,
             "description": getattr(plugin_class, "description", ""),
-            "builtin": entry.name in BUILTIN_PLUGINS,
+            "builtin": entry.base in BUILTIN_PLUGINS,
             "in_config": entry.in_config,
             "enabled": entry.enabled,
             "running": entry.instance is not None,
@@ -237,6 +273,14 @@ class PluginManager:
         try:
             entry.plugin_class = load_plugin_class(entry.name)
             entry.load_error = None
+            if entry.instance_id is not None:
+                if not getattr(entry.plugin_class, "multi_instance", False):
+                    raise ValueError(f"{entry.base} can't run more than once")
+                if not INSTANCE_ID_PATTERN.fullmatch(entry.instance_id):
+                    raise ValueError(
+                        f"the instance name {entry.instance_id!r} must be lower-case letters, digits and "
+                        "underscores (at most 24), starting with a letter or digit"
+                    )
         except Exception as exc:
             entry.plugin_class = None
             entry.load_error = f"Can't load the plugin: {exc}"
@@ -249,6 +293,8 @@ class PluginManager:
         try:
             # A copy: the plugin may keep and change it, the entry must not change behind its back.
             instance = entry.plugin_class(copy.deepcopy(entry.settings))
+            if entry.instance_id is not None:
+                instance.instance_id = entry.instance_id
         except Exception as exc:
             LOGGER.exception("Plugin %s failed to start", entry.name)
             entry.error = f"Failed to start: {exc}"
@@ -329,11 +375,59 @@ class PluginManager:
             restarted = await self._apply(entry, settings_changed=entry.settings != previous_settings)
             return {**self._describe(entry), "restarted": restarted}
 
+    async def add_instance(self, base: str, instance_id: str) -> dict[str, Any]:
+        """Another instance of a ``multi_instance`` plugin, off until it's configured and turned on."""
+        async with self._lock:
+            base_entry = self._entries.get(plugin_key(base))
+            if base_entry is None or base_entry.instance_id is not None:
+                raise UnknownPluginError(base)
+            if not getattr(base_entry.plugin_class, "multi_instance", False):
+                raise PluginInstanceError(f"{base_entry.name} can't run more than once")
+            instance_id = str(instance_id).strip().lower().replace("-", "_")
+            if not INSTANCE_ID_PATTERN.fullmatch(instance_id):
+                raise PluginInstanceError(
+                    "The name must be lower-case letters, digits and underscores (at most 24), "
+                    "starting with a letter or digit"
+                )
+            name = instance_key(base_entry.name, instance_id)
+            if name in self._entries:
+                raise PluginInstanceError(f"{name} already exists", status=409)
+            entry = PluginEntry(name=name, in_config=False, config_enabled=False, config_settings={})
+            override = _differences(entry, {})
+            self._save(name, override)
+            entry.override = override
+            self._load_class(entry)
+            # Next to the plugin it's an instance of (and its other instances), in the catalog and in dispatch.
+            entries: dict[str, PluginEntry] = {}
+            position = max(index for index, other in enumerate(self._entries.values()) if other.base == entry.base)
+            for index, (key, other) in enumerate(self._entries.items()):
+                entries[key] = other
+                if index == position:
+                    entries[name] = entry
+            self._entries = entries
+            return self._describe(entry)
+
+    async def remove_instance(self, name: str) -> None:
+        """Stop and forget an instance that was added in the web app."""
+        async with self._lock:
+            entry = self._entry(name)
+            if entry.instance_id is None:
+                raise PluginInstanceError(f"{entry.name} is a plugin, not an instance of one: turn it off instead")
+            if entry.in_config:
+                raise PluginInstanceError(
+                    f"{entry.name} is in config.yaml: remove it there (it can be turned off here)", status=409
+                )
+            self._save(entry.name, {})
+            await self._stop(entry)
+            del self._entries[entry.name]
+
     async def reset(self, name: str) -> dict[str, Any]:
         """Drop the web app's changes to a plugin and go back to config.yaml."""
         async with self._lock:
             entry = self._entry(name)
             restarted = False
+            if entry.added_here:
+                raise PluginInstanceError(f"{entry.name} isn't in config.yaml: remove it instead", status=409)
             if entry.override:
                 self._save(entry.name, {})
                 previous_settings = entry.settings

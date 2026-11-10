@@ -1195,6 +1195,7 @@
       ? el("span", { class: "tag", title: "Saved by Meshgram in its data directory; config.yaml says otherwise" }, "Changed here")
       : null;
     const [panelToggle, panelBody] = pluginPanelParts(plugin);
+    const instances = pluginInstanceControls(plugin);
     const article = el("article", { class: "card plugin-card", "data-plugin": plugin.name, "aria-labelledby": `${settingsId}-title` },
       el("div", { class: "card-head plugin-head" },
         el("div", { class: "plugin-title" },
@@ -1210,12 +1211,65 @@
     disableIfReadOnly(article);
     // After disableIfReadOnly: the panel keeps what doesn't change anything (a search box) usable.
     if (panelBody) article.append(panelBody);
+    if (instances) {
+      disableIfReadOnly(instances);
+      article.append(instances);
+    }
     return article;
   }
 
+  // Plugins that can run more than once: add an instance ("bridge@sos") to the plugin's card,
+  // remove one that was added here from its own.
+  function pluginInstanceControls(plugin) {
+    if (plugin.removable) {
+      const remove = button("Remove this instance", { iconName: "trash", kind: "btn-danger" });
+      remove.dataset.change = "";
+      remove.onclick = async () => {
+        const ok = await confirmDialog({
+          title: `Remove ${plugin.title}?`,
+          text: "It stops, and its settings are deleted.",
+          ok: "Remove",
+          danger: true,
+        });
+        if (!ok) return;
+        const done = await act(remove, async () => {
+          await api("DELETE", `api/plugins/${encodeURIComponent(plugin.name)}`);
+          return true;
+        }, `${plugin.title} removed`);
+        if (!done) return;
+        ui.openPlugins.delete(plugin.name);
+        ui.editors.delete(plugin.name);
+        closePluginPanel(plugin.name);
+        invalidate(["plugins", "channels", "config"]);
+      };
+      return el("div", { class: "plugin-instances" }, remove);
+    }
+    if (!plugin.multi_instance || plugin.instance) return null;
+    const input = el("input", {
+      class: "input", type: "text", placeholder: "Name, such as sos", "aria-label": `Name of another ${plugin.title}`,
+      maxlength: 24, pattern: "[a-z0-9][a-z0-9_]*", autocomplete: "off", spellcheck: "false", style: "max-width:200px",
+    });
+    const add = button("Add another", { iconName: "plus", type: "submit" });
+    add.dataset.change = "";
+    const form = el("form", { class: "plugin-instances input-group", novalidate: true }, input, add,
+      el("span", { class: "hint" }, `A second ${plugin.title.toLowerCase()} with its own settings; it's off until you set it up.`));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const instance = input.value.trim().toLowerCase();
+      if (!instance) { input.focus(); return; }
+      const created = await act(add, () => api("POST", "api/plugins", { plugin: plugin.name, instance }), `${plugin.title} (${instance}) added`);
+      if (!created) return;
+      ui.openPlugins.add(created.name);
+      ui.focusPlugin = created.name;
+      invalidate(["plugins", "config"]);
+    });
+    return form;
+  }
+
   // A plugin's own panel (static/<plugin>.js, see registerPluginPanel), shown while it runs.
+  // Registered by plugin name; a plugin's further instances ("bridge@sos") share its panel.
   function pluginPanelParts(plugin) {
-    const panel = pluginPanels.get(plugin.name);
+    const panel = pluginPanels.get(plugin.name) || pluginPanels.get(plugin.base);
     if (!panel || !plugin.running) {
       closePluginPanel(plugin.name);
       return [null, null];
@@ -1232,7 +1286,7 @@
     let view = ui.panelViews.get(plugin.name);
     if (!view) {
       const container = el("div", { class: "plugin-panel", id });
-      view = { container, handle: panel.render(container, panelKit) || {} };
+      view = { container, handle: panel.render(container, panelKit, plugin) || {} };
       ui.panelViews.set(plugin.name, view);
     }
     return [toggle, view.container];
@@ -1266,7 +1320,8 @@
     const errors = el("ul", { class: "form-errors", role: "alert", hidden: true });
     const save = el("button", { class: "btn btn-sm btn-primary", type: "submit", "data-change": "" }, "Save");
     const cancel = el("button", { class: "btn btn-sm", type: "button" }, "Discard changes");
-    const reset = plugin.overridden.includes("settings")
+    // An instance added here has no config.yaml to go back to: it's removed instead.
+    const reset = plugin.overridden.includes("settings") && !plugin.removable
       ? el("button", { class: "btn btn-sm btn-danger", type: "button", "data-change": "" }, "Reset to config.yaml") : null;
     const form = el("form", { class: "plugin-settings", novalidate: true },
       errors,
@@ -2021,8 +2076,9 @@
   };
 
   window.MeshgramControl = {
-    // ``panel``: { title, render(container, kit) -> { refresh?(), destroy?() } }. Shown in the
-    // plugin's card while it runs; refresh() is called on {"type":"control","what":<name>} events.
+    // ``panel``: { title, render(container, kit, plugin) -> { refresh?(), destroy?() } }. Shown in
+    // the plugin's card (and its instances') while it runs; refresh() is called on
+    // {"type":"control","what":<name>} events.
     registerPluginPanel(name, panel) {
       pluginPanels.set(name, panel);
       if (ui.data.plugins) render("plugins");

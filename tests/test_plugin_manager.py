@@ -1,13 +1,16 @@
 import json
+import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from meshgram.config import PluginConfig
 from meshgram.plugin import BasePlugin
-from meshgram.plugin_manager import PluginManager, PluginOverrideStore, UnknownPluginError
+from meshgram.plugin import plugin_key, resolve_plugin_target, split_instance
+from meshgram.plugin_manager import PluginInstanceError, PluginManager, PluginOverrideStore, UnknownPluginError
 from meshgram.settings_schema import SECRET_MASK, SettingsError
 from meshgram.types import SendTelegramAction
 
@@ -252,6 +255,111 @@ class PluginManagerTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(manager.describe("trace_me")["settings"], {"keywords": ["a"]})
         self.assertEqual([plugin["name"] for plugin in manager.catalog()].count("trace_me"), 1)
+
+
+class PluginInstanceTests(unittest.IsolatedAsyncioTestCase):
+    """More instances of a plugin that allows it: "bridge@sos"."""
+
+    def setUp(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.path = Path(tempdir.name) / "plugins.json"
+        self.host = _Host()
+        patcher = mock.patch.dict(os.environ, {"MESHGRAM_DATA_DIR": tempdir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _manager(self, configs=None) -> PluginManager:
+        return PluginManager(configs if configs is not None else [PluginConfig("bridge")], self.host, PluginOverrideStore(self.path))
+
+    def test_names(self):
+        self.assertEqual(split_instance("bridge@sos"), ("bridge", "sos"))
+        self.assertEqual(split_instance("trace-me"), ("trace_me", None))
+        self.assertEqual(plugin_key("Bridge@SOS".lower()), "bridge@sos")
+        self.assertEqual(plugin_key("bridge@my-sos"), "bridge@my_sos")
+        self.assertEqual(resolve_plugin_target("bridge@sos"), "meshgram.plugins.bridge:BridgePlugin")
+        # Only built-ins have instances; any other name is a module path, taken whole.
+        self.assertEqual(split_instance("my.module@x:Plugin"), ("my.module@x:Plugin", None))
+
+    async def test_instances_from_config_run_next_to_the_plugin(self):
+        manager = self._manager([
+            PluginConfig("bridge", settings={"channel": 0}),
+            PluginConfig("bridge@sos", settings={"channel": 5, "telegram_group_id": -5}),
+        ])
+        await manager.start_all()
+        self.addAsyncCleanup(manager.stop_all)
+        running = dict(manager.running)
+        self.assertEqual(list(running), ["bridge", "bridge@sos"])
+        self.assertIsNone(running["bridge"].instance_id)
+        self.assertEqual(running["bridge@sos"].instance_id, "sos")
+        self.assertEqual(running["bridge@sos"].instance_name, "bridge@sos")
+
+        described = manager.describe("bridge@sos")
+        self.assertEqual(
+            (described["title"], described["base"], described["instance"], described["removable"], described["builtin"]),
+            ("Telegram bridge (sos)", "bridge", "sos", False, True),
+        )
+        self.assertTrue(manager.describe("bridge")["multi_instance"])
+        self.assertFalse(manager.describe("ping_pong")["multi_instance"])
+        # One from config.yaml is removed there.
+        with self.assertRaises(PluginInstanceError):
+            await manager.remove_instance("bridge@sos")
+
+    async def test_a_plugin_that_runs_once_has_no_instances(self):
+        with self.assertLogs("meshgram.plugin_manager", "ERROR"):
+            manager = self._manager([PluginConfig("ping_pong@two"), PluginConfig("bridge@Not OK")])
+        self.assertIn("can't run more than once", manager.describe("ping_pong@two")["error"])
+        self.assertIn("instance name", manager.describe("bridge@not ok")["error"])
+        await manager.start_all()
+        self.assertEqual(manager.running, [])
+        with self.assertRaises(PluginInstanceError):
+            await manager.add_instance("ping_pong", "two")
+        with self.assertRaises(UnknownPluginError):
+            await manager.add_instance("nope", "two")
+
+    async def test_adding_configuring_and_removing_an_instance(self):
+        manager = self._manager()
+        await manager.start_all()
+        self.addAsyncCleanup(manager.stop_all)
+
+        for bad in ("", "has space", "x" * 25, "_lead"):
+            with self.assertRaises(PluginInstanceError, msg=bad):
+                await manager.add_instance("bridge", bad)
+        added = await manager.add_instance("bridge", "SOS")
+        self.assertEqual((added["name"], added["enabled"], added["running"], added["removable"]), ("bridge@sos", False, False, True))
+        with self.assertRaises(PluginInstanceError) as caught:
+            await manager.add_instance("bridge", "sos")
+        self.assertEqual(caught.exception.status, 409)
+        # Listed right after the plugin it's an instance of.
+        names = [plugin["name"] for plugin in manager.catalog()]
+        self.assertEqual(names.index("bridge@sos"), names.index("bridge") + 1)
+
+        # Turned on without a channel it refuses to start: it would double the main bridge.
+        with self.assertLogs("meshgram.plugin_manager", "ERROR"):
+            failed = await manager.update("bridge@sos", enabled=True)
+        self.assertIn("radio channel", failed["error"])
+        updated = await manager.update("bridge@sos", settings={"channel": 5, "telegram_group_id": -5})
+        self.assertTrue(updated["running"])
+        self.assertEqual([name for name, _ in manager.running], ["bridge", "bridge@sos"])
+        with self.assertRaises(PluginInstanceError):
+            await manager.reset("bridge@sos")
+
+        # It's still there, as it was, after a restart; turned off too.
+        again = self._manager()
+        self.assertEqual(again.describe("bridge@sos")["settings"], {"channel": 5, "telegram_group_id": -5})
+        self.assertTrue(again.describe("bridge@sos")["enabled"])
+        await manager.update("bridge@sos", enabled=False)
+        self.assertFalse(self._manager().describe("bridge@sos")["enabled"])
+        self.assertEqual(self._manager().overrides()["bridge@sos"]["enabled"], False)
+
+        await manager.remove_instance("bridge@sos")
+        self.assertEqual([name for name, _ in manager.running], ["bridge"])
+        with self.assertRaises(UnknownPluginError):
+            manager.describe("bridge@sos")
+        with self.assertRaises(UnknownPluginError):
+            self._manager().describe("bridge@sos")
+        with self.assertRaises(PluginInstanceError):
+            await manager.remove_instance("bridge")
 
 
 if __name__ == "__main__":

@@ -97,6 +97,35 @@ plugins:
       # text). Needs the bot to be a group admin: Telegram sends reactions to
       # admin bots only.
       relay_reactions: true
+      # Optional (defaults shown or described):
+      # telegram_group_id:        # another group than telegram.group_id
+      # telegram_bot_token: ""    # a bot of its own; empty: telegram.bot_token
+      # sender_prefix_template:   # empty: telegram.sender_prefix_template
+      # long_messages: split      # or truncate: cut to one radio message
+      # Telegram users (numeric ID or @username) -> the name their messages
+      # carry on the radio, in place of their Telegram first name:
+      # senders:
+      #   "123456789": Thomas
+
+  # The bridge can run more than once: "bridge@<name>" is another bridge with
+  # its own channel and group (and bot, if you like). This one puts a MeshSOS
+  # channel on Telegram: with this sender prefix the boards take a Telegram
+  # message as sent by the person named, so map everyone to their board's
+  # name (the control panel's People panel on this bridge lists who's in the
+  # group, to pick from). See the README: "Sending in someone's name".
+  - name: bridge@sos
+    enabled: false
+    settings:
+      channel: 1                        # required for a further bridge
+      telegram_group_id: -1009876543210
+      # telegram_bot_token: ""
+      sender_prefix_template: "<{display_name}> {message}"
+      long_messages: truncate
+      # Off: on an SOS channel a "reacted 👍 to ..." message would start an alarm.
+      relay_reactions: false
+      senders:
+        "123456789": Thomas
+        "@anna_tg": Anna
 
   - name: ping_pong
     enabled: true

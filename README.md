@@ -10,7 +10,7 @@ Talks to MeshCore companion radios over serial, TCP, and BLE. Runs on Linux, mac
 
 ## ✨ Highlights
 
-- 🔁 Bidirectional message bridge — Telegram ↔ a radio channel
+- 🔁 Bidirectional message bridge — Telegram ↔ a radio channel; more bridges for more channels and groups, and a Telegram fallback for [MeshSOS](https://github.com/neoemit/MeshSOS) alarms
 - ✂️ UTF-8 byte-aware chunking for long messages on radio MTU
 - 🎛️ Web control panel: radio settings, firmware updates (check, pick a version, install over USB), channels (add them by name), contacts, every plugin — turned on/off and configured live — and every other `config.yaml` setting (Telegram bot token and group, radio connection, web app, chunking, logging), applied with a restart from the panel
 - 🧩 Plugin architecture (`bridge`, `ping_pong`, `trace_me`, `dm_http_command`, `meshmapper`, `letsmesh`, `meshrank`, `custom_mqtt`, `packet_map`, `check_in`)
@@ -366,6 +366,69 @@ Settings:
     channel: 1
     relay_reactions: true
 ```
+
+| Setting | Default | What |
+| --- | --- | --- |
+| `channel` | `meshcore.bridge_channel` | The radio channel slot it bridges |
+| `telegram_group_id` | `telegram.group_id` | The Telegram group it bridges |
+| `telegram_bot_token` | the main bot | A bot of its own for this bridge |
+| `sender_prefix_template` | `telegram.sender_prefix_template` | How Telegram messages read on the radio |
+| `senders` | none | Telegram user (numeric ID or `@username`) → the name their messages carry on the radio |
+| `long_messages` | `split` | `split` into numbered chunks, or `truncate` to one radio message |
+| `relay_reactions` | `true` | Relay emoji reactions (see above) |
+
+#### More than one bridge
+
+The bridge can run more than once. Each further bridge is called `bridge@<name>` (lower-case letters, digits, underscores) and has its own settings: add it to `config.yaml`, or in the control panel with **Add another** on the bridge's card (it's off until you give it a channel and turn it on, and **Put it in config.yaml** works for it as for any other change).
+
+```yaml
+plugins:
+  - name: bridge            # the family channel <-> the family group
+    settings:
+      channel: 1
+
+  - name: bridge@sos        # the SOS channel <-> the SOS group
+    settings:
+      channel: 2
+      telegram_group_id: -1009876543210
+```
+
+A further bridge must name its `channel` (it refuses to start otherwise, since it would relay the main bridge's channel twice). It uses the main bot unless it has a `telegram_bot_token` of its own:
+
+- **The same bot:** add the bot to the second group too. Nothing else to set.
+- **Its own bot:** create one with @BotFather and set `telegram_bot_token`. The bridge then polls Telegram with it by itself (shown as its own connection, "Telegram (sos)") and ignores what the main bot hears. Each bot token can only be polled by one program, as for the main bot. A bridge with its own bot relays messages only, not reactions.
+
+Either way the bot has to see the group's messages: make it an admin, or turn its privacy mode off in @BotFather (*Bot Settings → Group Privacy*) and add it to the group again.
+
+#### Sending in someone's name (MeshSOS)
+
+[MeshSOS](https://github.com/neoemit/MeshSOS) boards raise, acknowledge and resolve alarms on a private channel, over LoRa only. A bridge on that channel gives them a second path: every alarm reaches a Telegram group, and what people write there reaches the boards. For the boards to take a Telegram message as *that person's* (so "ack" shows "Thomas is aware", not an alarm from the bridge's radio), the bridge sends it the way chat relay bots do, which MeshSOS 0.3.0 and later understand:
+
+```
+LMB-Bridge: <Thomas> ack
+```
+
+That's the sender prefix `<{display_name}> {message}`, with `senders` saying which board each Telegram user stands for:
+
+```yaml
+  - name: bridge@sos
+    settings:
+      channel: 2                          # the radio's slot for the SOS channel
+      telegram_group_id: -1009876543210   # the SOS group
+      sender_prefix_template: "<{display_name}> {message}"
+      long_messages: truncate             # one radio message each: a chunk can't carry the name
+      relay_reactions: false              # a "reacted 👍 to ..." message would start an alarm
+      senders:
+        "123456789": Thomas               # numeric Telegram ID (never changes) ...
+        "@anna_tg": Anna                  # ... or @username
+        "987654321": Thomas               # several people can stand for the same board
+```
+
+- The easy way to fill in `senders`: open the bridge's **People** panel in the control panel. Everyone who has written in its group since it was set up is listed with their Telegram ID; type (or pick) the board's name next to them and press Save. It applies right away, without a restart.
+- A name must be the board's name exactly as it was given in the MeshSOS flasher (capitals matter), at most 31 characters, without `<`, `>` or `:`.
+- Someone without an entry sends under their Telegram first name, so their "ack" still counts as theirs.
+- Add the SOS channel to Meshgram's radio first (control panel → **Channels** → add it with the same name and key as on the boards), and keep `ping_pong` and the other answering plugins off that channel: on an SOS channel every message that isn't an ACK or RESOLVED word starts an alarm.
+- The bridge's radio is an ordinary MeshCore companion; it needs no MeshSOS firmware.
 
 ### `ping_pong` — keyword auto-responder
 
@@ -919,7 +982,7 @@ meshgram/
 │   ├── web/
 │   │   ├── server.py             # HTTP server, auth/CSRF, SSE event hub
 │   │   ├── api.py                # control panel JSON API
-│   │   └── static/               # the page (index.html), control.js, check_in.js
+│   │   └── static/               # the page (index.html), control.js, check_in.js, bridge.js
 │   └── plugins/
 │       ├── bridge.py
 │       ├── ping_pong.py

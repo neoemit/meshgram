@@ -1,8 +1,12 @@
 import asyncio
+import os
+import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from meshgram.config import MeshgramSettings
-from meshgram.plugins.bridge import BridgePlugin
+from meshgram.plugins.bridge import BridgePlugin, normalize_user, truncate_utf8
 from meshgram.settings_schema import validate
 from meshgram.text_utils import utf8_len
 from meshgram.types import MeshTextEvent, PluginContext, TelegramMessageEvent, TelegramReactionEvent
@@ -213,6 +217,253 @@ class BridgePluginTests(unittest.TestCase):
         validate({"channel": 3}, BridgePlugin.settings_schema)
         with self.assertRaises(ValueError):
             validate({"channel": "three"}, BridgePlugin.settings_schema)
+
+
+SOS = {
+    "channel": 5,
+    "telegram_group_id": -555,
+    "sender_prefix_template": "<{display_name}> {message}",
+    "long_messages": "truncate",
+    "senders": {"1001": "Thomas", "@AnnaTG": "Anna", 1003: "Thomas"},
+}
+
+
+class SosBridgeTests(BridgePluginTests):
+    """A second bridge for an SOS channel: its own group, and messages sent in the sender's name."""
+
+    def setUp(self):
+        super().setUp()
+        self.sos = BridgePlugin(dict(SOS))
+        self.sos.instance_id = "sos"
+
+    def _sos(self, text="ack", payload_limit=120, **fields):
+        fields.setdefault("chat_id", -555)
+        return self._send_telegram(_telegram(text, **fields), payload_limit=payload_limit, plugin=self.sos)
+
+    def test_each_bridge_relays_only_its_own_group_and_channel(self):
+        self.assertEqual(self._sos(chat_id=-999), [])
+        self.assertEqual(self._send_telegram(_telegram(chat_id=-555)), [])
+        actions = self._sos("fire")
+        self.assertEqual([(action.channel_index, action.text) for action in actions], [(5, "<Alice> fire")])
+
+        self.assertEqual(asyncio.run(self.sos.on_mesh_message(_mesh(channel_index=2), self._context())), [])
+        actions = asyncio.run(self.sos.on_mesh_message(_mesh("SOS! Need help. #a3f1", channel_index=5), self._context()))
+        self.assertEqual([(action.chat_id, action.text) for action in actions], [(-555, "[Alpha] SOS! Need help. #a3f1")])
+
+    def test_mapped_users_send_in_their_boards_name(self):
+        self.assertEqual(self._sos(sender_id=1001, sender_display_name="Tom L")[0].text, "<Thomas> ack")
+        # Several Telegram users can share a board.
+        self.assertEqual(self._sos(sender_id=1003, sender_display_name="Other Phone")[0].text, "<Thomas> ack")
+        # By username, whatever its case; the ID wins when both match.
+        self.assertEqual(self._sos(sender_id=7, sender_username="annatg")[0].text, "<Anna> ack")
+        self.assertEqual(self._sos(sender_id=1001, sender_username="AnnaTG")[0].text, "<Thomas> ack")
+        # Nobody's: their Telegram first name.
+        self.assertEqual(self._sos(sender_id=9, sender_display_name="Bob Builder")[0].text, "<Bob> ack")
+
+    def test_mapping_also_names_senders_with_the_usual_prefix(self):
+        plugin = BridgePlugin({"senders": {"1001": "SOS Bench B"}})
+        actions = self._send_telegram(_telegram(sender_id=1001), plugin=plugin)
+        self.assertEqual(actions[0].text, "[SOS Bench B] hello")
+
+    def test_unmapped_names_are_made_safe_for_the_relay_mark(self):
+        self.assertEqual(self._sos(sender_display_name="<A>:B")[0].text, "<AB> ack")
+        self.assertEqual(self._sos(sender_display_name="<>")[0].text, "<Telegram> ack")
+        self.assertEqual(self._sos(sender_display_name="x" * 40)[0].text, f"<{'x' * 31}> ack")
+        # The usual prefix leaves names as they are.
+        self.assertEqual(self._send_telegram(_telegram(sender_display_name="<A>"))[0].text, "[<A>] hello")
+
+    def test_long_messages_are_cut_to_one_radio_message(self):
+        actions = self._sos("help " * 60, payload_limit=60, sender_id=1001)
+        self.assertEqual(len(actions), 1)
+        self.assertIsNone(actions[0].sequence_id)
+        self.assertTrue(actions[0].text.startswith("<Thomas> help help"))
+        self.assertTrue(actions[0].text.endswith("…"))
+        self.assertLessEqual(utf8_len(actions[0].text), 60 - 16)
+
+    def test_reactions_use_the_bridges_own_group_prefix_and_names(self):
+        send = lambda plugin, **fields: asyncio.run(plugin.on_telegram_reaction(_reaction(**fields), self._context(payload_limit=120)))
+        # The main group's reactions aren't the SOS bridge's, and the other way round.
+        self.assertEqual(send(self.sos), [])
+        self.assertEqual(send(self.plugin, chat_id=-555), [])
+        actions = send(self.sos, chat_id=-555, sender_id=1001, message_text=None)
+        self.assertEqual([(action.channel_index, action.text) for action in actions], [(5, "<Thomas> reacted 👍")])
+        # Off, as an SOS bridge should have it: nothing goes out.
+        quiet = BridgePlugin({**SOS, "relay_reactions": False})
+        self.assertEqual(send(quiet, chat_id=-555, sender_id=1001), [])
+
+    def test_truncate_utf8(self):
+        self.assertEqual(truncate_utf8("short", 10), "short")
+        self.assertEqual(truncate_utf8("héllo wörld", 8), "héll…")
+        self.assertLessEqual(utf8_len(truncate_utf8("😀" * 10, 9)), 9)
+
+    def test_normalize_user(self):
+        self.assertEqual(normalize_user("1001"), 1001)
+        self.assertEqual(normalize_user(1001), 1001)
+        self.assertEqual(normalize_user(" @AnnaTG "), "annatg")
+        self.assertIsNone(normalize_user("@"))
+        self.assertIsNone(normalize_user(True))
+
+    def test_settings_schema_for_an_sos_bridge(self):
+        validate({**SOS, "senders": {"1001": "Thomas"}, "telegram_bot_token": "123:abc"}, BridgePlugin.settings_schema)
+        for bad in (
+            {"senders": {"1001": "A>B"}},
+            {"senders": {"1001": "x" * 32}},
+            {"long_messages": "drop"},
+            {"telegram_group_id": "-555"},
+            {"telegram_bot_token": "nope"},
+        ):
+            with self.assertRaises(ValueError, msg=bad):
+                validate(bad, BridgePlugin.settings_schema)
+
+
+class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.dir = tempdir.name
+        patcher = mock.patch.dict(os.environ, {"MESHGRAM_DATA_DIR": tempdir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.settings = MeshgramSettings(telegram_bot_token="1:main", telegram_group_id=-999, config_path="config.yaml", plugins=[])
+        self.executed = []
+
+    async def _execute(self, actions, plugin_name):
+        self.executed.append((plugin_name, [action.text for action in actions]))
+
+    def _context(self):
+        return PluginContext(
+            settings=self.settings, telegram_group_id=-999, mesh_payload_limit=120, local_node_id=None,
+            execute_actions=self._execute,
+        )
+
+    async def _started(self, settings, instance_id="sos"):
+        plugin = BridgePlugin(dict(settings))
+        plugin.instance_id = instance_id
+        await plugin.on_startup(self._context())
+        self.addAsyncCleanup(plugin.on_shutdown)
+        return plugin
+
+    async def test_an_added_bridge_needs_its_own_channel(self):
+        plugin = BridgePlugin({})
+        plugin.instance_id = "sos"
+        with self.assertRaisesRegex(ValueError, "radio channel"):
+            await plugin.on_startup(self._context())
+        # The bridge itself still falls back to meshcore.bridge_channel.
+        await self._started({}, instance_id=None)
+
+    async def test_people_seen_in_the_group_are_remembered(self):
+        plugin = await self._started(SOS)
+        self.assertEqual(plugin.instance_name, "bridge@sos")
+        await plugin.on_telegram_message(_telegram("ack", chat_id=-555, sender_id=1001, sender_username="tom", sender_display_name="Tom  L"), self._context())
+        await plugin.on_telegram_message(_telegram("x", chat_id=-555, sender_id=9, sender_display_name="Bob"), self._context())
+        await plugin.on_telegram_message(_telegram("x", chat_id=-999, sender_id=8, sender_display_name="Elsewhere"), self._context())
+        await plugin.on_mesh_message(_mesh("SOS!", channel_index=5), self._context())
+
+        people = plugin.people()
+        self.assertEqual({person["id"]: (person["name"], person["username"], person["radio_name"]) for person in people["people"]},
+                         {1001: ("Tom L", "tom", "Thomas"), 9: ("Bob", None, None)})
+        self.assertEqual(people["nodes"], ["Alpha", "Thomas", "Anna"])
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "bridge_sos_people.json")))
+
+        # They're still known after a restart, and each bridge keeps its own.
+        again = await self._started(SOS)
+        self.assertEqual({person["id"] for person in again.people()["people"]}, {1001, 9})
+        other = await self._started({"channel": 1}, instance_id=None)
+        self.assertEqual(other.people()["people"], [])
+
+    async def test_new_senders_apply_without_a_restart(self):
+        plugin = await self._started(SOS)
+        self.assertTrue(await plugin.apply_settings({**SOS, "senders": {"9": "Bob Board"}}))
+        actions = await plugin.on_telegram_message(_telegram("ack", chat_id=-555, sender_id=9), self._context())
+        self.assertEqual(actions[0].text, "<Bob Board> ack")
+        # Another bot, or no channel any more, needs a restart.
+        self.assertFalse(await plugin.apply_settings({**SOS, "telegram_bot_token": "2:other"}))
+        self.assertFalse(await plugin.apply_settings({key: value for key, value in SOS.items() if key != "channel"}))
+        self.assertEqual(plugin.settings["senders"], {"9": "Bob Board"})
+
+    async def test_the_main_bots_token_is_not_a_bot_of_its_own(self):
+        plugin = await self._started({**SOS, "telegram_bot_token": "1:main"})
+        self.assertIsNone(plugin._own_bot_task)
+        actions = await plugin.on_telegram_message(_telegram("ack", chat_id=-555), self._context())
+        self.assertEqual(len(actions), 1)
+
+    async def test_a_bridge_with_its_own_bot_reads_and_writes_through_it(self):
+        sent = []
+
+        class FakeBot:
+            username = "sos_bot"
+
+            async def send_message(self, chat_id, text):
+                sent.append((chat_id, text))
+
+            async def get_me(self):
+                return self
+
+        class FakeUpdater:
+            running = False
+
+            async def start_polling(self, **kwargs):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        class FakeApplication:
+            def __init__(self):
+                self.bot, self.updater, self.running, self.handlers, self.stopped = FakeBot(), FakeUpdater(), False, [], False
+
+            def add_handler(self, handler):
+                self.handlers.append(handler)
+
+            async def initialize(self):
+                pass
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+            async def shutdown(self):
+                self.stopped = True
+
+        application = FakeApplication()
+        tokens = []
+
+        class FakeBuilder:
+            def token(self, token):
+                tokens.append(token)
+                return self
+
+            def build(self):
+                return application
+
+        with mock.patch("telegram.ext.ApplicationBuilder", FakeBuilder):
+            plugin = await self._started({**SOS, "telegram_bot_token": "2:sos"})
+            for _ in range(5):
+                await asyncio.sleep(0)
+        self.assertEqual(tokens, ["2:sos"])
+        self.assertIs(plugin._own_bot, application)
+
+        # The app's bot isn't this bridge's: what it hears is ignored, even from the same group.
+        self.assertEqual(await plugin.on_telegram_message(_telegram("ack", chat_id=-555, sender_id=1001), self._context()), [])
+
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=-555), message_id=4, text="ack", caption=None,
+            from_user=SimpleNamespace(id=1001, full_name="Tom L", username="tom", is_bot=False),
+        )
+        await plugin._on_own_bot_update(SimpleNamespace(effective_message=message), None)
+        self.assertEqual(self.executed, [("bridge@sos", ["<Thomas> ack"])])
+
+        self.assertEqual(await plugin.on_telegram_reaction(_reaction(chat_id=-555), self._context()), [])
+
+        # Radio -> Telegram goes out through its own bot, not as an action for the app's.
+        self.assertEqual(await plugin.on_mesh_message(_mesh("SOS!", channel_index=5), self._context()), [])
+        self.assertEqual(sent, [(-555, "[Alpha] SOS!")])
+
+        await plugin.on_shutdown()
+        self.assertTrue(application.stopped)
+        self.assertFalse(application.updater.running)
 
 
 if __name__ == "__main__":

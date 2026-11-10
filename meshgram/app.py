@@ -8,7 +8,7 @@ import sys
 import time
 from typing import AsyncIterator, Optional
 
-from telegram import ChatMember, ChatMemberUpdated, Message, ReactionTypeEmoji, Update
+from telegram import ChatMember, ChatMemberUpdated, ReactionTypeEmoji, Update
 from telegram.error import NetworkError
 from telegram.ext import (
     Application,
@@ -35,6 +35,7 @@ from .core_settings import SETTINGS_FILE, CoreSettings, SettingsOverrideStore, c
 from .firmware import FIRMWARE_FILE, FirmwareCatalog, FirmwareUpdater
 from .plugin_manager import OVERRIDES_FILE, PluginManager, PluginOverrideStore
 from .radio_admin import RadioAdmin
+from .telegram_events import event_from_message
 from .status import CONNECTED, CONNECTING, DISCONNECTED, StatusRegistry
 from .telegram_texts import TELEGRAM_TEXT_CACHE_SIZE, TELEGRAM_TEXTS_FILE, TelegramTextCache
 from .transport import MeshCoreTransport, RadioCommandError
@@ -356,46 +357,12 @@ class MeshgramApp:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        message = update.effective_message
-        if not message:
+        event = event_from_message(update.effective_message)
+        if event is None:
             return
 
-        chat = message.chat
-        if not chat:
-            return
-
-        text: Optional[str] = None
-        text_source: Optional[str] = None
-
-        if message.text is not None:
-            text = message.text
-            text_source = "text"
-        elif message.caption is not None:
-            text = message.caption
-            text_source = "caption"
-
-        from_user = message.from_user
-        sender_display_name = "Unknown"
-        is_from_bot = False
-        if from_user is not None:
-            sender_display_name = (
-                from_user.full_name or from_user.username or str(from_user.id)
-            )
-            is_from_bot = bool(from_user.is_bot)
-
-        if text is not None:
-            self._remember_telegram_text(chat.id, message.message_id, text)
-
-        event = TelegramMessageEvent(
-            chat_id=chat.id,
-            message_id=message.message_id,
-            text=text,
-            text_source=text_source,
-            is_from_bot=is_from_bot,
-            sender_display_name=sender_display_name,
-            has_media=_message_has_media(message),
-            raw_message=message,
-        )
+        if event.text is not None:
+            self._remember_telegram_text(event.chat_id, event.message_id, event.text)
 
         await self._dispatch_telegram_message(event)
 
@@ -436,10 +403,14 @@ class MeshgramApp:
 
         sender_display_name = "Unknown"
         is_from_bot = False
+        sender_id: Optional[int] = None
+        sender_username: Optional[str] = None
         if reaction.user is not None:
             user = reaction.user
             sender_display_name = user.full_name or user.username or str(user.id)
             is_from_bot = bool(user.is_bot)
+            sender_id = user.id
+            sender_username = user.username or None
         elif reaction.actor_chat is not None:
             # An anonymous admin, reacting on behalf of the group or a channel.
             sender_display_name = reaction.actor_chat.title or str(reaction.actor_chat.id)
@@ -452,6 +423,8 @@ class MeshgramApp:
             sender_display_name=sender_display_name,
             message_text=self._telegram_texts.get(reaction.chat.id, reaction.message_id),
             raw_reaction=reaction,
+            sender_id=sender_id,
+            sender_username=sender_username,
         )
         await self._dispatch_telegram_reaction(event)
 
@@ -671,25 +644,6 @@ class MeshgramApp:
 
 # ---------------------------------------------------------------------------
 # Telegram-side helpers
-
-def _message_has_media(message: Message) -> bool:
-    media_fields = (
-        "animation",
-        "audio",
-        "document",
-        "photo",
-        "sticker",
-        "video",
-        "video_note",
-        "voice",
-    )
-
-    for field in media_fields:
-        value = getattr(message, field, None)
-        if value:
-            return True
-    return False
-
 
 def _is_connection_error(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionError, TimeoutError, OSError, EOFError))
