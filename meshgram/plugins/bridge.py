@@ -10,6 +10,10 @@ of its own (``telegram_bot_token``).
 write it, which MeshSOS boards read as sent by that name (see MeshSOS's
 SosProtocol.h): that's how a Telegram group stands in for the boards when the
 radio path is down.
+
+In "sos" mode the group isn't a chat at all: a SosDesk (meshgram/sos_desk.py) shows every
+alarm with ACK and Resolved buttons, keeps an SOS button pinned, and sends nothing that
+is typed to the radio.
 """
 from __future__ import annotations
 
@@ -22,11 +26,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from meshgram import sos_desk
 from meshgram.config import data_dir
 from meshgram.plugin import CHANNEL_FORMAT, BasePlugin
 from meshgram.status import CONNECTED, CONNECTING, DISCONNECTED
 from meshgram.storage import write_private_json
-from meshgram.telegram_events import event_from_message
+from meshgram.telegram_events import button_event_from_query, event_from_message
 from meshgram.telegram_texts import TELEGRAM_TEXT_CACHE_SIZE
 from meshgram.text_utils import split_for_mesh, utf8_len
 from meshgram.types import (
@@ -35,6 +40,7 @@ from meshgram.types import (
     PluginContext,
     SendMeshAction,
     SendTelegramAction,
+    TelegramButtonEvent,
     TelegramMessageEvent,
     TelegramReactionEvent,
 )
@@ -47,6 +53,9 @@ RELAY_TEMPLATE = "<{display_name}> {message}"
 # What MeshSOS accepts as a name (SosProtocol.h: MAX_NAME_LEN, no ':' and no angle brackets).
 MAX_NODE_NAME_LENGTH = 31
 NODE_NAME_PATTERN = r"^[^<>:\r\n]+$"
+
+MODE_CHAT = "chat"
+MODE_SOS = "sos"
 
 LONG_SPLIT = "split"
 LONG_TRUNCATE = "truncate"
@@ -65,7 +74,8 @@ class BridgePlugin(BasePlugin):
         "Relays messages between a Telegram group and one radio channel. Long Telegram "
         "messages are split into numbered chunks that fit in a radio packet. Emoji reactions "
         "in Telegram go out as a short message quoting the message reacted to (when Meshgram saw it). "
-        "Add another bridge for a second channel and group (an SOS channel, say)."
+        "Add another bridge for a second channel and group; in MeshSOS mode that group works an "
+        "SOS channel with buttons."
     )
     multi_instance = True
     settings_schema = {
@@ -80,6 +90,20 @@ class BridgePlugin(BasePlugin):
                 "description": (
                     "The channel bridged to the Telegram group. Empty: meshcore.bridge_channel from "
                     "config.yaml (an added bridge must name its own)."
+                ),
+            },
+            "mode": {
+                "type": "string",
+                "enum": [MODE_CHAT, MODE_SOS],
+                "x-enum-titles": ["Chat: relay what people write", "MeshSOS: buttons only"],
+                "default": MODE_CHAT,
+                "title": "Mode",
+                "description": (
+                    "MeshSOS, for a channel of MeshSOS boards: every alarm appears in the group with ACK and "
+                    "Resolved buttons, and a pinned message has the SOS button. A press goes out on the radio "
+                    "in the name of whoever pressed (see People). Nothing typed in the group is sent, so a "
+                    "stray message can't start an alarm; the sender prefix, long-message and reaction "
+                    "settings below don't apply. Let the bot pin messages in the group."
                 ),
             },
             "relay_reactions": {
@@ -170,6 +194,7 @@ class BridgePlugin(BasePlugin):
         self._own_bot_token = ""
         self._own_bot: Any = None  # telegram.ext.Application
         self._own_bot_task: Optional[asyncio.Task[None]] = None
+        self._desk: Optional[sos_desk.SosDesk] = None
 
     # --- Settings ---------------------------------------------------------------------------------
 
@@ -199,7 +224,13 @@ class BridgePlugin(BasePlugin):
             return ""
         return token
 
+    @property
+    def _sos_mode(self) -> bool:
+        return self.settings.get("mode") == MODE_SOS
+
     def _template(self, context: PluginContext) -> str:
+        if self._sos_mode:
+            return RELAY_TEMPLATE
         template = self.settings.get("sender_prefix_template")
         if isinstance(template, str) and template.strip():
             return template
@@ -286,7 +317,43 @@ class BridgePlugin(BasePlugin):
         if self._own_bot_token:
             self._set_bot_status(CONNECTING, "Starting bot")
             self._own_bot_task = asyncio.create_task(self._run_own_bot(self._own_bot_token))
+        if self._sos_mode:
+            self._desk = sos_desk.SosDesk(
+                label=self.instance_name,
+                state_path=data_dir() / f"bridge{suffix}_sos.json",
+                bot=self._telegram_bot,
+                chat_id=lambda: self._group_id(self._context),
+                send_mesh=self._send_sos_text,
+                radio_online=self._radio_online,
+                radio_name=lambda event: self._radio_name(event, RELAY_TEMPLATE),
+            )
+            await self._desk.start()
         return []
+
+    def _telegram_bot(self) -> Any:
+        """The bot this bridge talks through; None while it isn't there."""
+        if self._own_bot_token:
+            return self._own_bot.bot if self._own_bot is not None else None
+        return getattr(self._context, "telegram_bot", None)
+
+    def _radio_online(self) -> bool:
+        status = getattr(self._context, "status", None)
+        return status is None or status.get("radio")["state"] == CONNECTED
+
+    async def _send_sos_text(self, text: str) -> None:
+        context = self._context
+        if context is None or context.execute_actions is None:
+            return
+        chunking = context.settings.chunking
+        action = SendMeshAction(
+            text=text,
+            channel_index=self._bridge_channel(context),
+            retry_max_attempts=chunking.retry_max_attempts,
+            retry_initial_delay_ms=chunking.retry_initial_delay_ms,
+            retry_backoff_factor=chunking.retry_backoff_factor,
+        )
+        LOGGER.info("%s: sending on channel %s: %s", self.instance_name, action.channel_index, text)
+        await context.execute_actions([action], self.instance_name)
 
     async def on_mesh_connected(self, transport: Any, context: PluginContext) -> None:
         self._context = context
@@ -297,6 +364,9 @@ class BridgePlugin(BasePlugin):
                 self._web.remove_route(route)
         self._routes = []
         self._web = None
+        desk, self._desk = self._desk, None
+        if desk is not None:
+            await desk.stop()
         task, self._own_bot_task = self._own_bot_task, None
         if task is not None:
             task.cancel()
@@ -315,11 +385,13 @@ class BridgePlugin(BasePlugin):
             return False
         previous = self.settings
         self.settings = settings
-        if self._configured_bot_token(context) != self._own_bot_token or (
-            self.instance_id is not None and settings.get("channel") is None
+        if (
+            self._configured_bot_token(context) != self._own_bot_token
+            or (self.instance_id is not None and settings.get("channel") is None)
+            or self._sos_mode != (self._desk is not None)
         ):
             self.settings = previous
-            return False  # Another bot (or none), or nothing to bridge: start over.
+            return False  # Another bot (or none), another mode, or nothing to bridge: start over.
         self._load_senders()
         self._announce()
         return True
@@ -335,7 +407,7 @@ class BridgePlugin(BasePlugin):
         """Start polling with the bridge's own bot; keeps trying while Telegram can't be reached."""
         from telegram import Update
         from telegram.error import InvalidToken, TelegramError
-        from telegram.ext import ApplicationBuilder, MessageHandler, filters
+        from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
 
         while True:
             application = None
@@ -348,6 +420,7 @@ class BridgePlugin(BasePlugin):
                         self._on_own_bot_update,
                     )
                 )
+                application.add_handler(CallbackQueryHandler(self._on_own_bot_button))
                 await application.initialize()
                 await application.start()
                 await application.updater.start_polling(
@@ -403,11 +476,21 @@ class BridgePlugin(BasePlugin):
             username = self._own_bot.bot.username
             self._set_bot_status(CONNECTED, f"@{username}" if username else "Bot API reachable")
         try:
-            actions = self._relay_telegram(event, context)
+            actions = await self._handle_telegram(event, context)
             if actions and context.execute_actions is not None:
                 await context.execute_actions(actions, self.instance_name)
         except Exception:
             LOGGER.exception("%s failed handling a Telegram message", self.instance_name)
+
+    async def _on_own_bot_button(self, update: Any, _context: Any) -> None:
+        event = button_event_from_query(update.callback_query)
+        context = self._context
+        if event is None or context is None:
+            return
+        try:
+            await self._handle_button(event, context)
+        except Exception:
+            LOGGER.exception("%s failed handling a Telegram button", self.instance_name)
 
     # --- Radio -> Telegram ------------------------------------------------------------------------
 
@@ -429,6 +512,9 @@ class BridgePlugin(BasePlugin):
             return []
 
         self._note_node(event.sender_label)
+        if self._desk is not None:
+            await self._desk.on_mesh(event.sender_label, text)
+            return []
         action = SendTelegramAction(chat_id=self._group_id(context), text=f"[{event.sender_label}] {text}")
         if not self._own_bot_token:
             return [action]
@@ -450,7 +536,32 @@ class BridgePlugin(BasePlugin):
         self._context = context
         if self._own_bot_token:
             return []  # Its group is read by its own bot (_on_own_bot_update).
-        return self._relay_telegram(event, context)
+        return await self._handle_telegram(event, context)
+
+    async def on_telegram_button(
+        self,
+        event: TelegramButtonEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        self._context = context
+        if not self._own_bot_token:
+            await self._handle_button(event, context)
+        return []
+
+    async def _handle_button(self, event: TelegramButtonEvent, context: PluginContext) -> None:
+        if self._desk is None or event.chat_id != self._group_id(context) or not event.data.startswith(sos_desk.PREFIX):
+            return
+        self._note_person(event)
+        await self._desk.on_button(event)
+
+    async def _handle_telegram(self, event: TelegramMessageEvent, context: PluginContext) -> list[PluginAction]:
+        if self._desk is None:
+            return self._relay_telegram(event, context)
+        if event.chat_id != self._group_id(context) or event.is_from_bot:
+            return []
+        self._note_person(event)
+        await self._desk.on_typed(event)
+        return []
 
     def _relay_telegram(self, event: TelegramMessageEvent, context: PluginContext) -> list[PluginAction]:
         if event.chat_id != self._group_id(context):
@@ -549,8 +660,8 @@ class BridgePlugin(BasePlugin):
         context: PluginContext,
     ) -> list[PluginAction]:
         self._context = context
-        if self._own_bot_token:
-            return []  # The app's bot isn't this bridge's; its own bot relays messages only.
+        if self._own_bot_token or self._sos_mode:
+            return []  # The app's bot isn't this bridge's (its own relays no reactions); nor are they SOS traffic.
 
         if not self.settings.get("relay_reactions", True):
             LOGGER.info("Reaction to Telegram message %s not relayed: relay_reactions is off", event.message_id)
@@ -615,7 +726,9 @@ class BridgePlugin(BasePlugin):
             )
         ]
 
-    def _radio_name(self, event: TelegramMessageEvent | TelegramReactionEvent, template: str) -> str:
+    def _radio_name(
+        self, event: TelegramMessageEvent | TelegramReactionEvent | TelegramButtonEvent, template: str
+    ) -> str:
         """The sender's name on the radio: the one ``senders`` gives them, else their Telegram first name."""
         mapped = self.mapped_name(event.sender_id, event.sender_username)
         if mapped:
@@ -666,7 +779,7 @@ class BridgePlugin(BasePlugin):
         except OSError as exc:
             LOGGER.warning("%s: can't save %s (%s)", self.instance_name, self._people_path, exc)
 
-    def _note_person(self, event: TelegramMessageEvent) -> None:
+    def _note_person(self, event: TelegramMessageEvent | TelegramButtonEvent) -> None:
         if event.sender_id is None:
             return
         known = self._people.get(event.sender_id)

@@ -108,21 +108,21 @@ plugins:
       #   "123456789": Thomas
 
   # The bridge can run more than once: "bridge@<name>" is another bridge with
-  # its own channel and group (and bot, if you like). This one puts a MeshSOS
-  # channel on Telegram: with this sender prefix the boards take a Telegram
-  # message as sent by the person named, so map everyone to their board's
-  # name (the control panel's People panel on this bridge lists who's in the
-  # group, to pick from). See the README: "Sending in someone's name".
+  # its own channel and group (and bot, if you like).
+  # This one is for a MeshSOS channel (github.com/neoemit/MeshSOS). In
+  # mode "sos" its Telegram group is worked with buttons: every alarm shows
+  # with ACK and Resolved buttons, a pinned message has the SOS button, and
+  # nothing typed in the group reaches the radio. A press goes out in the
+  # name of whoever pressed, so map everyone to their board's name (the
+  # control panel's People panel on this bridge lists who's in the group).
+  # See the README: "A MeshSOS channel, worked with buttons".
   - name: bridge@sos
     enabled: false
     settings:
       channel: 1                        # required for a further bridge
       telegram_group_id: -1009876543210
       # telegram_bot_token: ""
-      sender_prefix_template: "<{display_name}> {message}"
-      long_messages: truncate
-      # Off: on an SOS channel a "reacted 👍 to ..." message would start an alarm.
-      relay_reactions: false
+      mode: sos
       senders:
         "123456789": Thomas
         "@anna_tg": Anna

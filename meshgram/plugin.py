@@ -9,6 +9,7 @@ from .types import (
     MeshTextEvent,
     PluginAction,
     PluginContext,
+    TelegramButtonEvent,
     TelegramMessageEvent,
     TelegramReactionEvent,
 )
@@ -98,6 +99,15 @@ class BasePlugin:
         event: TelegramReactionEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
+        return []
+
+    async def on_telegram_button(
+        self,
+        event: TelegramButtonEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        """A button under one of the bot's messages was pressed. Every plugin hears every press:
+        act on your own buttons only (by their callback data), and answer the press."""
         return []
 
     async def on_mesh_message(

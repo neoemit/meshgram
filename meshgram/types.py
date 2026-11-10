@@ -56,6 +56,25 @@ class TelegramReactionEvent:
 
 
 @dataclass(slots=True)
+class TelegramButtonEvent:
+    """Someone pressed a button under one of the bot's messages (a callback query).
+
+    The plugin that put the button there answers it (``answer_callback_query`` with
+    ``query_id``), which is also what stops the button's spinner.
+    """
+
+    chat_id: int
+    message_id: int
+    # The button's callback data.
+    data: str
+    query_id: str
+    sender_display_name: str
+    sender_id: Optional[int] = None
+    sender_username: Optional[str] = None
+    raw_query: Any = None
+
+
+@dataclass(slots=True)
 class MeshTextEvent:
     from_id: Optional[str]
     # The local node for direct messages; None for channel messages.
@@ -113,6 +132,9 @@ class PluginContext:
     # Runs actions outside a hook (``execute_actions(actions, plugin_name)``), for plugins
     # that act on something other than a message: an RX log listener, a timer.
     execute_actions: Optional[Callable[[list["PluginAction"], str], Awaitable[None]]] = None
+    # The app's Telegram bot (python-telegram-bot's ``Bot``), for what a SendTelegramAction
+    # can't do: buttons, editing a message, answering a button press.
+    telegram_bot: Any = None
 
 
 class Plugin(Protocol):
@@ -131,6 +153,13 @@ class Plugin(Protocol):
     async def on_telegram_reaction(
         self,
         event: TelegramReactionEvent,
+        context: PluginContext,
+    ) -> list[PluginAction]:
+        ...
+
+    async def on_telegram_button(
+        self,
+        event: TelegramButtonEvent,
         context: PluginContext,
     ) -> list[PluginAction]:
         ...

@@ -80,7 +80,7 @@
 
     function show(data, current) {
       if (destroyed) return;
-      const relays = (current.settings.sender_prefix_template || "").includes("<{display_name}>");
+      const relays = current.settings.mode === "sos" || (current.settings.sender_prefix_template || "").includes("<{display_name}>");
       const rows = data.people.map(personRow);
       const body = rows.length
         ? el("div", { class: "table-scroll" },
@@ -89,11 +89,11 @@
               ...["Telegram user", "ID", "Last message", "Radio name"].map((label) => el("th", { scope: "col" }, label)),
               el("th", { scope: "col", class: "actions" }, el("span", { class: "sr-only" }, "Actions")))),
             el("tbody", {}, ...rows)))
-        : el("p", { class: "hint" }, "Nobody has written in this bridge's Telegram group since it started. Ask everyone to send a message there; they then appear here.");
+        : el("p", { class: "hint" }, "Nobody has written or pressed a button in this bridge's Telegram group since it started. Ask everyone to do so once; they then appear here.");
       const parts = [
         el("p", { class: "hint", style: "margin-bottom:10px" },
           "Give a person the name their messages carry on the radio; for MeshSOS, the name of their board. Several people can share one name."),
-        relays ? null : kit.notice("info", `MeshSOS boards only treat a message as that person's when the bridge's sender prefix is ${RELAY_TEMPLATE} (in its settings).`),
+        relays ? null : kit.notice("info", `MeshSOS boards only treat a message as that person's when the bridge's mode is MeshSOS, or its sender prefix is ${RELAY_TEMPLATE} (in its settings).`),
         body,
         el("datalist", { id: listId }, ...data.nodes.map((name) => el("option", { value: name }))),
       ];

@@ -14,6 +14,7 @@ from telegram.ext import (
     Application,
     ApplicationBuilder,
     BaseHandler,
+    CallbackQueryHandler,
     ChatMemberHandler,
     ContextTypes,
     MessageHandler,
@@ -35,7 +36,7 @@ from .core_settings import SETTINGS_FILE, CoreSettings, SettingsOverrideStore, c
 from .firmware import FIRMWARE_FILE, FirmwareCatalog, FirmwareUpdater
 from .plugin_manager import OVERRIDES_FILE, PluginManager, PluginOverrideStore
 from .radio_admin import RadioAdmin
-from .telegram_events import event_from_message
+from .telegram_events import button_event_from_query, event_from_message
 from .status import CONNECTED, CONNECTING, DISCONNECTED, StatusRegistry
 from .telegram_texts import TELEGRAM_TEXT_CACHE_SIZE, TELEGRAM_TEXTS_FILE, TelegramTextCache
 from .transport import MeshCoreTransport, RadioCommandError
@@ -46,6 +47,7 @@ from .types import (
     PluginContext,
     SendMeshAction,
     SendTelegramAction,
+    TelegramButtonEvent,
     TelegramMessageEvent,
     TelegramReactionEvent,
 )
@@ -230,6 +232,7 @@ class MeshgramApp:
             status=self.status,
             web=self.web,
             execute_actions=self.execute_actions,
+            telegram_bot=self.bot_app.bot if self.bot_app is not None else None,
         )
 
     def connected_transport(self) -> Optional[MeshCoreTransport]:
@@ -440,6 +443,28 @@ class MeshgramApp:
 
             await self.execute_actions(actions, name)
 
+    async def _handle_telegram_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        event = button_event_from_query(update.callback_query)
+        if event is None:
+            return
+        await self._dispatch_telegram_button(event)
+
+    async def _dispatch_telegram_button(self, event: TelegramButtonEvent) -> None:
+        context = self.plugin_context()
+
+        for name, plugin in self.plugins.running:
+            # Plugins from before buttons existed (not built on BasePlugin) have no such hook.
+            handler = getattr(plugin, "on_telegram_button", None)
+            if handler is None:
+                continue
+            try:
+                actions = await handler(event, context)
+            except Exception:
+                LOGGER.exception("Plugin %s failed handling a Telegram button", name)
+                continue
+
+            await self.execute_actions(actions, name)
+
     def _remember_telegram_text(self, chat_id: int, message_id: int, text: str) -> None:
         self._telegram_texts.remember(chat_id, message_id, text)
         if self._telegram_text_save_task is None or self._telegram_text_save_task.done():
@@ -616,6 +641,8 @@ class MeshgramApp:
                 self._handle_telegram_reaction,
                 message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED,
             ),
+            # A button under one of the bot's messages (the bridge's MeshSOS mode).
+            CallbackQueryHandler(self._handle_telegram_button),
             # Promoted or demoted: only admins get reactions.
             ChatMemberHandler(self._handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER),
         ]
