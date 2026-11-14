@@ -43,6 +43,13 @@ MAX_SENDS = 5
 CONFIRM_SECONDS = 30.0
 # Someone typing gets pointed to the buttons at most this often.
 HINT_SECONDS = 20.0
+# When Telegram can't say whether the SOS button message is still there, it's asked again this
+# much later, twice as long after each failure up to the maximum.
+PANEL_RETRY_SECONDS = 30.0
+PANEL_RETRY_MAX_SECONDS = 30 * 60.0
+# What Telegram answers about a message that isn't there any more (deleted), or that this bot
+# can't edit (posted by another bot): only then is the SOS button posted and pinned anew.
+GONE_ERRORS = ("message to edit not found", "message_id_invalid", "message can't be edited")
 TICK_SECONDS = 1.0
 CLOSED_MEMORY = 32
 MAX_NAMES = 500
@@ -118,6 +125,8 @@ class SosDesk:
         self._names: dict[int, str] = {}
         self._panel_id: Optional[int] = None
         self._panel_checked = False
+        self._panel_retry_at = 0.0
+        self._panel_retry_delay = PANEL_RETRY_SECONDS
         self._questions: dict[str, Question] = {}
         self._last_hint = 0.0
         self._task: Optional[asyncio.Task[None]] = None
@@ -151,9 +160,9 @@ class SosDesk:
     async def tick(self) -> None:
         """One round of what time brings: the pinned panel, unanswered questions, SOS repeats."""
         async with self._lock:
-            if not self._panel_checked and self._bot() is not None:
-                await self._ensure_panel()
             now = self._now()
+            if not self._panel_checked and now >= self._panel_retry_at and self._bot() is not None:
+                await self._ensure_panel()
             for question in [item for item in self._questions.values() if item.expires <= now]:
                 await self._drop_question(question)
             emergency = self._emergency
@@ -492,24 +501,40 @@ class SosDesk:
         await self._edit(emergency.message_id, "🚨 <b>SOS</b>\nThere is more: see the newer message below.")
 
     async def _ensure_panel(self) -> None:
-        """Keep one message with the SOS button, pinned when the bot may pin."""
-        self._panel_checked = True
+        """Keep one message with the SOS button, pinned when the bot may pin.
+
+        Checked on every start. A new one is posted and pinned only when Telegram says the old
+        one is gone: a freshly pinned SOS message looks like an emergency to the whole group. When
+        Telegram doesn't answer (no network, Telegram down, flood control) it's asked again later.
+        """
         bot = self._bot()
-        keyboard = _markup([[(SOS_LABEL, SOS)]])
         if self._panel_id is not None:
             try:
+                # Edited to what it already says: Telegram answers "not modified" while it's there.
                 await bot.edit_message_text(
-                    chat_id=self._chat_id(), message_id=self._panel_id, text=PANEL_TEXT, parse_mode="HTML", reply_markup=keyboard
+                    chat_id=self._chat_id(),
+                    message_id=self._panel_id,
+                    text=PANEL_TEXT,
+                    parse_mode="HTML",
+                    reply_markup=_markup([[(SOS_LABEL, SOS)]]),
                 )
-                return
             except Exception as exc:
                 if "not modified" in str(exc).lower():
-                    return  # It's there, and says what it should.
+                    self._panel_checked = True  # It's there, and says what it should.
+                    return
+                if not _gone(exc):
+                    self._retry_panel(f"can't check the message with the SOS button ({exc})")
+                    return
                 LOGGER.info("%s: its SOS button message is gone (%s); posting a new one", self._label, exc)
-        self._panel_id = await self._send(PANEL_TEXT, keyboard=[[(SOS_LABEL, SOS)]], quiet=True)
-        if self._panel_id is None:
-            self._panel_checked = False  # Telegram unreachable: try again next round.
+            else:
+                self._panel_checked = True  # It's there, and now says what it should.
+                return
+        panel_id = await self._send(PANEL_TEXT, keyboard=[[(SOS_LABEL, SOS)]], quiet=True)
+        if panel_id is None:
+            self._retry_panel("can't post the message with the SOS button")
             return
+        self._panel_id = panel_id
+        self._panel_checked = True
         self._save()
         try:
             await bot.pin_chat_message(chat_id=self._chat_id(), message_id=self._panel_id, disable_notification=True)
@@ -519,6 +544,12 @@ class SosDesk:
                 self._label,
                 exc,
             )
+
+    def _retry_panel(self, problem: str) -> None:
+        delay = self._panel_retry_delay
+        self._panel_retry_at = self._now() + delay
+        self._panel_retry_delay = min(delay * 2, PANEL_RETRY_MAX_SECONDS)
+        LOGGER.warning("%s: %s; trying again in %.0fs", self._label, problem, delay)
 
     async def _drop_question(self, question: Question) -> None:
         self._questions.pop(question.token, None)
@@ -641,6 +672,12 @@ def _markup(keyboard: list[list[tuple[str, str]]]) -> Any:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(label, callback_data=data) for label, data in row] for row in keyboard]
     )
+
+
+def _gone(exc: Exception) -> bool:
+    """True when Telegram said the message isn't there (or isn't ours to edit), not that it couldn't answer."""
+    text = str(exc).lower()
+    return any(fragment in text for fragment in GONE_ERRORS)
 
 
 def _clean_name(display_name: Any) -> str:
