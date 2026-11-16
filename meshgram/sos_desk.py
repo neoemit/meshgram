@@ -47,9 +47,13 @@ HINT_SECONDS = 20.0
 # much later, twice as long after each failure up to the maximum.
 PANEL_RETRY_SECONDS = 30.0
 PANEL_RETRY_MAX_SECONDS = 30 * 60.0
-# What Telegram answers about a message that isn't there any more (deleted), or that this bot
-# can't edit (posted by another bot): only then is the SOS button posted and pinned anew.
-GONE_ERRORS = ("message to edit not found", "message_id_invalid", "message can't be edited")
+# What Telegram answers to an edit of a message that isn't there any more (deleted): only then is
+# the SOS button posted and pinned anew.
+GONE_ERRORS = ("message to edit not found", "message_id_invalid")
+# What it answers about a message that is there: unchanged, or one it won't edit (too old, say).
+THERE_ERRORS = ("not modified", "message can't be edited")
+GONE = "gone"
+THERE = "there"
 TICK_SECONDS = 1.0
 CLOSED_MEMORY = 32
 MAX_NAMES = 500
@@ -504,31 +508,39 @@ class SosDesk:
         """Keep one message with the SOS button, pinned when the bot may pin.
 
         Checked on every start. A new one is posted and pinned only when Telegram says the old
-        one is gone: a freshly pinned SOS message looks like an emergency to the whole group. When
+        one is gone: a freshly pinned SOS message looks like an emergency to the whole group.
+        The group's pinned message answers first, whatever its age and even when the saved state
+        was lost; an edit to what it already says answers for one that's been unpinned. When
         Telegram doesn't answer (no network, Telegram down, flood control) it's asked again later.
         """
         bot = self._bot()
+        try:
+            chat = await bot.get_chat(chat_id=self._chat_id())
+        except Exception as exc:
+            self._retry_panel(f"can't ask Telegram about the message with the SOS button ({exc})")
+            return
+        pinned = getattr(chat, "pinned_message", None)
+        if pinned is not None and (pinned.message_id == self._panel_id or _is_panel(pinned, bot)):
+            if pinned.message_id != self._panel_id:
+                LOGGER.info("%s: the pinned message %s has the SOS button; keeping it", self._label, pinned.message_id)
+                self._panel_id = pinned.message_id
+                self._save()
+            self._panel_checked = True
+            # Brought up to date when this version words it differently; it stays either way.
+            error = await self._edit_panel(bot)
+            if error is not None and _telegram_says(error) != THERE:
+                LOGGER.info("%s: Telegram didn't update the message with the SOS button (%s)", self._label, error)
+            return
         if self._panel_id is not None:
-            try:
-                # Edited to what it already says: Telegram answers "not modified" while it's there.
-                await bot.edit_message_text(
-                    chat_id=self._chat_id(),
-                    message_id=self._panel_id,
-                    text=PANEL_TEXT,
-                    parse_mode="HTML",
-                    reply_markup=_markup([[(SOS_LABEL, SOS)]]),
-                )
-            except Exception as exc:
-                if "not modified" in str(exc).lower():
-                    self._panel_checked = True  # It's there, and says what it should.
-                    return
-                if not _gone(exc):
-                    self._retry_panel(f"can't check the message with the SOS button ({exc})")
-                    return
-                LOGGER.info("%s: its SOS button message is gone (%s); posting a new one", self._label, exc)
-            else:
-                self._panel_checked = True  # It's there, and now says what it should.
+            error = await self._edit_panel(bot)
+            answer = THERE if error is None else _telegram_says(error)
+            if answer == THERE:
+                self._panel_checked = True
                 return
+            if answer != GONE:
+                self._retry_panel(f"can't check the message with the SOS button ({error})")
+                return
+            LOGGER.info("%s: its SOS button message is gone (%s); posting a new one", self._label, error)
         panel_id = await self._send(PANEL_TEXT, keyboard=[[(SOS_LABEL, SOS)]], quiet=True)
         if panel_id is None:
             self._retry_panel("can't post the message with the SOS button")
@@ -544,6 +556,20 @@ class SosDesk:
                 self._label,
                 exc,
             )
+
+    async def _edit_panel(self, bot: Any) -> Optional[Exception]:
+        """Edit the SOS button message to what it should say; Telegram's refusal, if it refused."""
+        try:
+            await bot.edit_message_text(
+                chat_id=self._chat_id(),
+                message_id=self._panel_id,
+                text=PANEL_TEXT,
+                parse_mode="HTML",
+                reply_markup=_markup([[(SOS_LABEL, SOS)]]),
+            )
+        except Exception as exc:
+            return exc
+        return None
 
     def _retry_panel(self, problem: str) -> None:
         delay = self._panel_retry_delay
@@ -674,10 +700,26 @@ def _markup(keyboard: list[list[tuple[str, str]]]) -> Any:
     )
 
 
-def _gone(exc: Exception) -> bool:
-    """True when Telegram said the message isn't there (or isn't ours to edit), not that it couldn't answer."""
+def _telegram_says(exc: Exception) -> Optional[str]:
+    """What a refused edit tells about the message: GONE, THERE, or None when Telegram didn't answer."""
     text = str(exc).lower()
-    return any(fragment in text for fragment in GONE_ERRORS)
+    if any(fragment in text for fragment in GONE_ERRORS):
+        return GONE
+    if any(fragment in text for fragment in THERE_ERRORS):
+        return THERE
+    return None
+
+
+def _is_panel(message: Any, bot: Any) -> bool:
+    """A message of this bot's with the SOS button: the panel, when the saved state lost its id."""
+    try:
+        bot_id = bot.id
+    except Exception:
+        return False
+    sender = getattr(getattr(message, "from_user", None), "id", None)
+    markup = getattr(message, "reply_markup", None)
+    rows = getattr(markup, "inline_keyboard", None) or ()
+    return sender is not None and sender == bot_id and any(button.callback_data == SOS for row in rows for button in row)
 
 
 def _clean_name(display_name: Any) -> str:

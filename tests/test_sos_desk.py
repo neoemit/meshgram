@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,18 +13,44 @@ from meshgram.types import TelegramButtonEvent, TelegramMessageEvent
 class FakeBot:
     """Records what the desk asks of Telegram."""
 
+    id = 42
+
     def __init__(self):
-        self.messages = {}  # message_id -> {"text", "buttons", "reply_to"}
+        self.messages = {}  # message_id -> {"text", "buttons", "reply_to", "sender"}
         self.deleted = []
         self.answers = []  # (query_id, text, alert)
-        self.pinned = []
+        self.pinned = []  # pinned message IDs, newest last
         self.next_id = 100
         self.fail_pin = False
+        self.down = None  # raised by every call while set: Telegram unreachable
         self.edit_error = None  # raised by every edit while set
         self.send_error = None  # raised by every send while set
-        self.edits = 0
+        self.chat_requests = 0
+
+    def _check(self):
+        if self.down is not None:
+            raise self.down
+
+    async def get_chat(self, chat_id):
+        self.chat_requests += 1
+        self._check()
+        # Like Telegram: the newest pinned message, a deleted one being unpinned with it.
+        pinned = next((mid for mid in reversed(self.pinned) if mid in self.messages), None)
+        if pinned is None:
+            return SimpleNamespace(pinned_message=None)
+        message = self.messages[pinned]
+        rows = [[SimpleNamespace(text=label, callback_data=data) for label, data in message["buttons"]]]
+        return SimpleNamespace(
+            pinned_message=SimpleNamespace(
+                message_id=pinned,
+                text=message["text"],
+                from_user=SimpleNamespace(id=message["sender"]),
+                reply_markup=SimpleNamespace(inline_keyboard=rows) if message["buttons"] else None,
+            )
+        )
 
     async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, **kwargs):
+        self._check()
         if self.send_error is not None:
             raise self.send_error
         self.next_id += 1
@@ -31,11 +58,21 @@ class FakeBot:
             "text": text,
             "buttons": _buttons(reply_markup),
             "reply_to": kwargs.get("reply_to_message_id"),
+            "sender": self.id,
         }
         return SimpleNamespace(message_id=self.next_id)
 
+    def post_as_user(self, text, user_id=7):
+        """A message someone in the group wrote."""
+        self.next_id += 1
+        self.messages[self.next_id] = {"text": text, "buttons": [], "reply_to": None, "sender": user_id}
+        return self.next_id
+
+    def unpin(self, message_id):
+        self.pinned.remove(message_id)
+
     async def edit_message_text(self, chat_id, message_id, text, parse_mode=None, reply_markup=None):
-        self.edits += 1
+        self._check()
         if self.edit_error is not None:
             raise self.edit_error
         if message_id not in self.messages:
@@ -52,6 +89,7 @@ class FakeBot:
         self.answers.append((callback_query_id, text, show_alert))
 
     async def pin_chat_message(self, chat_id, message_id, disable_notification=False):
+        self._check()
         if self.fail_pin:
             raise RuntimeError("not enough rights")
         self.pinned.append(message_id)
@@ -140,21 +178,22 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.bot.find("MeshSOS")), 1)
         self.assertNotEqual(self.bot.find("MeshSOS"), [panel])
 
-    async def test_panel_is_not_posted_again_when_telegram_does_not_answer(self):
-        # A restart while Telegram is unreachable or busy: the pinned SOS button stays as it is,
-        # since a new pin in the group reads as an emergency.
+    async def test_panel_is_left_alone_when_telegram_does_not_answer(self):
+        # A restart while Telegram is unreachable or busy (the VM rebooting, say): the pinned SOS
+        # button stays as it is, since a new pin in the group reads as an emergency.
         for error in (
             "Timed out",
             "Bad Gateway",
             "httpx.ConnectError: All connection attempts failed",
             "Flood control exceeded. Retry in 7 seconds",
             "Forbidden: bot was kicked from the supergroup chat",
+            "Not Found",
         ):
             with self.subTest(error=error):
                 self.setUp()
                 await self.desk.tick()
                 (panel,) = self.bot.find("MeshSOS")
-                self.bot.edit_error = RuntimeError(error)
+                self.bot.down = RuntimeError(error)
                 self.desk = self._desk()  # a restart
                 with self.assertLogs("meshgram.sos_desk", level="WARNING"):
                     await self.desk.tick()
@@ -162,29 +201,95 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.bot.pinned, [panel])
 
                 # Asked again later, not every round.
-                edits = self.bot.edits
+                requests = self.bot.chat_requests
                 self.clock += 1
                 await self.desk.tick()
-                self.assertEqual(self.bot.edits, edits)
+                self.assertEqual(self.bot.chat_requests, requests)
                 self.clock += sos_desk.PANEL_RETRY_SECONDS
                 with self.assertLogs("meshgram.sos_desk", level="WARNING"):
                     await self.desk.tick()
-                self.assertEqual(self.bot.edits, edits + 1)
+                self.assertEqual(self.bot.chat_requests, requests + 1)
 
                 # Telegram answers again: the panel is there, so nothing new is posted or pinned.
-                self.bot.edit_error = None
+                self.bot.down = None
                 self.clock += 2 * sos_desk.PANEL_RETRY_SECONDS
                 await self.desk.tick()
-                self.assertEqual(self.bot.edits, edits + 2)
+                self.assertEqual(self.bot.chat_requests, requests + 2)
                 self.clock += sos_desk.PANEL_RETRY_MAX_SECONDS
                 await self.desk.tick()
-                self.assertEqual(self.bot.edits, edits + 2)
+                self.assertEqual(self.bot.chat_requests, requests + 2)
                 self.assertEqual(self.bot.find("MeshSOS"), [panel])
                 self.assertEqual(self.bot.pinned, [panel])
 
+    async def test_an_old_panel_telegram_wont_edit_stays(self):
+        # Telegram may refuse to edit an old message: that says it's there, not that it's gone.
+        for pinned in (True, False):
+            with self.subTest(pinned=pinned):
+                self.setUp()
+                await self.desk.tick()
+                (panel,) = self.bot.find("MeshSOS")
+                if not pinned:
+                    self.bot.unpin(panel)
+                self.bot.edit_error = RuntimeError("Message can't be edited")
+                self.desk = self._desk()
+                with self.assertNoLogs("meshgram.sos_desk", level="WARNING"):
+                    await self.desk.tick()
+                    self.clock += sos_desk.PANEL_RETRY_MAX_SECONDS
+                    await self.desk.tick()
+                self.assertEqual(self.bot.find("MeshSOS"), [panel])
+                self.assertEqual(self.bot.pinned, [panel] if pinned else [])
+
+    async def test_an_unpinned_panel_stays_unpinned_and_its_failed_check_is_retried(self):
+        await self.desk.tick()
+        (panel,) = self.bot.find("MeshSOS")
+        self.bot.unpin(panel)
+        self.bot.edit_error = RuntimeError("Timed out")
+        self.desk = self._desk()
+        with self.assertLogs("meshgram.sos_desk", level="WARNING"):
+            await self.desk.tick()
+        self.bot.edit_error = None
+        self.clock += sos_desk.PANEL_RETRY_SECONDS
+        await self.desk.tick()
+        self.assertEqual(self.bot.find("MeshSOS"), [panel])
+        self.assertEqual(self.bot.pinned, [])
+
+    async def test_the_pinned_panel_is_kept_when_the_saved_state_is_lost(self):
+        for lose in ("deleted", "corrupt"):
+            with self.subTest(lose=lose):
+                self.setUp()
+                await self.desk.tick()
+                (panel,) = self.bot.find("MeshSOS")
+                if lose == "deleted":
+                    self.path.unlink()
+                else:
+                    self.path.write_text("", encoding="utf-8")
+                with self.assertLogs("meshgram.sos_desk", level="INFO"):
+                    self.desk = self._desk()
+                    await self.desk.tick()
+                self.assertEqual(self.bot.find("MeshSOS"), [panel])
+                self.assertEqual(self.bot.pinned, [panel])
+                self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["panel_message_id"], panel)
+
+    async def test_someone_elses_pinned_message_is_not_taken_for_the_panel(self):
+        pinned = self.bot.post_as_user("MeshSOS: house rules")
+        self.bot.pinned.append(pinned)
+        await self.desk.tick()
+        (panel,) = [mid for mid in self.bot.find("MeshSOS") if mid != pinned]
+        self.assertEqual(self.bot.pinned, [pinned, panel])
+
+    async def test_a_reworded_panel_is_updated_where_it_is(self):
+        await self.desk.tick()
+        (panel,) = self.bot.find("MeshSOS")
+        self.bot.messages[panel]["text"] = "🆘 MeshSOS (as an older version put it)"
+        self.desk = self._desk()
+        await self.desk.tick()
+        self.assertEqual(self.bot.messages[panel]["text"], sos_desk.PANEL_TEXT)
+        self.assertEqual(self.bot.find("MeshSOS"), [panel])
+        self.assertEqual(self.bot.pinned, [panel])
+
     async def test_panel_waits_longer_after_each_unanswered_check(self):
         await self.desk.tick()
-        self.bot.edit_error = RuntimeError("Timed out")
+        self.bot.down = RuntimeError("Timed out")
         self.desk = self._desk()
         delays = []
         with self.assertLogs("meshgram.sos_desk", level="WARNING"):
@@ -195,16 +300,6 @@ class SosDeskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delays[:3], [sos_desk.PANEL_RETRY_SECONDS * factor for factor in (1, 2, 4)])
         self.assertEqual(delays[-1], sos_desk.PANEL_RETRY_MAX_SECONDS)
         self.assertEqual(len(self.bot.pinned), 1)
-
-    async def test_panel_another_bot_posted_is_replaced(self):
-        await self.desk.tick()
-        (panel,) = self.bot.find("MeshSOS")
-        self.bot.edit_error = RuntimeError("Message can't be edited")
-        self.desk = self._desk()
-        await self.desk.tick()
-        self.assertEqual(len(self.bot.find("MeshSOS")), 2)
-        self.assertEqual(len(self.bot.pinned), 2)
-        self.assertNotEqual(self.bot.pinned[-1], panel)
 
     async def test_panel_is_posted_later_when_telegram_does_not_take_it(self):
         self.bot.send_error = RuntimeError("Timed out")
