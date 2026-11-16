@@ -248,7 +248,7 @@ const MeshgramAR = (() => {
   const ar = {
     open: false, dialog: null, ui: {}, w: 0, h: 0, dpr: 1,
     stream: null, cameraError: null,
-    pos: null, geoError: null, geoWatch: null, declination: 0, ground: null,
+    pos: null, geoError: null, geoWhy: null, geoRetried: false, geoWatch: null, declination: 0, ground: null,
     raw: null, rawAt: 0, absolute: false, yaw: null, compassAccuracy: null, motion: "granted", basis: null, lastFrame: 0,
     targets: new Map(), sorted: [], selected: null, sheet: null, aligning: false,
     freq: DEFAULT_FREQ_MHZ, losBusy: false, losAgain: false, timer: null, wakeLock: null, raf: 0, startedAt: 0,
@@ -364,7 +364,7 @@ const MeshgramAR = (() => {
     ui.fix = el("span", {}, "Waiting for location…");
     ui.listBtn = el("button", { class: "ar-btn ar-pill", type: "button", "aria-label": "Nodes in range", title: "Nodes in range", html: svg(SVG.list), onclick: () => toggleSheet("list") });
     ui.settingsBtn = el("button", { class: "ar-btn ar-pill", type: "button", "aria-label": "AR settings", title: "AR settings", html: icon("sliders"), onclick: () => toggleSheet("settings") });
-    ui.notice = el("div", { class: "ar-notice ar-pill", role: "status", hidden: true });
+    ui.notice = el("div", { class: "ar-notice ar-pill", role: "status", hidden: true, onclick: () => { if (ar.geoError && !ar.pos) watchLocation(); } });
     ui.guide = el("button", { class: "ar-guide ar-pill", type: "button", hidden: true, onclick: () => ar.selected && showDetail(ar.selected) });
     ui.radar = el("canvas", { width: 232, height: 232, "aria-hidden": "true" });
     ui.summary = el("b", {}, "");
@@ -452,17 +452,16 @@ const MeshgramAR = (() => {
       try { ar.motion = await DeviceOrientationEvent.requestPermission(); } catch { ar.motion = "denied"; }
     }
     if (!ar.dialog) build();
-    Object.assign(ar, { open: true, raw: null, basis: null, absolute: false, yaw: null, compassAccuracy: null, ground: null, pos: null, geoError: null, cameraError: null, startedAt: Date.now(), lastFrame: 0 });
+    Object.assign(ar, { open: true, raw: null, basis: null, absolute: false, yaw: null, compassAccuracy: null, ground: null, pos: null, geoError: null, geoWhy: null, geoRetried: false, cameraError: null, startedAt: Date.now(), lastFrame: 0 });
     ar.dialog.showModal();
     resize();
     window.addEventListener("resize", resize);
     window.addEventListener("deviceorientationabsolute", onOrientation);
     window.addEventListener("deviceorientation", onOrientation);
     document.addEventListener("visibilitychange", onVisibility);
-    startCamera();
     keepAwake();
-    ar.geoWatch = navigator.geolocation.watchPosition(onPosition, (error) => { ar.geoError = error; tick(); },
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 30000 });
+    // One permission question at a time: browsers may drop a second one asked meanwhile.
+    startCamera().then(() => { if (ar.open) watchLocation(); });
     fetch("/api/radio").then((response) => (response.ok ? response.json() : null)).then((overview) => {
       const freq = overview && overview.radio && Number(overview.radio.freq);
       if (freq > 100) { ar.freq = freq; ar.targets.forEach((target) => { target.losKey = null; }); runLos(); }
@@ -561,6 +560,38 @@ const MeshgramAR = (() => {
     ar.raw = { alpha, beta: event.beta, gamma: event.gamma };
     ar.rawAt = Date.now();
   }
+
+  function watchLocation() {
+    if (ar.geoWatch !== null) navigator.geolocation.clearWatch(ar.geoWatch);
+    ar.geoError = null;
+    ar.geoWhy = null;
+    ar.geoWatch = navigator.geolocation.watchPosition(onPosition, onPositionError, { enableHighAccuracy: true, maximumAge: 2000, timeout: 30000 });
+    tick();
+  }
+
+  // "Permission denied" has several causes that look the same to the user: find which.
+  async function onPositionError(error) {
+    ar.geoError = error;
+    if (error.code === 1) {
+      const policy = document.permissionsPolicy || document.featurePolicy;
+      let permission = null;
+      try { permission = (await navigator.permissions.query({ name: "geolocation" })).state; } catch { /* not every browser tells */ }
+      if (policy && typeof policy.allowsFeature === "function" && !policy.allowsFeature("geolocation")) ar.geoWhy = "policy";
+      else if (permission === "granted") ar.geoWhy = "system";
+      else if (permission === "denied") ar.geoWhy = "site";
+      else ar.geoWhy = "unknown";
+      // Refused without the user having been asked (another question was open): ask once more.
+      if (permission === "prompt" && !ar.geoRetried) { ar.geoRetried = true; setTimeout(() => { if (ar.open && !ar.pos) watchLocation(); }, 1200); }
+    }
+    tick();
+  }
+
+  const GEO_REFUSED = {
+    policy: "Location is switched off for this page by a Permissions-Policy header, which Meshgram doesn't send: the reverse proxy in front of it does. Allow geolocation=(self) and camera=(self) there.",
+    system: "This site may use your location, but the phone isn't giving it to the browser. Turn on location (Location Services) for this browser app in the phone's settings, then tap here.",
+    site: "Location is blocked for this site in the browser. Allow it in the site's settings (the icon by the address), then tap here.",
+    unknown: "The browser refused to give the location. Check that location is on for this browser app in the phone's settings and allowed for this site, then tap here.",
+  };
 
   function onPosition(position) {
     const c = position.coords;
@@ -868,7 +899,7 @@ const MeshgramAR = (() => {
     const waited = Date.now() - ar.startedAt > 3000;
     let notice = null;
     if (ar.motion !== "granted" && !ar.raw) notice = "Motion sensor access was refused, so the view can't follow the phone. Close the AR view, reload the page and allow \"Motion & Orientation Access\".";
-    else if (ar.geoError && !pos) notice = ar.geoError.code === 1 ? "Location access was refused. Allow it for this site in the browser's settings." : "No location fix yet. It works best outdoors.";
+    else if (ar.geoError && !pos) notice = ar.geoError.code === 1 ? GEO_REFUSED[ar.geoWhy || "unknown"] : "No location fix yet (it works best outdoors). Tap here to try again.";
     else if (!ar.raw && waited) notice = "This device isn't reporting which way it points (no compass or motion sensor).";
     else if (ar.cameraError) notice = ar.cameraError.name === "NotAllowedError" ? "Camera access was refused; the labels are shown without the picture." : "The camera couldn't be started; the labels are shown without the picture.";
     else if (ar.raw && !ar.absolute) notice = "No compass on this device: line the view up yourself (settings › Align compass).";
