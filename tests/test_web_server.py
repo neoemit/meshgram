@@ -69,6 +69,9 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         status, headers, body = await http(server.port, "GET", "/control.js")
         self.assertEqual((status, headers["content-type"]), (200, "text/javascript; charset=utf-8"))
         self.assertIn(b"MeshgramControl", body)
+        status, headers, body = await http(server.port, "GET", "/ar.js")
+        self.assertEqual((status, headers["content-type"]), (200, "text/javascript; charset=utf-8"))
+        self.assertIn(b"MeshgramAR", body)
 
         status, _, _ = await http(server.port, "GET", "/nope")
         self.assertEqual(status, 404)
